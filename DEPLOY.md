@@ -159,7 +159,8 @@ bash ./start_wx_api.sh --wx-only
 启动后检查接口：
 
 ```bash
-curl -sS http://127.0.0.1:9880/
+# 注意：根路径 "/" 可能返回 400（业务行为），不代表服务异常
+curl -sS http://127.0.0.1:9880/coloring/health
 curl -sS http://127.0.0.1:9881/readalong/health
 ```
 
@@ -211,6 +212,66 @@ curl -sS http://127.0.0.1:9881/readalong/health
 ### 9.4 Windows 无法执行 `bash`
 
 - 安装 Git for Windows，使用 Git Bash 执行 `start_wx_api.sh`。
+- 若 PowerShell 提示 `bash` 找不到，但 Git 已安装，可显式调用：
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc "cd /d/部署测试/test/FVR_deploy_run && ./start_wx_api.sh"
+```
+
+### 9.5 Release 下载卡住 / 中断 / 文件被占用
+
+现象：
+
+- `bootstrap_from_release.ps1` 长时间停在 `Downloading ...`
+- 报错：`OutFile ... is being used by another process`
+
+处理建议：
+
+1. 先结束残留下载进程，再清理 `.release_tmp` 后重试。
+2. 确认代理可用（尤其是 `127.0.0.1:7890` 是否监听）。
+3. 若网络不稳定，使用本地同批 Release 包离线安装（与线上解压结果等价）。
+
+离线安装示例（Windows）：
+
+```powershell
+# 假设已在 d:\部署测试\release_packages 下准备好分卷包
+python -c "import zipfile,shutil;from pathlib import Path;root=Path(r'd:\部署测试\test\FVR_deploy_run');rel=Path(r'd:\部署测试\release_packages');g=root/'GPT_SoVITS';a=root/'assets';shutil.rmtree(g,ignore_errors=True);shutil.rmtree(a,ignore_errors=True);g.mkdir(parents=True,exist_ok=True);a.mkdir(parents=True,exist_ok=True);[zipfile.ZipFile(rel/n).extractall(g) for n in ['GPT_SoVITS_part01.zip','GPT_SoVITS_part02.zip','GPT_SoVITS_part03.zip','GPT_SoVITS_part04.zip']];zipfile.ZipFile(rel/'assets_release.zip').extractall(a);print('ok')"
+```
+
+### 9.6 代理已开但 GitHub 仍偶发连接重置
+
+- 先检查代理端口是否监听：
+
+```powershell
+Test-NetConnection 127.0.0.1 -Port 7890
+```
+
+- 建议在执行下载脚本前显式设置代理环境变量：
+
+```powershell
+$env:HTTP_PROXY="http://127.0.0.1:7890"
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+$env:ALL_PROXY="http://127.0.0.1:7890"
+```
+
+- 若仍失败，优先走上面的“离线安装”兜底方案，再启动服务。
+
+### 9.7 小程序静态图 `404`（`/static/miniprogram_assets/images/...`）
+
+现象（日志）：
+
+- `GET /static/miniprogram_assets/images/... 404 Not Found`
+
+原因：
+
+- 部署目录缺少 `static/miniprogram_assets` 映射所需文件，或资源未按后端约定路径放置。
+
+处理：
+
+1. 确认 `assets` 已正确解压（包含小程序图片资源）。
+2. 检查后端静态路由对应目录是否存在这些图片文件。
+3. 若使用自定义资源目录，需同步修改前端 `asset-url` 配置与后端静态映射路径。
+4. 修复后重启 `start_wx_api.sh` 并重新请求对应图片 URL。
 
 ---
 
