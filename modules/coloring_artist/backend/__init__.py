@@ -1,0 +1,2 @@
+"""Coloring Artist backend package."""
+

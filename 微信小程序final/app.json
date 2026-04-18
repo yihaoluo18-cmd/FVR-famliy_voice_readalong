@@ -1,0 +1,76 @@
+{
+  "pages": [
+    "pages/home/home",
+    "pages/pet-system/pet-system",
+    "pages/pet-detail/pet-detail",
+    "pages/books/books",
+    "pages/play/play",
+    "pages/voice/voice",
+    "pages/voice-manage/voice-manage",
+    "pages/companion/companion",
+    "pages/auth/auth",
+    "pages/read/read",
+    "pages/ai-story/ai-story",
+    "pages/ai-story-view/ai-story-view",
+    "pages/color/color",
+    "pages/speaker/speaker",
+    "pages/profile-edit/profile-edit",
+    "pages/growth/growth",
+    "pages/check-in/check-in",
+    "pages/my-favorites/my-favorites",
+    "pages/ar-face/ar-face",
+    "pages/ar-color/ar-color"
+  ],
+  "window": {
+    "backgroundTextStyle": "light",
+    "navigationBarBackgroundColor": "#e8a0b8",
+    "navigationBarTitleText": "FVR.亲声伴读园",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#fff5f7"
+  },
+  "tabBar": {
+    "color": "#c9a8b5",
+    "selectedColor": "#f0a8c0",
+    "backgroundColor": "#fff8fb",
+    "borderStyle": "white",
+    "list": [
+      {
+        "pagePath": "pages/home/home",
+        "text": "首页",
+        "iconPath": "/assets/icons/home.png", 
+        "selectedIconPath": "/assets/icons/home-active.png" 
+      },
+      {
+        "pagePath": "pages/books/books",
+        "text": "绘本馆",
+        "iconPath": "/assets/icons/book.png", 
+        "selectedIconPath": "/assets/icons/book-active.png" 
+      },
+      {
+        "pagePath": "pages/play/play",
+        "text": "游乐园",
+        "iconPath": "/assets/icons/play.png", 
+        "selectedIconPath": "/assets/icons/play-active.png" 
+      },
+      {
+        "pagePath": "pages/voice/voice",
+        "text": "魔法音",
+        "iconPath": "/assets/icons/voice.png", 
+        "selectedIconPath": "/assets/icons/voice-active.png" 
+
+      },
+      {
+        "pagePath": "pages/auth/auth",
+        "text": "我的",
+        "iconPath": "/assets/icons/mine.png", 
+        "selectedIconPath": "/assets/icons/mine-active.png" 
+      }
+    ]
+  },
+  "style": "v2",
+  "usingComponents": {
+    "global-voice-panel": "/components/global-voice-panel/index"
+  },
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

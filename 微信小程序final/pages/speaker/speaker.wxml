@@ -1,0 +1,132 @@
+<view class="container">
+  <!-- 粉色顶部横幅 -->
+  <view class="header-banner">
+    <view class="mic-icon-box">
+      <text class="mic-icon">🎤</text>
+    </view>
+    <text class="page-title">小小演说家</text>
+    <text class="subtitle">看图说话得奖励 ⭐</text>
+
+    <!-- 模式切换 -->
+    <view class="mode-switch">
+      <view class="mode-pill {{mode==='bank' ? 'active' : ''}}" bindtap="switchMode" data-mode="bank">
+        <text class="mode-text">题库配图</text>
+      </view>
+      <view class="mode-pill {{mode==='album' ? 'active' : ''}}" bindtap="switchMode" data-mode="album">
+        <text class="mode-text">自己选图</text>
+      </view>
+    </view>
+    
+    <!-- 进度条区域（移到顶部横幅内） -->
+    <view class="progress-bar-container">
+      <text class="progress-label">题目进度</text>
+      <view class="progress-bar">
+        <view class="progress-fill" style="width: {{progressPercent}}%"></view>
+      </view>
+      <text class="progress-text">{{currentQuestion}} / {{totalQuestions}}</text>
+    </view>
+  </view>
+
+  <!-- 题库：横向选择条（只显示已生成图片的题目） -->
+  <view class="bank-strip" wx:if="{{mode==='bank'}}">
+    <scroll-view scroll-x class="bank-scroll">
+      <view class="bank-item" wx:for="{{generatedIds}}" wx:key="*this" bindtap="selectQuestion" data-qid="{{item}}">
+        <image class="bank-thumb" src="{{apiBaseUrl + imageIndex[item]}}" mode="aspectFill" />
+        <text class="bank-qid">{{item}}</text>
+      </view>
+    </scroll-view>
+  </view>
+
+  <!-- 图片卡片 -->
+  <view class="image-card">
+    <image 
+      class="story-image" 
+      src="{{currentImage}}"
+      mode="aspectFill"
+    />
+    <!-- 右上角刷新按钮 -->
+    <view class="refresh-button" bindtap="refreshImage">
+      <image class="refresh-icon" src="{{speakerRefreshIcon}}" mode="widthFix" />
+    </view>
+    <view class="image-prompt">
+      <text class="prompt-text">{{mode==='bank' ? (currentItem ? currentItem.title : '题库问题') : '看看这张图片，你能说出什么故事呢？'}}</text>
+      <text class="prompt-sub">{{captionLoading ? 'AI 识别中...' : (caption ? caption : captionHint)}}</text>
+    </view>
+  </view>
+
+  <!-- 题库问题卡片（更明确的演讲提示词/问题布局） -->
+  <view class="question-card" wx:if="{{mode==='bank' && currentItem}}">
+    <view class="qc-header">
+      <text class="qc-title">{{currentItem.title}}</text>
+      <view class="qc-tag" wx:if="{{currentItem.tags && currentItem.tags.length}}">
+        <text class="qc-tag-text">{{currentItem.tags[0]}}</text>
+      </view>
+    </view>
+    <text class="qc-intro">{{currentItem.intro}}</text>
+    <view class="qc-tips" wx:if="{{currentItem.tips && currentItem.tips.length}}">
+      <text class="qc-tips-title">💡 你可以这样讲：</text>
+      <view class="qc-tips-list">
+        <text class="qc-tip" wx:for="{{currentItem.tips}}" wx:key="*this">• {{item}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 录音按钮 -->
+  <view class="record-section">
+    <view 
+      class="record-button {{isRecording ? 'recording' : ''}}"
+      bindtap="toggleRecording"
+    >
+      <text class="record-icon">{{isRecording ? '⏸' : '🎤'}}</text>
+    </view>
+    <text class="record-hint">{{isRecording ? '录音中...' : '点击开始讲故事'}}</text>
+    
+    <view class="timer" wx:if="{{isRecording}}">
+      <text class="timer-text">{{recordTime}}s</text>
+    </view>
+  </view>
+
+  <!-- 提示卡片 -->
+  <view class="tips-card" wx:if="{{mode==='album'}}">
+    <text class="tips-title">💡 讲故事小贴士：</text>
+    <view class="tips-list">
+      <text class="tip-item">• 可以描述图片中看到的东西</text>
+      <text class="tip-item">• 可以编一个有趣的故事</text>
+      <text class="tip-item">• 说出你的想法和感受</text>
+      <text class="tip-item">• 声音清晰可以获得更多星星</text>
+    </view>
+  </view>
+
+  <!-- 完成按钮 -->
+  <view 
+    class="finish-button {{hasRecorded ? '' : 'disabled'}}"
+    bindtap="finishSpeaking"
+  >
+    <text class="finish-text">{{evaluating ? 'AI正在打分...' : '完成演说 · 计入游乐园'}}</text>
+  </view>
+
+  <!-- 评分弹窗（AI 评分结果） -->
+  <view class="score-modal" wx:if="{{showScore}}">
+    <view class="score-card">
+      <view class="score-icon">🏅</view>
+      <text class="score-title">评价结果</text>
+      <view class="score-value">
+        <text class="score-number">{{aiScore}}</text>
+        <text class="score-unit">分</text>
+      </view>
+      <view class="stars-display">
+        <text wx:for="{{[0,1,2,3,4]}}" wx:key="*this" class="star {{item < fullStars ? 'full' : ''}}">⭐</text>
+      </view>
+      <view class="feedback-box">
+        <text class="feedback-positive">🎉 {{evalResult && evalResult.feedback ? evalResult.feedback : '真棒！继续加油！'}}</text>
+        <text class="feedback-tip" wx:if="{{evalResult && evalResult.transcript}}">我听到：{{evalResult.transcript}}</text>
+      </view>
+      <view class="reward-box">
+        <text class="reward-text">✨ 星星在「玩」页按今日进度累计 ⭐</text>
+      </view>
+      <view class="next-button" bindtap="nextQuestion">
+        <text class="next-text">继续下一题 🎯</text>
+      </view>
+    </view>
+  </view>
+</view>

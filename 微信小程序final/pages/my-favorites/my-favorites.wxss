@@ -1,0 +1,261 @@
+/* 容器 */
+.container {
+  min-height: 100vh;
+  background: linear-gradient(to bottom, #fef2f2, #fff);
+}
+
+/* 粉色顶部横幅 */
+.header-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48rpx 32rpx 80rpx;
+  background: linear-gradient(160deg, #ec4899 0%, #e879a9 100%);
+  margin-bottom: 32rpx;
+}
+
+.heart-icon-box {
+  width: 160rpx;
+  height: 160rpx;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24rpx;
+  border: 8rpx solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 8rpx 32rpx rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(20rpx);
+  animation: scaleIn 0.5s ease-out;
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.heart-icon {
+  font-size: 80rpx;
+}
+
+.page-title {
+  color: white;
+  font-size: 40rpx;
+  font-weight: 900;
+  margin-bottom: 16rpx;
+}
+
+.subtitle {
+  color: #fbcfe8;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+/* 空状态 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 128rpx 64rpx;
+  animation: fadeIn 0.5s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(40rpx); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.empty-icon-box {
+  width: 192rpx;
+  height: 192rpx;
+  background: #f3f4f6;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 32rpx;
+}
+
+.empty-icon {
+  font-size: 96rpx;
+}
+
+.empty-title {
+  color: #9ca3af;
+  font-size: 30rpx;
+  font-weight: 900;
+  margin-bottom: 16rpx;
+}
+
+.empty-desc {
+  color: #d1d5db;
+  font-size: 24rpx;
+  font-weight: 700;
+  margin-bottom: 48rpx;
+}
+
+.goto-books-button {
+  background: linear-gradient(to right, #ec4899, #f0a3c2);
+  padding: 24rpx 48rpx;
+  border-radius: 48rpx;
+  box-shadow: 0 8rpx 32rpx rgba(236, 72, 153, 0.4);
+  transition: all 0.2s;
+}
+
+.goto-books-button:active {
+  transform: scale(0.96);
+}
+
+.button-text {
+  color: white;
+  font-size: 28rpx;
+  font-weight: 900;
+}
+
+/* 收藏列表 */
+.favorites-list {
+  padding: 0 32rpx 120rpx;
+  display: flex;
+  flex-direction: column;
+  gap: 24rpx;
+}
+
+.favorite-item {
+  animation: slideInLeft 0.5s ease-out both;
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateY(40rpx); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.item-container {
+  background: white;
+  border-radius: 32rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+  border: 2rpx solid #f9fafb;
+  overflow: hidden;
+}
+
+.item-container {
+  display: flex;
+  padding: 24rpx;
+  gap: 24rpx;
+}
+
+/* 封面图 */
+.book-cover {
+  width: 160rpx;
+  height: 160rpx;
+  border-radius: 24rpx;
+  overflow: hidden;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+  border: 4rpx solid #fce7f3;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+
+.book-cover:active {
+  transform: scale(0.95);
+}
+
+.cover-image {
+  width: 100%;
+  height: 100%;
+}
+
+/* 书籍信息 */
+.book-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.book-title {
+  transition: all 0.2s;
+}
+
+.book-title:active {
+  opacity: 0.7;
+}
+
+.title-text {
+  color: #1f2937;
+  font-size: 30rpx;
+  font-weight: 900;
+  display: block;
+  margin-bottom: 8rpx;
+}
+
+.book-meta {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 16rpx;
+}
+
+.calendar-icon {
+  font-size: 24rpx;
+}
+
+.date-text {
+  color: #9ca3af;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+/* 操作按钮 */
+.action-buttons {
+  display: flex;
+  gap: 16rpx;
+}
+
+.read-button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+  padding: 16rpx 0;
+  background: #fce7f3;
+  border-radius: 24rpx;
+  border: 4rpx solid #fef3c7;
+  transition: all 0.2s;
+}
+
+.read-button:active {
+  transform: scale(0.96);
+  background: #fef3c7;
+}
+
+.read-icon {
+  font-size: 28rpx;
+}
+
+.read-text {
+  color: #e879a9;
+  font-size: 24rpx;
+  font-weight: 900;
+}
+
+.unfavorite-button {
+  width: 80rpx;
+  height: 80rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fee2e2;
+  border-radius: 24rpx;
+  border: 4rpx solid #fecaca;
+  transition: all 0.2s;
+}
+
+.unfavorite-button:active {
+  transform: scale(0.9);
+}
+
+.unfavorite-icon {
+  font-size: 36rpx;
+}

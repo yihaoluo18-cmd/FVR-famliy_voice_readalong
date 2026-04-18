@@ -1,0 +1,122 @@
+<view class="container">
+  <view class="header-banner">
+    <view class="back-button" bindtap="goBack">
+      <text class="back-icon">←</text>
+    </view>
+
+    <view class="sparkle-icon-box {{rotateClass}}">
+      <text class="sparkle-icon">✨</text>
+    </view>
+    <text class="page-title">AI魔法绘本</text>
+    <text class="subtitle">拍张照片，AI帮你编故事 ✨</text>
+  </view>
+
+  <view class="step-content" wx:if="{{step === 'upload'}}">
+    <view class="upload-area">
+      <text class="camera-emoji">📸</text>
+      <text class="upload-title">给宝宝拍张照片</text>
+      <text class="upload-desc">AI会根据照片创作专属故事</text>
+    </view>
+
+    <view class="age-panel">
+      <view class="age-panel-left">
+        <text class="age-title">年龄模式</text>
+        <text class="age-desc">会影响词汇难度和句子长度</text>
+      </view>
+      <picker mode="selector" range="{{ageOptions}}" range-key="label" value="{{ageIndex}}" bindchange="onAgeChange">
+        <view class="age-picker-btn">
+          <text class="age-picker-text">{{ageOptions[ageIndex].label}}</text>
+          <text class="age-picker-arrow">▾</text>
+        </view>
+      </picker>
+    </view>
+    <text class="age-hint">{{ageOptions[ageIndex].desc}}</text>
+
+    <view class="upload-buttons">
+      <view class="upload-button camera-button" bindtap="takePhoto">
+        <text class="button-icon">📷</text>
+        <text class="button-text">打开相机</text>
+      </view>
+      <view class="upload-button album-button" bindtap="chooseImage">
+        <text class="button-icon">🖼️</text>
+        <text class="button-text">从相册选择</text>
+      </view>
+    </view>
+
+    <view class="example-hint">
+      <text class="hint-title">📌 亲子安全小贴士：</text>
+      <view class="hint-list">
+        <text class="hint-item">• 建议由家长陪同拍摄与生成，避免上传隐私场景</text>
+        <text class="hint-item">• 系统会优先生成温和、积极、无惊吓内容</text>
+        <text class="hint-item">• 若内容不合适，可直接点“重新生成”</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="step-content generating-step" wx:if="{{step === 'generating'}}">
+    <view class="image-preview">
+      <image class="preview-image" src="{{uploadedImage}}" mode="aspectFill" />
+      <view class="preview-overlay">
+        <text class="processing-text">AI正在创作中...</text>
+      </view>
+    </view>
+
+    <view class="progress-circle">
+      <view class="circle-center">
+        <text class="circle-percent">{{progress}}%</text>
+      </view>
+    </view>
+
+    <view class="generating-hints">
+      <text class="hint-item {{progress >= 20 ? 'active' : ''}}">🔍 分析照片内容...</text>
+      <text class="hint-item {{progress >= 40 ? 'active' : ''}}">✍️ 生成儿童友好故事...</text>
+      <text class="hint-item {{progress >= 60 ? 'active' : ''}}">🧩 调整为{{ageOptions[ageIndex].label}}难度...</text>
+      <text class="hint-item {{progress >= 80 ? 'active' : ''}}">✨ 润色表达与节奏...</text>
+    </view>
+  </view>
+
+  <view class="step-content preview-step" wx:if="{{step === 'preview'}}">
+    <view class="story-preview-card">
+      <view class="story-cover">
+        <image class="cover-image" src="{{uploadedImage}}" mode="aspectFill" />
+        <view class="cover-overlay">
+          <text class="story-title">{{storyTitle}}</text>
+          <text class="story-subtitle">{{ageOptions[ageIndex].label}} · {{aiUsed ? 'AI创作' : '智能模板润色'}}</text>
+        </view>
+      </view>
+
+      <view class="page-indicators">
+        <view wx:for="{{storyPages}}" wx:key="index" class="page-dot {{currentPage === index ? 'active' : ''}}"></view>
+      </view>
+
+      <view class="story-content">
+        <text class="story-text">{{currentPageText}}</text>
+      </view>
+
+      <view class="page-navigation">
+        <view class="nav-button prev {{currentPage === 0 ? 'disabled' : ''}}" bindtap="prevPage">
+          <text class="nav-icon">‹</text>
+        </view>
+        <text class="page-number">{{currentPage + 1}} / {{totalPages}}</text>
+        <view class="nav-button next {{currentPage === totalPages - 1 ? 'disabled' : ''}}" bindtap="nextPage">
+          <text class="nav-icon">›</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="action-buttons">
+      <view class="action-button save-button" bindtap="saveStory">
+        <text class="action-icon">💾</text>
+        <text class="action-text">保存到书架</text>
+      </view>
+      <view class="action-button read-button" bindtap="readStoryNow">
+        <text class="action-icon">📖</text>
+        <text class="action-text">开始阅读</text>
+      </view>
+      <view class="action-button retry-button" bindtap="retryGenerate">
+        <text class="action-icon">🔄</text>
+        <text class="action-text">重新生成</text>
+      </view>
+    </view>
+  </view>
+</view>

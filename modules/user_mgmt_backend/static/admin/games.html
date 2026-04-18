@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>游戏板块 · 测试说明 · 粉宝后台</title>
+  <link rel="stylesheet" href="/admin/static/admin-theme.css" />
+</head>
+<body class="admin-shell">
+  <header class="admin-header">
+    <h1>游戏板块 · 体验与测试</h1>
+    <p>供回归测试、体验优化与问题复现用的说明与典型路径</p>
+  </header>
+  <main class="admin-main">
+    <div class="nav-pills">
+      <a href="/admin/static/index.html">首页</a>
+      <a href="/admin/static/users.html">用户列表</a>
+      <a class="active" href="/admin/static/games.html">游戏测试说明</a>
+    </div>
+
+    <div class="admin-card">
+      <h2>整体体验关注点</h2>
+      <ul class="muted" style="line-height:1.75;font-size:14px;margin:0;padding-left:1.2em;">
+        <li><strong>首启与引导</strong>：新用户首次进入 AR 伴读/伴宠流程是否步骤清晰、无阻断性报错。</li>
+        <li><strong>存档一致性</strong>：蛋槽进度、解锁列表与成长等级是否与后台「用户详情 → 伴宠进度」一致。</li>
+        <li><strong>弱网与重进</strong>：杀进程再进、断网恢复后进度是否回滚或重复扣减。</li>
+        <li><strong>音色联动</strong>：训练完成的音色是否在故事朗读流程中可选、无 404 或空音频。</li>
+      </ul>
+    </div>
+
+    <div class="game-section">
+      <h3>伴宠 · 蛋槽与解锁</h3>
+      <ul>
+        <li><strong>体验感</strong>：槽位百分比与 UI 提示（hint）是否同步；解锁新 mascot 后列表是否立即更新。</li>
+        <li><strong>典型示例 A</strong>：新账号 → 仅完成教程线 → 后台应可见主宠线（如 cute-dog）成长字段有更新。</li>
+        <li><strong>典型示例 B</strong>：多槽同时推进 → 刷新后台「蛋槽进度」条形图是否与端上百分比一致。</li>
+        <li><strong>异常排查</strong>：若 JSON 损坏或缺字段，后台伴宠 Tab 会显示 errors；可配合「清除伴宠数据」后让用户端重新初始化。</li>
+      </ul>
+    </div>
+
+    <div class="game-section">
+      <h3>伴读 / 故事 · 听感与稳定性</h3>
+      <ul>
+        <li><strong>体验感</strong>：不同情感/场景下合成是否连贯、无明显截断或爆音。</li>
+        <li><strong>典型示例</strong>：同一用户连续切换 2～3 个已训练音色，检查首字延迟与队列是否堆积。</li>
+        <li><strong>与等级联动</strong>：reader_level / reader_stars 若在端上有展示，修改后台数值后需确认小程序是否拉取最新 profile（若未做实时同步，以产品约定为准）。</li>
+      </ul>
+    </div>
+
+    <div class="game-section">
+      <h3>测试记录建议（表格化）</h3>
+      <p class="muted" style="margin:0 0 10px;font-size:13px;">可在工单或文档中沿用下列字段，便于对比迭代。</p>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>日期</th>
+              <th>用户</th>
+              <th>场景</th>
+              <th>设备/网络</th>
+              <th>结果</th>
+              <th>备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>—</td>
+              <td>测试号 A</td>
+              <td>伴宠蛋槽满进度</td>
+              <td>iOS / WiFi</td>
+              <td>通过</td>
+              <td>与后台 slots 百分比一致</td>
+            </tr>
+            <tr>
+              <td>—</td>
+              <td>测试号 B</td>
+              <td>新音色首读</td>
+              <td>Android / 4G</td>
+              <td>待测</td>
+              <td>记录首包延迟 ms</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="admin-card">
+      <h2>相关后台能力</h2>
+      <p class="muted" style="font-size:14px;line-height:1.7;">
+        用户列表支持按启用/黑名单筛选；用户详情中可查看<strong>伴宠快照</strong>、<strong>音色训练详情</strong>，并在危险操作中<strong>清除伴宠 JSON</strong>或<strong>删除账号</strong>。密钥仅保存在本机浏览器 localStorage，请勿在链接中传递。
+      </p>
+    </div>
+  </main>
+</body>
+</html>

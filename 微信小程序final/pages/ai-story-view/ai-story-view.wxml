@@ -1,0 +1,67 @@
+<view class="container">
+
+  <view class="header">
+    <view class="back" bindtap="goBack">
+      <text class="back-text">←</text>
+    </view>
+    <view class="header-center">
+      <text class="title">AI故事阅读</text>
+      <text class="subtitle" wx:if="{{!empty && !loading}}">{{storyIndex + 1}} / {{storyCount}} 本</text>
+    </view>
+    <view class="header-placeholder"></view>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty-box">
+    <text class="empty-icon">⏳</text>
+    <text class="empty-title">正在加载故事...</text>
+  </view>
+
+  <view wx:elif="{{empty}}" class="empty-box">
+    <text class="empty-icon">📖</text>
+    <text class="empty-title">还没有可阅读的 AI 故事</text>
+    <text class="empty-subtitle">先去 AI 魔法绘本生成一本吧</text>
+    <view class="go-btn" bindtap="goGenerate">
+      <text class="go-btn-text">去生成故事</text>
+    </view>
+  </view>
+
+  <view wx:else class="reader-wrap">
+    <view class="cover-card">
+      <image class="cover-image" src="{{coverImage}}" mode="aspectFill" />
+      <view class="cover-mask">
+        <text class="story-title">{{storyTitle}}</text>
+        <text class="story-meta">{{storyAge || '儿童模式'}} · 第 {{currentPage + 1}} / {{totalPages}} 页</text>
+      </view>
+    </view>
+
+    <view class="reader-card" bindtouchstart="onTouchStart" bindtouchend="onTouchEnd">
+      <text class="reader-text">{{currentText}}</text>
+      <text class="caption" wx:if="{{caption}}">图像描述：{{caption}}</text>
+    </view>
+
+    <view class="page-nav">
+      <view class="nav-btn {{currentPage <= 0 ? 'disabled' : ''}}" bindtap="prevPage">
+        <text class="nav-btn-text">上一页</text>
+      </view>
+      <view class="play-btn" bindtap="togglePlay">
+        <text class="play-btn-text">{{isPlaying ? '停止朗读' : '朗读本页'}}</text>
+      </view>
+      <view class="nav-btn {{currentPage >= totalPages - 1 ? 'disabled' : ''}}" bindtap="nextPage">
+        <text class="nav-btn-text">下一页</text>
+      </view>
+    </view>
+
+    <view class="story-nav" wx:if="{{storyCount > 1}}">
+      <view class="story-switch {{storyIndex <= 0 ? 'disabled' : ''}}" bindtap="prevStory">
+        <text class="story-switch-text">上一本</text>
+      </view>
+      <view class="story-switch {{storyIndex >= storyCount - 1 ? 'disabled' : ''}}" bindtap="nextStory">
+        <text class="story-switch-text">下一本</text>
+      </view>
+    </view>
+
+    <view class="danger-zone" bindtap="deleteStory">
+      <text class="danger-text">删除这本故事</text>
+    </view>
+  </view>
+</view>

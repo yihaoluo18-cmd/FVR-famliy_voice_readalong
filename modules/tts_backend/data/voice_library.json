@@ -1,0 +1,57 @@
+{
+  "voice_001": {
+    "name": "温柔姐姐",
+    "gpt_path": "/home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604 copy/GPT_weights_v2Pro/30s-e15.ckpt",
+    "sovits_path": "/home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604 copy/SoVITS_weights_v2Pro/30s_e8_s184.pth",
+    "model_type": "pretrained",
+    "provider": "qwen_tts",
+    "qwen_voice": "Cherry",
+    "qwen_voice_candidates": [
+      "Cherry",
+      "Clover",
+      "Nora"
+    ],
+    "is_builtin": true,
+    "can_delete": false,
+    "can_rename": false,
+    "gender": "female",
+    "scene": "绘本故事",
+    "emotion": "温柔",
+    "voice_group": "qwen_base",
+    "quick_story": true
+  },
+  "voice_002": {
+    "name": "俊朗哥哥",
+    "gpt_path": "D:\\GPT-SoVITS-v2pro-20250604\\GPT-SoVITS-v2pro-20250604\\GPT_weights_v2Pro\\HYM-e15.ckpt",
+    "sovits_path": "D:\\GPT-SoVITS-v2pro-20250604\\GPT-SoVITS-v2pro-20250604\\SoVITS_weights_v2Pro\\HYM_e8_s168.pth",
+    "model_type": "pretrained",
+    "provider": "qwen_tts",
+    "qwen_voice": "Ethan",
+    "qwen_voice_candidates": [
+      "Ethan",
+      "Atlas",
+      "Echo"
+    ],
+    "is_builtin": true,
+    "can_delete": false,
+    "can_rename": false,
+    "gender": "male",
+    "scene": "绘本故事",
+    "emotion": "自然",
+    "voice_group": "qwen_base",
+    "quick_story": true
+  },
+  "voice_003": {
+    "name": "voice3_test",
+    "gpt_path": "train/user_models/test/44f5cc18-e13b-4013-9c65-6bb7be7c9504/processed/logs_s1_v2Pro/ckpt/epoch=14-step=75.ckpt",
+    "sovits_path": "train/user_models/test/44f5cc18-e13b-4013-9c65-6bb7be7c9504/processed/logs_s2_v2Pro/G_233333333333_v2Pro.pth",
+    "scene": "绘本故事",
+    "emotion": "温柔",
+    "trained_at": "2026-04-15T00:00:00",
+    "ref_audio_path": "train/user_datasets/test/v2Pro/sentence_3.wav",
+    "ref_text": "松松踮着脚尖，好不容易才够到一颗小松果。",
+    "ref_language": "中文",
+    "model_type": "user_trained",
+    "owner_user_id": "test"
+  }
+}

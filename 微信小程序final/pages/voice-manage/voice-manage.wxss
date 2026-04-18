@@ -1,0 +1,95 @@
+.container {
+  min-height: 100vh;
+  padding: 24rpx;
+  background: linear-gradient(180deg, #f8fafc 0%, #fff5f7 100%);
+}
+
+.header {
+  margin-bottom: 18rpx;
+}
+
+.title {
+  display: block;
+  font-size: 36rpx;
+  font-weight: 800;
+  color: #1e1b4b;
+}
+
+.desc {
+  display: block;
+  margin-top: 8rpx;
+  color: #831843;
+  font-size: 24rpx;
+}
+
+.card {
+  background: #fff;
+  border-radius: 16rpx;
+  border: 1rpx solid #e5e7eb;
+  padding: 18rpx;
+  margin-bottom: 12rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.left {
+  flex: 1;
+  min-width: 0;
+}
+
+.name {
+  display: block;
+  color: #111827;
+  font-size: 28rpx;
+  font-weight: 700;
+}
+
+.meta {
+  display: block;
+  margin-top: 4rpx;
+  color: #6b7280;
+  font-size: 22rpx;
+}
+
+.right {
+  margin-left: 12rpx;
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.check {
+  color: #e879a9;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+.badge.default {
+  color: #e879a9;
+  font-size: 22rpx;
+}
+
+.del-btn {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: none;
+}
+
+.empty {
+  text-align: center;
+  color: #6b7280;
+  font-size: 24rpx;
+  padding: 30rpx 0;
+}
+
+.footer-actions {
+  margin-top: 18rpx;
+}
+
+.clone-btn {
+  width: 100%;
+  background: #e879a9;
+  color: #fff;
+  border-radius: 14rpx;
+}

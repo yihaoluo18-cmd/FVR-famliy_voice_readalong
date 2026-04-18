@@ -1,0 +1,406 @@
+<view class="page {{mascotId === 'cute-fox' ? 'page--fox' : ''}}">
+  <view class="loading" wx:if="{{loading}}">
+    <text class="loading-text">加载中…</text>
+  </view>
+
+  <block wx:if="{{!loading}}">
+    <view class="pet-panel">
+      <!-- 页面锁定：模型加载期间禁止用户触发会重建/切换的操作（加速/遮罩点击除外） -->
+      <view
+        class="page-lock-layer"
+        wx:if="{{(modelLoading || modelFailed) && !showUpgradeAnim}}"
+        catchtouchstart="noopCatchMove"
+        catchtouchmove="noopCatchMove"
+      >
+        <view class="page-lock-btn"></view>
+      </view>
+
+      <!-- 孵化流程：转入伴宠详情页 -->
+      <view class="hatch-inline" wx:if="{{eggModelActive}}">
+        <text class="hatch-inline-title">孵化步骤</text>
+        <view class="hatch-inline-row">
+          <text class="hatch-inline-tip" wx:if="{{!eggCracked}}">看准蛋的位置…点击敲碎它，然后再喂食完成第一次培养</text>
+          <text class="hatch-inline-tip" wx:if="{{eggCracked}}">破壳成功！现在可以喂食，让它成长到 Level 1</text>
+        </view>
+      </view>
+
+      <view class="stage-wrap">
+        <view class="center-zone">
+          <view class="name-row">
+            <text class="pet-name">{{petName}}</text>
+            <text class="stage-tag">{{stageText}}</text>
+          </view>
+
+          <view class="tuning-entry-wrap">
+            <view class="tuning-entry" bindtap="toggleTuning">{{showTuning ? '关闭调参' : '调参'}}</view>
+          </view>
+
+          <!-- 阶数显示：可爱小便签成长期（可点切换形态） -->
+          <view class="stage-memo-row-top" wx:if="{{!eggModelActive}}">
+            <view
+              wx:for="{{stageMemoList}}"
+              wx:key="tier"
+              class="stage-memo-note stage-tier-{{item.tier}} {{stageMemoSelectedTier === item.tier ? 'stage-memo-on' : ''}} {{item.locked ? 'stage-memo-locked' : ''}}"
+              bindtap="onTapFormTier"
+              data-tier="{{item.tier}}"
+            >
+              <view class="stage-memo-fold"></view>
+              <view class="stage-memo-icon">{{item.icon}}</view>
+              <text class="stage-memo-title">{{item.title}}</text>
+              <text class="stage-memo-range">{{item.range}}</text>
+              <text wx:if="{{item.locked}}" class="stage-memo-lock">🔒</text>
+            </view>
+          </view>
+          <view class="stage-memo-row-top" wx:else>
+            <view class="stage-memo-note stage-memo-egg">
+              <view class="stage-memo-fold"></view>
+              <view class="stage-memo-icon">🥚</view>
+              <text class="stage-memo-title">幼儿孵化</text>
+              <text class="stage-memo-range">敲碎它 → 喂食成长</text>
+            </view>
+          </view>
+
+          <view class="pet-stage pet-stage-showcase {{modelStageNudge ? 'pet-stage-nudge' : ''}} {{hatchShakeOn ? 'pet-stage-hatch-shake' : ''}}">
+            <view class="showcase-inner">
+              <view wx:if="{{hatchFlashOn}}" class="hatch-stage-flash" aria-hidden="true"></view>
+              <view wx:if="{{mascotId === 'cute-dog'}}" class="shiba-frame-deco" aria-hidden="true">
+                <text class="shiba-deco-bone" style="left: 34rpx; top: 52rpx;">🦴</text>
+                <text class="shiba-deco-dog" style="left: 148rpx; top: 32rpx;">🐶</text>
+                <text class="shiba-deco-bone" style="left: 268rpx; top: 68rpx;">🦴</text>
+                <text class="shiba-deco-dog" style="left: 388rpx; top: 42rpx;">🐶</text>
+
+                <text class="shiba-deco-dog" style="left: 54rpx; top: 160rpx;">🐶</text>
+                <text class="shiba-deco-bone" style="left: 188rpx; top: 182rpx;">🦴</text>
+                <text class="shiba-deco-dog" style="left: 340rpx; top: 170rpx;">🐶</text>
+
+                <text class="shiba-deco-bone" style="left: 96rpx; top: 270rpx;">🦴</text>
+                <text class="shiba-deco-dog" style="left: 238rpx; top: 292rpx;">🐶</text>
+                <text class="shiba-deco-bone" style="left: 372rpx; top: 260rpx;">🦴</text>
+              </view>
+              <view wx:if="{{mascotId === 'cute-fox'}}" class="fox-frame-deco" aria-hidden="true">
+                <text class="fox-deco-leaf" style="left: 40rpx; top: 48rpx;">🍃</text>
+                <text class="fox-deco-fox" style="left: 152rpx; top: 36rpx;">🦊</text>
+                <text class="fox-deco-leaf" style="left: 276rpx; top: 62rpx;">🍂</text>
+                <text class="fox-deco-fox" style="left: 392rpx; top: 44rpx;">🦊</text>
+
+                <text class="fox-deco-fox" style="left: 62rpx; top: 168rpx;">🦊</text>
+                <text class="fox-deco-leaf" style="left: 198rpx; top: 178rpx;">🍃</text>
+                <text class="fox-deco-fox" style="left: 336rpx; top: 174rpx;">🦊</text>
+
+                <text class="fox-deco-leaf" style="left: 102rpx; top: 268rpx;">🍂</text>
+                <text class="fox-deco-fox" style="left: 242rpx; top: 288rpx;">🦊</text>
+                <text class="fox-deco-leaf" style="left: 368rpx; top: 256rpx;">🍃</text>
+              </view>
+
+              <view
+                class="mode-switch-fab"
+                bindtap="onTapViewMode"
+                data-mode="{{viewMode === '2d' ? '3d' : '2d'}}"
+              >
+                <text class="mode-switch-text">{{viewMode === '2d' ? '2D' : '3D'}}</text>
+              </view>
+
+              <view
+                wx:if="{{viewMode === '3d' && displayFormTier >= 2 && actions && actions.length && !(modelLoading || modelFailed) && !showUpgradeAnim}}"
+                class="quick-action-fab"
+                bindtap="onQuickActionTap"
+                catchtap="onQuickActionTap"
+              >
+                <text class="quick-action-emoji">🎾</text>
+                <text class="quick-action-text">动一动</text>
+              </view>
+
+              <image wx:if="{{viewMode === '2d'}}" class="poster" src="{{posterUrl}}" mode="aspectFit"></image>
+              <!-- 2D：海报非 webgl，气泡放在海报之上即可点击 -->
+              <view
+                wx:if="{{showNurtureBubble && viewMode === '2d'}}"
+                class="nurture-bubble-layer nurture-bubble-layer--over-poster"
+              >
+                <view
+                  class="nurture-bubble {{eggModelActive ? 'nurture-bubble--hatch-persist' : ''}}"
+                  style="left: {{nurtureBubbleLeft}}rpx; top: {{nurtureBubbleTop}}rpx;"
+                  bindtap="onNurtureBubbleCollect"
+                  data-action="{{nurtureBubbleAction}}"
+                >
+                  <text class="nurture-bubble-icon {{nurtureBubbleIconClass}}">{{nurtureBubbleIcon}}</text>
+                  <text class="nurture-bubble-label">{{nurtureBubbleLabel}}</text>
+                </view>
+              </view>
+              <block wx:if="{{viewMode === '3d'}}">
+                <!-- 与 companion 一致：canvas 不因失败而卸载，否则 setData 异步时 query 取不到 node；手势用 catch 防页面滚动抢事件 -->
+                <!-- 最小交互层：先只保证滚轮缩放可用 -->
+                <view
+                  class="three-interact-layer"
+                  bindwheel="onMouseWheel"
+                  bindmousewheel="onMouseWheel"
+                  bindmousedown="onMouseDown"
+                  bindmousemove="onMouseMove"
+                  bindmouseup="onMouseUp"
+                >
+                  <canvas
+                    type="webgl"
+                    id="petThreeCanvas"
+                    class="three-canvas {{(modelLoading || modelFailed || showUpgradeAnim) ? 'three-canvas-hidden' : 'three-canvas-show'}}"
+                    catchtouchstart="onCanvasTouchStart"
+                    catchtouchmove="onCanvasTouchMove"
+                    catchtouchend="onCanvasTouchEnd"
+                    catchtouchcancel="onCanvasTouchEnd"
+                    bindwheel="onMouseWheel"
+                    bindmousewheel="onMouseWheel"
+                  ></canvas>
+                  <!-- 与 canvas 同一定位容器：原生 webgl 会盖住普通 view，仅 cover-view 可显示与点击 -->
+                  <cover-view
+                    wx:if="{{showNurtureBubble && viewMode === '3d'}}"
+                    class="nurture-bubble-cover {{eggModelActive ? 'nurture-bubble-cover--egg' : ''}}"
+                    style="left: {{nurtureBubbleLeft}}rpx; top: {{nurtureBubbleTop}}rpx;"
+                    catchtap="onNurtureBubbleCollect"
+                    data-action="{{nurtureBubbleAction}}"
+                  >
+                    <cover-view class="nurture-bubble-cover-icon {{nurtureBubbleIconClass}}">{{nurtureBubbleIcon}}</cover-view>
+                    <cover-view class="nurture-bubble-cover-label">{{nurtureBubbleLabel}}</cover-view>
+                  </cover-view>
+                </view>
+                <view
+                  class="mask model-load-mask"
+                  wx:if="{{(modelLoading || modelFailed) && !showUpgradeAnim && !(eggModelActive && !eggCracked && hatchTapCount > 0)}}"
+                  catchtap="onModelMagicTap"
+                >
+                  <view class="model-load-card {{hatchShakeOn ? 'hatch-shake' : ''}} {{hatchFlashOn ? 'hatch-flash' : ''}}">
+                    <view class="magic-drops">
+                      <text class="magic-star star1">✦</text>
+                      <text class="magic-star star2">✦</text>
+                      <text class="magic-star star3">✦</text>
+                      <text class="magic-star star4">✦</text>
+                      <text class="magic-star star5">✦</text>
+                      <text class="magic-star star6">✦</text>
+                      <text class="magic-star star7">✦</text>
+                    </view>
+                    <view class="scene {{modelLoadScene}}">
+                      <view wx:if="{{modelLoadScene === 'hatch'}}" class="scene-hatch">
+                        <view class="egg-shell"></view>
+                        <view class="egg-crack"></view>
+                        <view class="spark s1"></view>
+                        <view class="spark s2"></view>
+                        <view class="spark s3"></view>
+                      </view>
+                      <view wx:elif="{{modelLoadScene === 'grow'}}" class="scene-grow">
+                        <view class="pup-head"></view>
+                        <view class="pup-ear ear-l"></view>
+                        <view class="pup-ear ear-r"></view>
+                        <view class="star st1"></view>
+                        <view class="star st2"></view>
+                        <view class="star st3"></view>
+                      </view>
+                      <view wx:else class="scene-repair">
+                        <view class="wand"></view>
+                        <view class="repair-smoke sm1"></view>
+                        <view class="repair-smoke sm2"></view>
+                        <view class="repair-smoke sm3"></view>
+                        <view class="repair-smoke sm4"></view>
+                        <view class="repair-smoke sm5"></view>
+                        <view class="repair-spark sp1"></view>
+                        <view class="repair-spark sp2"></view>
+                        <view class="repair-spark sp3"></view>
+                      </view>
+                    </view>
+                    <text class="mask-txt"></text>
+                    <text class="model-load-magic-text">点点屏幕施魔法（已点：{{modelMagicCount}}）</text>
+                    <view wx:if="{{eggModelActive && !eggCracked}}" class="hatch-mini-progress">
+                      <view class="hatch-mini-bar">
+                        <view class="hatch-mini-fill" style="width: {{hatchProgress}}%;"></view>
+                      </view>
+                      <text class="hatch-mini-tip">再点 {{hatchRemain}} 下就能破壳啦</text>
+                    </view>
+                  </view>
+                </view>
+              </block>
+
+              <view
+                class="egg-hint-overlay"
+                wx:if="{{eggModelActive && !eggCracked && !(modelLoading || modelFailed) && !showUpgradeAnim}}"
+                catchtap="onTapHatchStart"
+              >
+                <view class="egg-hint-ring"></view>
+                <view class="egg-hint-arrow"></view>
+                <text class="egg-hint-text">敲碎它</text>
+              </view>
+
+              <!-- 敲蛋期：底部小进度条（不挡住蛋画面，也不显示大遮罩动画） -->
+              <view
+                wx:if="{{eggModelActive && !eggCracked && hatchTapCount > 0}}"
+                class="hatch-progress-overlay"
+                catchtap="onTapHatchStart"
+              >
+                <view class="hatch-mini-bar">
+                  <view class="hatch-mini-fill" style="width: {{hatchProgress}}%;"></view>
+                </view>
+                <view class="hatch-preload-row">
+                  <text class="hatch-mini-tip">再点 {{hatchRemain}} 下就能破壳啦</text>
+                  <text class="hatch-preload-tip">碎蛋准备：{{hatchPreloadPercent}}%</text>
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+
+      </view>
+
+      <view class="upgrade-overlay" wx:if="{{showUpgradeAnim}}" catchtouchstart="noopCatchMove" catchtouchmove="noopCatchMove">
+        <view class="upgrade-card">
+          <view class="upgrade-celebrate-layer">
+            <view class="upgrade-highlight"></view>
+
+            <!-- 狗狗轮廓逐渐长大（用 emoji 做“轮廓感”） -->
+            <view class="upgrade-silhouette">
+              <text class="upgrade-silhouette-emoji">{{petEmoji}}</text>
+            </view>
+
+            <!-- 彩带穿梭 -->
+            <view class="upgrade-ribbons">
+              <view class="upgrade-ribbon r1"></view>
+              <view class="upgrade-ribbon r2"></view>
+              <view class="upgrade-ribbon r3"></view>
+            </view>
+
+            <!-- 彩纸庆祝点缀 -->
+            <view class="upgrade-confetti">
+              <view class="confetti f1"></view>
+              <view class="confetti f2"></view>
+              <view class="confetti f3"></view>
+              <view class="confetti f4"></view>
+              <view class="confetti f5"></view>
+              <view class="confetti f6"></view>
+              <view class="confetti f7"></view>
+              <view class="confetti f8"></view>
+              <view class="confetti f9"></view>
+            </view>
+          </view>
+
+          <view class="upgrade-burst">
+            <view class="upgrade-smoke s1"></view>
+            <view class="upgrade-smoke s2"></view>
+            <view class="upgrade-smoke s3"></view>
+            <view class="upgrade-smoke s4"></view>
+            <view class="upgrade-smoke s5"></view>
+          </view>
+
+          <text class="upgrade-title">{{upgradeTitle}}</text>
+          <text class="upgrade-sub">{{upgradeSub}}</text>
+        </view>
+      </view>
+
+      <view class="growth-row-bottom">
+        <view class="growth-head">
+          <text class="growth-title">成长进度</text>
+          <text class="growth-meta">Lv.{{level}} · {{xp}} / {{nextStageXp}} XP</text>
+        </view>
+        <view class="growth-track-h">
+          <view class="growth-fill-h" style="width: {{growthPercent}}%;"></view>
+        </view>
+        <text class="growth-stage-hint">三档成长 · {{stageText}}</text>
+      </view>
+
+      <view wx:if="{{showTuning && !(modelLoading || modelFailed) && !showUpgradeAnim}}" class="tuning-panel" catchtouchmove="noopCatchMove">
+        <view class="tuning-head">
+          <text class="tuning-title">3D调参</text>
+          <view class="tuning-actions">
+            <view class="tuning-reset" bindtap="resetTuning">重置</view>
+            <view class="tuning-close" bindtap="toggleTuning">关闭</view>
+            <view class="tuning-save" bindtap="saveTuningManual">保存并复用</view>
+          </view>
+        </view>
+        <view class="tuning-item">
+          <text class="tuning-label">FOV：{{tuning.fov}}（{{tuningPercent.fov}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.fov}}" show-value="false" data-key="fov" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">相机距离：{{tuning.camDistMul}}（{{tuningPercent.camDistMul}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.camDistMul}}" show-value="false" data-key="camDistMul" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+          <view class="tuning-input-row">
+            <text class="tuning-input-hint">输入</text>
+            <input class="tuning-input" type="text" value="{{tuning.camDistMul}}" data-key="camDistMul" bindinput="onTuningNumberInput" bindconfirm="onTuningNumberConfirm" confirm-type="done" />
+          </view>
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">相机高度：{{tuning.camHeightMul}}（{{tuningPercent.camHeightMul}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.camHeightMul}}" show-value="false" data-key="camHeightMul" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">注视高度：{{tuning.lookAtHeightMul}}（{{tuningPercent.lookAtHeightMul}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.lookAtHeightMul}}" show-value="false" data-key="lookAtHeightMul" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">模型上移：{{tuning.liftMul}}（{{tuningPercent.liftMul}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.liftMul}}" show-value="false" data-key="liftMul" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">模型大小：{{tuning.targetSize}}（{{tuningPercent.targetSize}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.targetSize}}" show-value="false" data-key="targetSize" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+          <view class="tuning-input-row">
+            <text class="tuning-input-hint">输入</text>
+            <input class="tuning-input" type="text" value="{{tuning.targetSize}}" data-key="targetSize" bindinput="onTuningNumberInput" bindconfirm="onTuningNumberConfirm" confirm-type="done" />
+          </view>
+        </view>
+
+        <view class="tuning-item">
+          <text class="tuning-label">初始朝向：{{tuning.baseRotYDeg}}°（{{tuningPercent.baseRotYDeg}}%）</text>
+          <slider min="0" max="100" value="{{tuningPercent.baseRotYDeg}}" show-value="false" data-key="baseRotYDeg" bindchanging="onTuningSliderChanging" bindchange="onTuningSliderChange" />
+        </view>
+      </view>
+
+      <!-- 底部提示文案：按需求移除 -->
+    </view>
+
+    <view class="section status-store">
+      <text class="section-title">状态存放</text>
+      <view class="float-balls-row">
+        <view class="status-ball-item">
+          <view class="status-ball status-ball-food">
+            <view class="status-ball-liquid" style="height: {{hungerLevel}}%;"></view>
+            <view class="status-ball-liquid-wave" style="height: {{hungerLevel}}%;"></view>
+            <view class="status-ball-gloss"></view>
+            <text class="status-ball-emoji">🍎</text>
+          </view>
+          <text class="status-ball-label">食物 {{hungerLevel}}分</text>
+        </view>
+
+        <view class="status-ball-item">
+          <view class="status-ball status-ball-clean">
+            <view class="status-ball-liquid" style="height: {{cleanLevel}}%;"></view>
+            <view class="status-ball-liquid-wave" style="height: {{cleanLevel}}%;"></view>
+            <view class="status-ball-gloss"></view>
+            <text class="status-ball-emoji">🧼</text>
+          </view>
+          <text class="status-ball-label">清洁 {{cleanLevel}}分</text>
+        </view>
+
+        <view class="status-ball-item">
+          <view class="status-ball status-ball-mood">
+            <view class="status-ball-liquid" style="height: {{moodLevel}}%;"></view>
+            <view class="status-ball-liquid-wave" style="height: {{moodLevel}}%;"></view>
+            <view class="status-ball-gloss"></view>
+            <text class="status-ball-emoji">🎾</text>
+          </view>
+          <text class="status-ball-label">开心 {{moodLevel}}分</text>
+        </view>
+
+        <view class="status-ball-item">
+          <view class="status-ball status-ball-sleepy">
+            <view class="status-ball-liquid" style="height: {{sleepyLevel}}%;"></view>
+            <view class="status-ball-liquid-wave" style="height: {{sleepyLevel}}%;"></view>
+            <view class="status-ball-gloss"></view>
+            <text class="status-ball-emoji">🛏️</text>
+          </view>
+          <text class="status-ball-label">困意 {{sleepyLevel}}分</text>
+        </view>
+      </view>
+    </view>
+
+    <button class="primary-btn" bindtap="setAsCompanion">设为陪读小伙伴</button>
+  </block>
+</view>

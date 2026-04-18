@@ -1,0 +1,192 @@
+<view class="ar-container">
+
+  <!-- ─── 相机全屏背景 ─── -->
+  <camera
+    wx:if="{{!showResult}}"
+    class="ar-camera"
+    device-position="front"
+    flash="off"
+    binderror="onCameraError"
+  />
+
+  <!-- ─── 权限异常提示 ─── -->
+  <view class="camera-error" wx:if="{{cameraError}}">
+    <text class="error-icon">📷</text>
+    <text class="error-title">需要摄像头权限</text>
+    <text class="error-desc">AR 面具功能需要开启摄像头\n请在设置中允许访问</text>
+    <view class="error-btn" bindtap="openSetting">
+      <text>去设置</text>
+    </view>
+  </view>
+
+  <!-- ─── 全屏 UI 叠加层 ─── -->
+  <view class="overlay" wx:if="{{!showResult && !cameraError}}">
+
+    <!-- 顶部导航栏 -->
+    <view class="top-bar">
+      <view class="back-btn" bindtap="goBack">
+        <image class="back-img" src="{{arFaceBackIcon}}" mode="widthFix" />
+      </view>
+      <view class="title-row">
+        <text class="top-title">AR 面具演说家</text>
+        <view class="ar-badge">
+          <text class="ar-badge-text">AR</text>
+        </view>
+      </view>
+      <view class="stars-pill">
+        <text class="stars-pill-text">+5 ⭐</text>
+      </view>
+    </view>
+
+    <!-- 题目卡片（滑入） -->
+    <view class="question-card {{questionVisible ? 'visible' : ''}}">
+      <text class="question-label">🎯 今日题目</text>
+      <text class="question-text">{{questionText}}</text>
+    </view>
+
+    <!-- 人脸扫描框 -->
+    <view class="face-frame-wrap">
+      <view class="face-frame {{isTracking ? 'tracked' : ''}}">
+        <view class="corner tl" />
+        <view class="corner tr" />
+        <view class="corner bl" />
+        <view class="corner br" />
+        <text class="face-hint" wx:if="{{!isTracking}}">😊 将脸部对准扫描框</text>
+        <text class="face-hint tracking" wx:if="{{isTracking}}">✓ 面部已就绪</text>
+      </view>
+
+      <!-- 面具叠加（当有面具且已追踪时） -->
+      <view class="mask-overlay {{isTracking && currentMask ? 'show' : ''}}">
+        <image
+          wx:if="{{currentMask}}"
+          class="mask-img {{isTracking ? 'floatAnim' : ''}}"
+          src="{{currentMask.url}}"
+          mode="aspectFit"
+        />
+      </view>
+    </view>
+
+    <!-- 录音中指示器 -->
+    <view class="rec-indicator" wx:if="{{isRecording}}">
+      <view class="rec-dot" />
+      <text class="rec-text">REC · {{recordSeconds}}s</text>
+    </view>
+
+    <!-- 底部控制面板 -->
+    <view class="bottom-panel">
+
+      <!-- 面具选择行 -->
+      <view class="mask-section">
+        <text class="mask-section-label">🎭 选动物面具</text>
+        <scroll-view class="mask-scroll" scroll-x enable-flex>
+          <view class="mask-list">
+            <!-- 不戴面具 -->
+            <view
+              class="mask-item {{!currentMask ? 'selected' : ''}}"
+              bindtap="clearMask"
+            >
+              <view class="mask-thumb no-mask">
+                <text class="no-mask-emoji">😊</text>
+              </view>
+              <text class="mask-item-name">不戴</text>
+            </view>
+            <!-- 动物面具列表 -->
+            <view
+              wx:for="{{masks}}"
+              wx:key="id"
+              class="mask-item {{currentMask && currentMask.id === item.id ? 'selected' : ''}}"
+              bindtap="selectMask"
+              data-mask="{{item}}"
+            >
+              <view class="mask-thumb">
+                <image class="mask-thumb-img" src="{{item.url}}" mode="aspectFill" />
+              </view>
+              <text class="mask-item-name">{{item.name}}</text>
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+
+      <!-- 录音按钮区 -->
+      <view class="record-area">
+        <view
+          class="record-btn {{isRecording ? 'recording' : ''}}"
+          bindtap="toggleRecord"
+        >
+          <view class="record-btn-inner">
+            <text class="record-btn-icon">{{isRecording ? '⏹' : '🎤'}}</text>
+          </view>
+          <!-- 录音时的波纹动画 -->
+          <view class="ripple r1" wx:if="{{isRecording}}" />
+          <view class="ripple r2" wx:if="{{isRecording}}" />
+        </view>
+        <text class="record-hint">
+          {{isRecording ? '录音中 · 点击结束' : (hasRecorded ? '再次录音' : '点击开始演说')}}
+        </text>
+        <view class="finish-btn {{hasRecorded && !isRecording ? '' : 'hidden'}}" bindtap="submitSpeech">
+          <text class="finish-btn-text">{{evaluating ? 'AI 打分中...' : '提交演说 +5⭐'}}</text>
+        </view>
+      </view>
+
+    </view>
+  </view>
+
+  <!-- ─── 评分结果弹窗 ─── -->
+  <view class="result-modal" wx:if="{{showResult}}">
+    <view class="result-bg" />
+    <view class="result-card">
+      <!-- 面具预览 -->
+      <view class="result-mascot">
+        <image
+          wx:if="{{currentMask}}"
+          class="result-mascot-img"
+          src="{{currentMask.url}}"
+          mode="aspectFit"
+        />
+        <text wx:else class="result-mascot-emoji">😊</text>
+        <view class="result-sparkle s1">✨</view>
+        <view class="result-sparkle s2">⭐</view>
+        <view class="result-sparkle s3">🌟</view>
+      </view>
+
+      <text class="result-title">🎉 太棒了！</text>
+
+      <!-- 分数 -->
+      <view class="score-ring">
+        <text class="score-num">{{aiScore}}</text>
+        <text class="score-unit">分</text>
+      </view>
+
+      <!-- 星星评级 -->
+      <view class="star-rating">
+        <text
+          wx:for="{{[0,1,2,3,4]}}"
+          wx:key="*this"
+          class="rating-star {{item < fullStars ? 'lit' : 'dim'}}"
+        >⭐</text>
+      </view>
+
+      <!-- 反馈文字 -->
+      <view class="feedback-box">
+        <text class="feedback-text">{{feedback}}</text>
+        <text class="transcript-text" wx:if="{{transcript}}">我听到：「{{transcript}}」</text>
+      </view>
+
+      <!-- 奖励 -->
+      <view class="reward-banner">
+        <text class="reward-text">✨ 获得 5 颗星星！</text>
+      </view>
+
+      <!-- 操作按钮 -->
+      <view class="result-actions">
+        <view class="btn-again" bindtap="playAgain">
+          <text>再挑战</text>
+        </view>
+        <view class="btn-done" bindtap="goBack">
+          <text>完成 🎊</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+</view>

@@ -1,0 +1,19 @@
+{
+  "id": "custom_20260120_071623_6a2aa5b7ccec",
+  "title": "小明和小鸟",
+  "level": 1,
+  "age": "4-7",
+  "sentences": [
+    "小明坐在大树下，小鸟飞来停他手心。",
+    "小鸟啾啾叫，小明笑嘻嘻。",
+    "他们一起看花儿，听风轻轻吹。",
+    "小明说：'你是我的好朋友！'"
+  ],
+  "cover_image": "uploads/custom_20260120_071623_6a2aa5b7ccec.jpg",
+  "meta": {
+    "source": "image_ai",
+    "child_name": "小明",
+    "scene_hint": "在公园玩耍",
+    "style": "温暖童话"
+  }
+}

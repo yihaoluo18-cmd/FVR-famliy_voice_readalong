@@ -1,0 +1,47 @@
+# 与上游 GPT-SoVITS（RVC-Boss/GPT-SoVITS）对齐的依赖；在缺少 requirements-lock.txt 时供 setup_env.sh 使用。
+# 若你有原包中的 requirements-lock.txt，优先使用 lock 以复现一致环境。
+# Python 3.13：PyPI 仅提供 numpy 2.x 的 wheel，故按版本分支约束。
+# Windows：不使用 --no-binary=opencc（优先 wheel）；pyopenjtalk 需本地编译，非日语场景可跳过（见下行环境标记）。
+numpy<2.0; python_version < "3.13"
+numpy>=2.0,<3; python_version >= "3.13"
+scipy
+tensorboard
+librosa==0.10.2
+numba
+pytorch-lightning>=2.4
+gradio<5
+ffmpeg-python
+onnxruntime; platform_machine == "aarch64" or platform_machine == "arm64"
+onnxruntime-gpu; platform_machine == "x86_64" or platform_machine == "AMD64"
+tqdm
+funasr==1.0.27
+cn2an
+pypinyin
+pyopenjtalk>=0.4.1; sys_platform != 'win32'
+g2p_en
+torchaudio
+modelscope
+sentencepiece
+transformers>=4.43,<=4.50
+peft<0.18.0
+chardet
+PyYAML
+psutil
+jieba_fast; sys_platform != 'win32'
+jieba
+split-lang
+fast_langdetect>=0.3.1
+wordsegment
+rotary_embedding_torch
+ToJyutping
+g2pk2
+ko_pron
+opencc
+python_mecab_ko; sys_platform != 'win32'
+fastapi[standard]>=0.115.2
+x_transformers
+torchmetrics<=1.5
+pydantic<=2.10.6
+ctranslate2>=4.0,<5
+av>=11
+tqdm

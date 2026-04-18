@@ -1,0 +1,108 @@
+<view class="container">
+  <!-- 粉色顶部横幅 -->
+  <view class="header-banner">
+    <!-- 日历图标 -->
+    <view class="calendar-icon-box">
+      <text class="calendar-icon">📅</text>
+    </view>
+    
+    <text class="page-title">每日签到</text>
+    <text class="month-text">{{currentMonth}}</text>
+
+    <!-- 统计卡片 -->
+    <view class="stats-cards">
+      <!-- 连续签到 -->
+      <view class="stat-card">
+        <text class="stat-icon">🔥</text>
+        <text class="stat-value">{{consecutiveDays}}</text>
+        <text class="stat-label">连续签到</text>
+      </view>
+      <!-- 本月签到 -->
+      <view class="stat-card">
+        <text class="stat-icon">✅</text>
+        <text class="stat-value">{{totalCheckIns}}</text>
+        <text class="stat-label">本月签到</text>
+      </view>
+      <!-- 累计星星 -->
+      <view class="stat-card">
+        <text class="stat-icon">⭐</text>
+        <text class="stat-value">{{stars}}</text>
+        <text class="stat-label">累计星星</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 签到按钮 -->
+  <view class="check-in-button-area">
+    <view 
+      class="check-in-button {{todayCheckedIn ? 'checked' : ''}}"
+      bindtap="handleCheckIn"
+    >
+      <text class="button-icon">{{todayCheckedIn ? '✓' : '✨'}}</text>
+      <text class="button-text">{{todayCheckedIn ? '今日已签到' : '立即签到'}}</text>
+      <text class="button-reward" wx:if="{{!todayCheckedIn}}">+2 ⭐</text>
+    </view>
+  </view>
+
+  <!-- 日历 -->
+  <view class="calendar-section">
+    <view class="section-title">
+      <text class="title-icon">📆</text>
+      <text class="title-text">签到日历</text>
+    </view>
+
+    <view class="calendar-grid">
+      <view 
+        wx:for="{{calendarDays}}" 
+        wx:key="day"
+        class="calendar-day {{item.isToday ? 'today' : ''}} {{item.isChecked ? 'checked' : ''}} {{item.isFuture ? 'future' : ''}}"
+      >
+        <text class="day-number">{{item.day}}</text>
+        <text class="check-mark" wx:if="{{item.isChecked}}">✓</text>
+        <view class="today-dot" wx:if="{{item.isToday && !item.isChecked}}"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 奖励卡片 -->
+  <view class="rewards-section">
+    <view class="section-title">
+      <text class="title-icon">🎁</text>
+      <text class="title-text">签到奖励</text>
+    </view>
+
+    <view class="rewards-grid">
+      <view 
+        wx:for="{{rewards}}" 
+        wx:key="days"
+        class="reward-card {{item.canClaim ? 'can-claim' : ''}} {{item.claimed ? 'claimed' : ''}}"
+        bindtap="claimReward"
+        data-reward="{{item}}"
+      >
+        <view class="reward-icon-box">
+          <text class="reward-icon">{{item.icon}}</text>
+          <view class="claimed-badge" wx:if="{{item.claimed}}">
+            <text class="badge-text">已领取</text>
+          </view>
+        </view>
+        <text class="reward-days">{{item.days}}天</text>
+        <text class="reward-amount">{{item.stars}} ⭐</text>
+        
+        <!-- 领取按钮 -->
+        <view class="claim-button {{item.canClaim ? 'active' : ''}} {{item.claimed ? 'claimed' : ''}}" wx:if="{{item.canClaim || item.claimed}}">
+          <text class="claim-text">{{item.claimed ? '✓ 已领' : '领取'}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 彩带效果（签到成功时显示） -->
+  <view class="confetti-container" wx:if="{{showConfetti}}">
+    <view class="confetti confetti-1">🎉</view>
+    <view class="confetti confetti-2">✨</view>
+    <view class="confetti confetti-3">⭐</view>
+    <view class="confetti confetti-4">🎊</view>
+    <view class="confetti confetti-5">💫</view>
+    <view class="confetti confetti-6">🌟</view>
+  </view>
+</view>

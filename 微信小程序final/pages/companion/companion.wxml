@@ -1,0 +1,259 @@
+<view class="page {{selectedMascotId === 'cute-fox' ? 'page--fox' : ''}}">
+  <view class="top-section">
+    <view class="hero">
+      <view class="avatar-wrap">
+        <text class="avatar">{{currentMascotEmoji}}</text>
+      </view>
+      <view class="meta">
+        <text class="name">{{companionName}}</text>
+        <text class="sub">{{modelHint}}</text>
+      </view>
+    </view>
+
+    <view class="pet-link-bar" bindtap="goToPetSystem">
+      <text class="pet-link-text">🥚 宠物蛋乐园 · 解锁更多陪读伙伴</text>
+      <text class="pet-link-arrow">›</text>
+    </view>
+
+    <view class="stage-center-wrap">
+      <view class="companion-showcase-row">
+        <view class="companion-rail companion-rail-left">
+          <view class="companion-rail-icon" catchtap="toggleTuning">
+            <text class="companion-rail-emoji">⚙️</text>
+            <text class="companion-rail-cap">设置</text>
+          </view>
+          <view class="companion-rail-icon" catchtap="onCompanionTips">
+            <text class="companion-rail-emoji">💡</text>
+            <text class="companion-rail-cap">提示</text>
+          </view>
+        </view>
+
+        <view class="companion-pet-column">
+          <view class="companion-pet-card {{companionThreeSwitching || modelLoading ? 'companion-pet-card-switching' : ''}}">
+            <view class="companion-pet-stage">
+              <view wx:if="{{companionThreeSwitching && !modelLoading && !modelFailed}}" class="companion-switching-overlay">
+                <view class="companion-switching-ring"></view>
+                <text class="companion-switching-text">切换中…</text>
+              </view>
+              <!-- WebGL 原生层会压过普通 view：加载/失败/揭示前折叠画布到屏外 + 蒙层多留约 168ms -->
+              <view
+                class="companion-three-interact-layer {{modelLoading || modelFailed || companionForceLoadCover ? 'companion-webgl-stage-collapsed' : ''}}"
+                bindwheel="onHomeMouseWheel"
+                bindmousewheel="onHomeMouseWheel"
+              >
+                <canvas
+                  id="threeCanvas"
+                  type="webgl"
+                  class="model-view three-canvas three-canvas-show"
+                  disable-scroll="true"
+                  catchtouchstart="onCanvasTouchStart"
+                  catchtouchmove="onCanvasTouchMove"
+                  catchtouchend="onCanvasTouchEnd"
+                  catchtouchcancel="onCanvasTouchEnd"
+                />
+              </view>
+
+              <view wx:if="{{modelLoading || modelFailed || companionForceLoadCover}}" class="companion-home-loading-overlay" catchtap="onModelMagicTap">
+                <view class="companion-home-loading-ring"></view>
+                <text wx:if="{{!modelFailed && companionForceLoadCover && !modelLoading}}" class="companion-home-loading-text">请稍候…</text>
+                <text wx:elif="{{!modelFailed}}" class="companion-home-loading-text">{{modelLoadStageText}} {{modelLoadProgress}}%</text>
+                <text wx:else class="companion-home-loading-text">加载失败，点一下重试</text>
+                <text wx:if="{{modelLoading}}" class="companion-home-loading-sub">点点屏幕施魔法（已点：{{modelMagicCount}}）</text>
+              </view>
+            </view>
+          </view>
+          <view class="companion-pet-shadow"></view>
+        </view>
+
+        <view class="companion-rail companion-rail-right">
+          <view class="companion-rail-icon" catchtap="onCompanionOpenSwitch">
+            <text class="companion-rail-emoji">🐾</text>
+            <text class="companion-rail-cap">切换模型</text>
+          </view>
+          <view class="companion-rail-icon" catchtap="onCompanionGuide">
+            <text class="companion-rail-emoji">📖</text>
+            <text class="companion-rail-cap">指南</text>
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{showCompanionSwitchModal}}" class="companion-switch-mask" catchtap="onCompanionCloseSwitch">
+        <view class="companion-switch-modal" catchtap="noopCatchMove">
+          <view class="companion-switch-header">
+            <text class="companion-switch-title">切换小伙伴</text>
+            <text class="companion-switch-close" catchtap="onCompanionCloseSwitch">✕</text>
+          </view>
+
+          <view wx:if="{{companionSwitchStep === 'menu'}}" class="companion-switch-menu">
+            <view class="companion-switch-item" catchtap="onCompanionSwitchPickMascot">
+              <text class="companion-switch-item-title">切换伴宠</text>
+              <text class="companion-switch-item-sub">从已解锁的小伙伴里选择</text>
+            </view>
+            <view class="companion-switch-item" catchtap="onCompanionSwitchPickForm">
+              <text class="companion-switch-item-title">切换形态</text>
+              <text class="companion-switch-item-sub">初阶 / 中阶 / 高阶（三种）</text>
+            </view>
+          </view>
+
+          <view wx:elif="{{companionSwitchStep === 'mascot'}}" class="companion-switch-body">
+            <view class="companion-switch-back" catchtap="onCompanionSwitchBack">‹ 返回</view>
+            <view class="companion-switch-grid">
+              <view
+                wx:for="{{mascotAvatarsForSwitch}}"
+                wx:key="id"
+                class="companion-switch-mascot {{item.locked ? 'companion-switch-locked' : ''}}"
+                catchtap="onCompanionSelectMascotFromModal"
+                data-mascot="{{item}}"
+              >
+                <image class="companion-switch-mascot-img {{item.locked ? 'companion-switch-img-dim' : ''}}" src="{{item.url}}" mode="aspectFill" />
+                <view class="companion-switch-mascot-name">{{item.name}}</view>
+                <view class="companion-switch-lock" wx:if="{{item.locked}}">🔒</view>
+              </view>
+            </view>
+          </view>
+
+          <view wx:elif="{{companionSwitchStep === 'form'}}" class="companion-switch-body">
+            <view class="companion-switch-back" catchtap="onCompanionSwitchBack">‹ 返回</view>
+            <view class="companion-form-grid">
+              <view
+                wx:for="{{[1,2,3]}}"
+                wx:key="*this"
+                class="companion-form-card {{(companionUnlockedFormTiers.indexOf(item) === -1) ? 'companion-switch-locked' : ''}}"
+                catchtap="onCompanionSelectFormTier"
+                data-tier="{{item}}"
+              >
+                <view class="companion-form-poster">
+                  <image class="companion-form-poster-img {{(companionUnlockedFormTiers.indexOf(item) === -1) ? 'companion-switch-img-dim' : ''}}" src="{{companionSwitchPosterMascot.url}}" mode="aspectFill" />
+                  <view class="companion-form-badge">形态{{item}}</view>
+                </view>
+                <view class="companion-form-title">
+                  {{item === 1 ? '初阶形态' : (item === 2 ? '中阶形态' : '高阶形态')}}
+                </view>
+                <view class="companion-switch-lock" wx:if="{{companionUnlockedFormTiers.indexOf(item) === -1}}">🔒</view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view wx:if="{{showTuning}}" class="model-card">
+        <view class="model-action-row model-action-row-triple">
+          <view class="model-action-btn" bindtap="retryModelLoad">重试加载</view>
+          <view class="model-action-btn" bindtap="toggleTuning">隐藏调参</view>
+          <view class="model-action-btn" bindtap="resetTuning">重置参数</view>
+        </view>
+
+        <view class="tuning-panel" catchtouchmove="noopCatchMove">
+          <text class="tuning-title">模型调参（{{companionName}}）</text>
+          <view class="tuning-actions">
+            <view class="tuning-save-btn" bindtap="saveTuningManual">保存到后端</view>
+          </view>
+
+          <view class="tuning-item">
+            <text class="tuning-label">位置 X: {{homeTunePosX}}</text>
+            <slider min="-200" max="200" step="1" value="{{homeTunePosX}}" data-key="homeTunePosX" bindchanging="onHomeTuningSlider" />
+          </view>
+          <view class="tuning-item">
+            <text class="tuning-label">位置 Y: {{homeTunePosY}}</text>
+            <slider min="-10000" max="200" step="0.1" value="{{homeTunePosY}}" data-key="homeTunePosY" bindchanging="onHomeTuningSlider" />
+            <view class="tuning-input-row">
+              <input class="tuning-input" type="text" placeholder="输入小数，如 0.2" value="{{homeTunePosYText}}" bindinput="onHomeTunePosYTextInput" />
+            </view>
+          </view>
+          <view class="tuning-item">
+            <text class="tuning-label">位置 Z: {{homeTunePosZ}}</text>
+            <slider min="-200" max="200" step="1" value="{{homeTunePosZ}}" data-key="homeTunePosZ" bindchanging="onHomeTuningSlider" />
+          </view>
+          <view class="tuning-item">
+            <text class="tuning-label">缩放: {{homeTuneScalePct}}%</text>
+            <slider min="20" max="300" step="1" value="{{homeTuneScalePct}}" data-key="homeTuneScalePct" bindchanging="onHomeTuningSlider" />
+          </view>
+          <view class="tuning-item">
+            <text class="tuning-label">旋转Y: {{homeTuneRotY}}°</text>
+            <slider min="-180" max="180" step="1" value="{{homeTuneRotY}}" data-key="homeTuneRotY" bindchanging="onHomeTuningSlider" />
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="chat-dock">
+    <view class="chat-dock-head">
+      <text class="chat-dock-title">和 {{companionName}} 聊天</text>
+      <view class="chat-new-btn" bindtap="onStartNewChat">新建对话</view>
+    </view>
+
+    <scroll-view
+      scroll-y="true"
+      class="chat-scroll"
+      scroll-into-view="{{chatScrollInto}}"
+      scroll-with-animation="true"
+    >
+      <view class="chat-inner">
+        <view
+          wx:for="{{chatList}}"
+          wx:key="index"
+          id="chat-msg-{{index}}"
+          class="chat-row {{item.role === 'user' ? 'chat-row-user' : 'chat-row-ai'}}"
+        >
+          <view class="chat-bubble {{item.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}}">
+            <text class="chat-bubble-text">{{item.text}}</text>
+          </view>
+        </view>
+        <view wx:if="{{isTypingReply}}" id="chat-msg-typing" class="chat-row chat-row-ai">
+          <view class="chat-bubble chat-bubble-ai">
+            <text class="chat-bubble-text typing-text">{{typingReplyText}}<text class="typing-caret">|</text></text>
+          </view>
+        </view>
+        <view wx:if="{{chatLoading && !isTypingReply}}" class="chat-thinking-wrap">
+          <view class="thinking-dot dot-1"></view>
+          <view class="thinking-dot dot-2"></view>
+          <view class="thinking-dot dot-3"></view>
+          <text class="chat-thinking-label">{{companionName}}正在想…</text>
+        </view>
+        <view id="chat-anchor-bottom" class="chat-anchor-bottom"></view>
+      </view>
+    </scroll-view>
+
+    <view wx:if="{{speechHint}}" class="chat-status-line">
+      <text class="chat-status-text">{{speechHint}}</text>
+    </view>
+
+    <view class="quick-replies">
+      <view wx:for="{{liveQuickReplies}}" wx:key="text" class="quick-item" bindtap="tapQuickReply" data-text="{{item.text}}">
+        <text class="quick-icon">{{item.icon}}</text>
+        <text class="quick-text">{{item.text}}</text>
+      </view>
+    </view>
+
+    <view class="record-row">
+      <view
+        class="record-btn {{isRecording ? 'recording' : ''}}"
+        bindtouchstart="startRecord"
+        bindtouchend="stopRecord"
+        bindtouchcancel="stopRecord"
+      >
+        <text class="record-btn-icon">{{isRecording ? '🎙️' : '🎤'}}</text>
+        <text class="record-btn-text">{{isRecording ? '松开发送' : '按住说话'}}</text>
+        <view wx:if="{{audioWaveActive}}" class="record-wave-wrap">
+          <view class="record-wave wave-1"></view>
+          <view class="record-wave wave-2"></view>
+          <view class="record-wave wave-3"></view>
+        </view>
+      </view>
+      <text class="record-hint">{{recordHint}}</text>
+    </view>
+
+    <view class="input-row">
+      <input
+        class="chat-input"
+        value="{{chatInput}}"
+        placeholder="输入一句话…"
+        bindinput="onChatInput"
+        confirm-type="send"
+        bindconfirm="sendInputText"
+      />
+      <view class="send-btn" bindtap="sendInputText">发送</view>
+    </view>
+  </view>
+</view>

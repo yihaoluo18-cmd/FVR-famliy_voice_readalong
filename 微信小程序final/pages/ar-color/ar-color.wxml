@@ -1,0 +1,253 @@
+<view class="container">
+
+  <!-- ══════════════════════════════════
+       STEP 1：上传涂色作品
+  ══════════════════════════════════ -->
+  <view class="step upload-step" wx:if="{{step === 'upload'}}">
+
+    <!-- 顶部标题区 -->
+    <view class="upload-header">
+      <view class="back-btn" bindtap="goBack">
+        <image class="back-img" src="{{arColorBackIcon}}" mode="widthFix" />
+      </view>
+      <view class="header-center">
+        <view class="ar-badge">
+          <text class="ar-badge-text">AR</text>
+        </view>
+        <text class="header-title">AR 涂色生命化</text>
+        <text class="header-sub">让你的涂色作品动起来！✨</text>
+      </view>
+      <view class="header-stars">
+        <text class="header-stars-text">+8 ⭐</text>
+      </view>
+    </view>
+
+    <!-- 上传卡片 -->
+    <view class="upload-card" bindtap="choosePhoto">
+      <view class="upload-icon-box">
+        <text class="upload-icon">📸</text>
+        <view class="upload-ring r1" />
+        <view class="upload-ring r2" />
+      </view>
+      <text class="upload-card-title">拍下你的涂色作品</text>
+      <text class="upload-card-desc">将画纸平铺<text class="highlight">拍照</text>或从相册<text class="highlight">选图</text></text>
+    </view>
+
+    <!-- 选图按钮区 -->
+    <view class="choose-row">
+      <view class="choose-btn choose-camera" bindtap="takePhoto">
+        <text class="choose-btn-icon">📷</text>
+        <text class="choose-btn-text">拍照</text>
+      </view>
+      <view class="choose-btn choose-album" bindtap="chooseAlbum">
+        <text class="choose-btn-icon">🖼️</text>
+        <text class="choose-btn-text">相册</text>
+      </view>
+    </view>
+
+    <!-- 预览区（选图后出现） -->
+    <view class="preview-card {{uploadedImage ? 'show' : ''}}">
+      <view class="preview-img-wrap" wx:if="{{uploadedImage}}">
+        <image class="preview-img" src="{{uploadedImage}}" mode="aspectFit" />
+        <view class="preview-badge">
+          <text>✓ 已选择</text>
+        </view>
+      </view>
+
+      <view class="magic-btn {{uploadedImage ? '' : 'disabled'}}" bindtap="startAR">
+        <text class="magic-icon">✨</text>
+        <text class="magic-text">让角色动起来！</text>
+        <text class="magic-icon">✨</text>
+      </view>
+    </view>
+
+    <!-- 步骤说明 -->
+    <view class="steps-hint">
+      <text class="steps-title">🎯 怎么玩？</text>
+      <view class="step-item">
+        <view class="step-num">1</view>
+        <text class="step-desc">给你的涂色作品拍一张照片</text>
+      </view>
+      <view class="step-item">
+        <view class="step-num">2</view>
+        <text class="step-desc">AI 魔法识别你画的角色</text>
+      </view>
+      <view class="step-item">
+        <view class="step-num">3</view>
+        <text class="step-desc">用摄像头看，角色在真实世界动起来！</text>
+      </view>
+    </view>
+
+  </view>
+
+  <!-- ══════════════════════════════════
+       STEP 2：AI 处理中
+  ══════════════════════════════════ -->
+  <view class="step process-step" wx:if="{{step === 'processing'}}">
+
+    <!-- 轨道动画 -->
+    <view class="orbit-wrap">
+      <view class="orbit-core">
+        <image class="orbit-img" src="{{uploadedImage}}" mode="aspectFill" />
+      </view>
+      <view class="orbit-ring or1">
+        <view class="orbit-planet p1"><text>⭐</text></view>
+      </view>
+      <view class="orbit-ring or2">
+        <view class="orbit-planet p2"><text>✨</text></view>
+      </view>
+      <view class="orbit-ring or3">
+        <view class="orbit-planet p3"><text>🌟</text></view>
+      </view>
+    </view>
+
+    <text class="process-title">AI 正在施魔法...</text>
+    <text class="process-sub">识别你画的角色，让它活起来 🪄</text>
+
+    <!-- 进度条 -->
+    <view class="process-bar-wrap">
+      <view class="process-bar-fill" style="width: {{progress}}%" />
+    </view>
+    <text class="process-percent">{{progress}}%</text>
+
+    <!-- 提示语轮换 -->
+    <view class="process-tips">
+      <text class="process-tip">{{processTip}}</text>
+    </view>
+
+  </view>
+
+  <!-- ══════════════════════════════════
+       STEP 3：AR 场景视图
+  ══════════════════════════════════ -->
+  <view class="step ar-step" wx:if="{{step === 'ar'}}">
+
+    <!-- 相机背景 -->
+    <camera
+      class="ar-camera-bg"
+      device-position="back"
+      flash="off"
+      binderror="onCameraError"
+    />
+
+    <!-- AR UI 叠加层 -->
+    <view class="ar-overlay">
+
+      <!-- 顶部状态栏 -->
+      <view class="ar-top-bar">
+        <view class="back-btn-white" bindtap="goBack">
+          <image class="back-img" src="{{arColorBackIcon}}" mode="widthFix" />
+        </view>
+        <view class="ar-live-badge">
+          <view class="live-dot" />
+          <text class="live-text">AR 实时</text>
+        </view>
+        <view class="placeholder-btn" />
+      </view>
+
+      <!-- 平面检测提示 -->
+      <view class="scan-hint-row" wx:if="{{!planeDetected}}">
+        <text class="scan-hint-text">📲 慢慢移动手机扫描地面...</text>
+      </view>
+
+      <!-- 角色浮现区域 -->
+      <view class="character-stage {{planeDetected ? 'show' : ''}}">
+        <view class="character-wrap {{floatClass}}">
+          <!-- 倒影 -->
+          <view class="char-shadow" />
+          <!-- 角色图像（使用涂色照片） -->
+          <image class="char-img" src="{{uploadedImage}}" mode="aspectFit" />
+          <!-- 发光光圈 -->
+          <view class="char-glow" />
+        </view>
+        <!-- 环绕 sparkle -->
+        <view class="sparkle-ring">
+          <text class="sp sp1">✨</text>
+          <text class="sp sp2">⭐</text>
+          <text class="sp sp3">🌟</text>
+          <text class="sp sp4">✨</text>
+        </view>
+      </view>
+
+      <!-- 底部操作栏 -->
+      <view class="ar-bottom-bar">
+        <text class="ar-bottom-hint" wx:if="{{planeDetected}}">
+          🎉 你的涂色角色活啦！
+        </text>
+        <text class="ar-bottom-hint" wx:else>
+          正在寻找平坦地面...
+        </text>
+        <view class="ar-action-row">
+          <view class="ar-action-btn btn-capture" bindtap="capturePhoto">
+            <text class="ar-action-icon">📸</text>
+            <text class="ar-action-text">拍照留念</text>
+          </view>
+          <view class="ar-action-btn btn-finish {{planeDetected ? '' : 'dim'}}" bindtap="finishAR">
+            <text class="ar-action-icon">🎊</text>
+            <text class="ar-action-text">完成 +8⭐</text>
+          </view>
+        </view>
+      </view>
+
+    </view>
+  </view>
+
+  <!-- ══════════════════════════════════
+       STEP 4：完成界面
+  ══════════════════════════════════ -->
+  <view class="step complete-step" wx:if="{{step === 'complete'}}">
+
+    <!-- 彩带 -->
+    <view class="confetti-wrap">
+      <view class="conf c1" /><view class="conf c2" /><view class="conf c3" />
+      <view class="conf c4" /><view class="conf c5" /><view class="conf c6" />
+    </view>
+
+    <!-- 完成卡片 -->
+    <view class="complete-card">
+      <view class="complete-top">
+        <view class="trophy-circle">
+          <text class="trophy-emoji">🏆</text>
+        </view>
+        <text class="complete-title">太厉害了！</text>
+        <text class="complete-sub">你的涂色作品成功活啦！</text>
+      </view>
+
+      <!-- 涂色预览 -->
+      <view class="complete-preview">
+        <image class="complete-img" src="{{uploadedImage}}" mode="aspectFit" />
+        <view class="alive-tag">
+          <text>✨ 已生命化</text>
+        </view>
+      </view>
+
+      <!-- 奖励 -->
+      <view class="reward-row">
+        <view class="reward-item">
+          <text class="reward-number">+8</text>
+          <text class="reward-label">颗星星</text>
+        </view>
+        <view class="reward-divider" />
+        <view class="reward-item">
+          <text class="reward-number">{{coloringWorks}}</text>
+          <text class="reward-label">幅作品</text>
+        </view>
+      </view>
+
+      <!-- 按钮 -->
+      <view class="complete-actions">
+        <view class="btn-again-complete" bindtap="resetPage">
+          <text>再来一幅</text>
+        </view>
+        <view class="btn-share-complete" bindtap="shareResult">
+          <text>分享给朋友 🎁</text>
+        </view>
+        <view class="btn-home" bindtap="goBack">
+          <text>回到游乐园</text>
+        </view>
+      </view>
+    </view>
+
+  </view>
+
+</view>

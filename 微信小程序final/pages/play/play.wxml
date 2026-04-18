@@ -1,0 +1,163 @@
+<view class="container">
+
+  <!-- 顶部摩天轮 -->
+  <view class="ride-section">
+    <view class="ride-hint-row">
+      <text class="ride-hint-spark">✨</text>
+      <text class="ride-hint-text">沿圈轻轻滑动，大摩天轮会跟着转</text>
+    </view>
+
+    <view class="ride-stage">
+      <view class="ride-orbit-wrap">
+        <view class="ride-shimmer"></view>
+        <view class="ride-glow-pulse"></view>
+
+        <view
+          class="ride-touch-target"
+          catchtouchstart="onRideTouchStart"
+          catchtouchmove="onRideTouchMove"
+          catchtouchend="onRideTouchEnd"
+          catchtouchcancel="onRideTouchEnd"
+        >
+          <view class="ferris-wheel-wrap">
+            <view class="ferris-wheel" style="transform: rotate({{ferrisDeg}}deg);">
+              <view class="ferris-rim"></view>
+              <view class="ferris-drive-spokes">
+                <view
+                  wx:for="{{ferrisCabins}}"
+                  wx:key="angle"
+                  class="ferris-drive-arm"
+                  style="transform: rotate({{item.angle}}deg);"
+                >
+                  <view class="ferris-drive-bar"></view>
+                </view>
+              </view>
+              <view
+                wx:for="{{ferrisCabins}}"
+                wx:key="angle"
+                class="ferris-arm"
+                style="transform: rotate({{item.angle}}deg);"
+              >
+                <view
+                  class="ferris-cabin"
+                  style="transform: rotate({{0 - ferrisDeg - item.angle}}deg);"
+                >
+                  <view class="ferris-cabin-cable"></view>
+                  <view class="ferris-cabin-roof"></view>
+                  <view class="ferris-cabin-box">
+                    <view class="ferris-cabin-window ferris-cabin-window-l"></view>
+                    <view class="ferris-cabin-window ferris-cabin-window-r"></view>
+                    <view class="ferris-cabin-door"></view>
+                  </view>
+                  <view class="ferris-cabin-skirt"></view>
+                </view>
+              </view>
+              <view class="ferris-hub">
+                <view class="ferris-hub-inner"></view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+
+      <view class="ride-stand ride-stand-ferris">
+        <view class="ferris-leg ferris-leg-left"></view>
+        <view class="ferris-leg ferris-leg-right"></view>
+        <view class="ferris-base-foot"></view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 游乐园：细轨道 + 圆点节点（堆叠星 + 数字） -->
+  <view class="ap-progress-card {{showGuide && guideHighlight === 'egg' ? 'guide-pulse' : ''}}">
+    <view class="ap-progress-head">
+      <text class="ap-head-icon">🎪</text>
+      <text class="ap-progress-count">{{apCount}}/{{apTotal}}</text>
+    </view>
+    <view class="ap-rail-inner">
+      <view class="ap-rail-line-bg"></view>
+      <view class="ap-rail-line-fill" style="width: {{apFillPercent}}%;"></view>
+      <view class="ap-rail-nodes">
+        <view
+          wx:for="{{apNodes}}"
+          wx:for-item="node"
+          wx:for-index="segIdx"
+          wx:key="stars"
+          class="ap-rail-node-wrap"
+          style="left: {{node.leftPct}}%;"
+        >
+          <view class="ap-node-bubble {{apCount > segIdx ? 'is-done' : ''}}">
+            <view class="ap-node-stack stack-{{node.stackLayers.length}}">
+              <text
+                wx:for="{{node.stackLayers}}"
+                wx:for-item="ly"
+                wx:for-index="si"
+                wx:key="si"
+                class="ap-node-stack-star"
+              >⭐</text>
+            </view>
+            <text class="ap-node-num">{{node.stars}}</text>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 游戏列表 -->
+  <view class="games-list {{showGuide && guideHighlight === 'games' ? 'guide-pulse' : ''}}">
+    <view 
+      wx:for="{{games}}" 
+      wx:key="id"
+      class="game-card-wrapper"
+      style="animation-delay: {{item.delay}}s"
+    >
+      <view class="game-card-float-inner" style="animation-delay: {{item.delay}}s">
+      <view 
+        class="game-card game-{{item.id}} {{item.unlocked ? '' : 'locked'}}"
+        bindtap="playGame"
+        data-game="{{item}}"
+      >
+        <!-- 图标 -->
+        <view class="game-icon-box icon-{{item.id}}">
+          <text class="game-icon">{{item.iconEmoji}}</text>
+        </view>
+
+        <!-- 文本 -->
+        <view class="game-text">
+          <text class="game-title">{{item.title}}</text>
+          <text class="game-desc">{{item.desc}}</text>
+        </view>
+
+        <!-- 右侧 -->
+        <view class="game-right">
+          <text class="game-emoji">{{item.emoji}}</text>
+          <view class="game-stars-badge {{item.done ? 'is-done' : 'is-todo'}}">
+            <text class="stars-text {{item.done ? 'done' : 'todo'}}">{{item.done ? '已完成' : '待完成'}}</text>
+          </view>
+        </view>
+
+        <!-- 锁定遮罩 -->
+        <view class="lock-overlay" wx:if="{{!item.unlocked}}">
+          <view class="lock-icon-box">
+            <text class="lock-icon">🔒</text>
+          </view>
+        </view>
+      </view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+
+</view>

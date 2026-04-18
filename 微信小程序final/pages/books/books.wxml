@@ -1,0 +1,254 @@
+<view class="container">
+  <!-- 头部信息 -->
+  <view class="header">
+    <text class="book-icon">📚</text>
+    <text class="header-text">共 {{totalBooks}} 本绘本 · 为你精选</text>
+    <text class="star-icon">⭐</text>
+  </view>
+
+  <!-- AI故事生成横幅 -->
+  <view class="ai-banner" bindtap="goToAIStory">
+    <text class="banner-deco-top">✨</text>
+    <text class="banner-deco-bottom">📸</text>
+    
+    <view class="banner-content">
+      <view class="banner-icon-box {{rotateClass}}">
+        <text class="banner-icon">✨</text>
+      </view>
+      <view class="banner-text">
+        <text class="banner-title">AI魔法绘本 🎨</text>
+        <text class="banner-subtitle">拍张照片，AI帮你创作专属故事</text>
+      </view>
+      <view class="banner-button">
+        <text class="button-text">试试看</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 标签切换器 -->
+  <view class="tab-switcher">
+    <view 
+      class="tab-item {{activeTab === 'featured' ? 'active' : ''}}"
+      bindtap="switchToFeatured"
+    >
+      <text class="tab-icon">📖</text>
+      <text class="tab-text">精选绘本</text>
+    </view>
+    <view 
+      class="tab-item {{activeTab === 'ai' ? 'active' : ''}}"
+      bindtap="switchToAI"
+    >
+      <text class="tab-icon">🪄</text>
+      <text class="tab-text">魔法书架</text>
+      <view class="badge" wx:if="{{shelfBooksCount > 0}}">
+        <text class="badge-text">{{shelfBooksCount}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 精选绘本：阅读计划 + 最近阅读 -->
+  <view class="featured-reading-sections" wx:if="{{activeTab === 'featured'}}">
+    <view class="featured-recommend-section">
+      <view class="bookshelf-header featured-section-header">
+        <text class="sparkle-icon">🔥</text>
+        <text class="bookshelf-title">每日推荐</text>
+        <text class="bookshelf-count">（{{featuredRecommendItems.length}}本）</text>
+      </view>
+      <view wx:if="{{featuredRecommendItems.length > 0}}">
+        <view class="recommend-shelf-board {{showGuide && guideHighlight === 'recommend' ? 'guide-pulse' : ''}}">
+          <scroll-view
+            class="recommend-shelf-scroll"
+            scroll-x
+            enhanced
+            scroll-with-animation="{{recommendScrollWithAnimation}}"
+            show-scrollbar="{{false}}"
+            scroll-left="{{recommendScrollLeft}}"
+            bindscroll="onRecommendScroll"
+            bindtouchstart="onRecommendTouchStart"
+            bindtouchend="onRecommendTouchEnd"
+            bindtouchcancel="onRecommendTouchEnd"
+          >
+            <view class="recommend-shelf-row {{recommendFloatingPaused ? 'recommend-floating-paused' : ''}}">
+              <view
+                wx:for="{{featuredRecommendRenderItems}}"
+                wx:for-index="idx"
+                wx:key="__k"
+                class="recommend-book-item recommend-float-{{idx % 4}}"
+                bindtap="openPlannedBook"
+                data-id="{{item.bookId}}"
+                data-source="{{item.source}}"
+                data-page="{{item.currentPageIndex || 0}}"
+              >
+                <image class="recommend-book-cover" src="{{item.coverImage}}" mode="aspectFill" lazy-load />
+                <view class="recommend-book-gloss"></view>
+                <view class="recommend-book-tag" wx:if="{{item.title}}">
+                  <text class="recommend-book-tag-text">{{item.title}}</text>
+                </view>
+              </view>
+            </view>
+          </scroll-view>
+        </view>
+      </view>
+      <view wx:else class="empty-state local-empty">
+        <text class="empty-icon">📚</text>
+        <text class="empty-title">今天还没有推荐绘本</text>
+        <text class="empty-subtitle">先去书架读几本，系统会自动推荐你可能喜欢的绘本。</text>
+      </view>
+    </view>
+
+    <view class="featured-divider"></view>
+
+    <view class="featured-recent-section {{showGuide && guideHighlight === 'recent' ? 'guide-pulse' : ''}}">
+      <view class="bookshelf-header featured-section-header">
+        <text class="sparkle-icon">📚</text>
+        <text class="bookshelf-title">最近阅读</text>
+        <text class="bookshelf-count">（{{featuredRecentItems.length}}条）</text>
+      </view>
+      <view wx:if="{{featuredRecentItems.length > 0}}">
+        <view class="featured-book-row recent-reading-row" wx:for="{{featuredRecentItems}}" wx:key="bookId">
+          <view class="continue-reading-card" style="background: {{item.continueBgColor}};">
+            <view class="continue-reading-top">
+              <text class="continue-reading-encourage">{{item.encourageText}}</text>
+              <view class="continue-reading-progress-wrap">
+                <view class="continue-reading-progress-line">
+                  <view class="continue-reading-progress-fill" style="width: {{item.progressPercent}}%; background: {{item.progressColor}};"></view>
+                </view>
+                <text class="continue-reading-percent">{{item.progressPercent}}%</text>
+              </view>
+            </view>
+
+            <view class="continue-reading-main">
+              <view class="continue-reading-cover" bindtap="openRecentBook" data-id="{{item.bookId}}" data-source="{{item.source}}" data-page="{{item.pageIndex}}">
+                <image class="continue-reading-cover-image" src="{{item.coverImage}}" mode="aspectFill" />
+                <view class="continue-reading-cover-title" wx:if="{{item.title}}">
+                  <text class="continue-reading-cover-title-text">{{item.title}}</text>
+                </view>
+              </view>
+
+              <view class="continue-reading-note">
+                <view class="continue-reading-info-card">
+                  <text class="continue-reading-pos">上次读到第{{item.pageIndex + 1}}页</text>
+                  <text class="continue-reading-total">共{{item.totalPages}}页</text>
+                </view>
+              </view>
+              <text class="continue-reading-dots">⋮</text>
+            </view>
+          </view>
+        </view>
+      </view>
+      <view wx:else class="empty-state local-empty">
+        <text class="empty-icon">🕰️</text>
+        <text class="empty-title">最近还没有阅读记录</text>
+        <text class="empty-subtitle">打开一本绘本阅读后，这里会自动记录你的进度。</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 魔法书架（后端绘本集） -->
+  <view class="ai-stories-section" wx:if="{{activeTab === 'ai'}}">
+    <view class="bookshelf-header">
+      <text class="sparkle-icon">🏠</text>
+      <text class="bookshelf-title">分类书屋</text>
+      <text class="bookshelf-count">（{{shelfBooksCount}}本）</text>
+    </view>
+
+    <view wx:if="{{shelfLoading}}" class="empty-state">
+      <text class="empty-icon">⏳</text>
+      <text class="empty-title">正在连接绘本库...</text>
+      <text class="empty-subtitle">请稍候，正在整理分类书屋。</text>
+    </view>
+
+    <view wx:elif="{{shelfBooksCount > 0}}">
+      <scroll-view
+        class="category-houses-scroll"
+        scroll-x
+        enhanced
+        scroll-with-animation="{{categoryScrollWithAnimation}}"
+        show-scrollbar="{{false}}"
+        scroll-left="{{categoryScrollLeft}}"
+        bindscroll="onCategoryScroll"
+        bindtouchstart="onCategoryTouchStart"
+        bindtouchend="onCategoryTouchEnd"
+        bindtouchcancel="onCategoryTouchEnd"
+      >
+        <view class="category-houses-row {{categoryFloatingPaused ? 'category-floating-paused' : ''}}">
+          <view
+            wx:for="{{shelfCategoriesRender}}"
+            wx:for-index="idx"
+            wx:key="__k"
+            class="category-house-card category-float-{{idx % 4}} {{activeShelfCategoryId === item.id ? 'active' : ''}}"
+            style="background: {{item.bgColor}};"
+            bindtap="onSelectShelfCategory"
+            data-cid="{{item.id}}"
+          >
+            <text class="category-house-ghost">{{item.ghostIcon}}</text>
+            <view class="category-house-title-wrap">
+              <text class="category-house-title">{{item.title}}</text>
+            </view>
+            <view class="category-house-progress-track">
+              <view class="category-house-progress" style="width: {{item.progress}}%; background: {{item.accentColor}};"></view>
+            </view>
+            <text class="category-house-count">{{item.count}}本</text>
+          </view>
+        </view>
+      </scroll-view>
+
+      <view class="bookshelf-header active-category-header">
+        <text class="sparkle-icon">📖</text>
+        <text class="bookshelf-title">当前分类</text>
+        <text class="bookshelf-count">（{{currentCategoryBooks.length}}本）</text>
+      </view>
+
+      <view class="category-book-list" wx:if="{{currentCategoryBooks.length > 0}}">
+        <view
+          wx:for="{{currentCategoryBooks}}"
+          wx:key="id"
+          class="category-book-card"
+          hover-class="category-book-card-hover"
+          hover-start-time="30"
+          hover-stay-time="100"
+          bindtap="openShelfBook"
+          data-id="{{item.id}}"
+        >
+          <view class="category-book-cover-wrap">
+            <image class="category-book-cover" src="{{item.coverImage}}" mode="aspectFill" />
+            <view class="category-book-cover-gloss"></view>
+            <view class="category-book-click-flash"></view>
+          </view>
+          <view class="category-book-main">
+            <text class="category-book-title">{{item.title}}</text>
+            <text class="category-book-pages">{{item.pagesText}}</text>
+          </view>
+        </view>
+      </view>
+
+      <view wx:else class="empty-state local-empty">
+        <text class="empty-icon">🪴</text>
+        <text class="empty-title">这个书屋暂时还没有书</text>
+        <text class="empty-subtitle">换一个分类看看，或等待更多绘本进入书架。</text>
+      </view>
+    </view>
+
+    <view wx:else class="empty-state">
+      <text class="empty-icon">📚</text>
+      <text class="empty-title">绘本库里还没有书</text>
+      <text class="empty-subtitle">把绘本文件夹放进服务器项目里的 `绘本集/`（每本书一个子文件夹：txt + 第1段.jpg…），然后刷新书架。</text>
+      <view class="empty-button" bindtap="refreshShelfBooks">
+        <text class="empty-button-text">刷新书架</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+</view>

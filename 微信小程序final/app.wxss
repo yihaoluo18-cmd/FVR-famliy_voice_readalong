@@ -1,0 +1,425 @@
+/* 全局样式：淡粉主色 + 黄辅色玻璃主题 */
+:root {
+  --app-font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+page {
+  --glass-bg: rgba(255, 255, 255, 0.56);
+  --glass-strong: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.86);
+  --glass-shadow: 0 10rpx 26rpx rgba(190, 24, 93, 0.1);
+  --accent-yellow: #fef3c7;
+  --accent-yellow-strong: #fde68a;
+  /* 保留 --purple-* 变量名以兼容旧页面，色值已为粉色 */
+  --purple-main: #f0a8c0;
+  --purple-text: #b87a94;
+  --purple-soft-text: #a8989e;
+
+  background-color: #fff5f7;
+  background-image:
+    radial-gradient(120rpx 100rpx at 8% 12%, rgba(254, 243, 199, 0.45) 0%, rgba(255, 255, 255, 0) 70%),
+    radial-gradient(100rpx 90rpx at 92% 18%, rgba(252, 231, 243, 0.5) 0%, rgba(255, 255, 255, 0) 72%),
+    radial-gradient(28rpx 28rpx at 12% 20%, rgba(255, 255, 255, 0.38) 0%, rgba(255, 255, 255, 0) 72%),
+    radial-gradient(24rpx 24rpx at 88% 28%, rgba(255, 255, 255, 0.32) 0%, rgba(255, 255, 255, 0) 74%),
+    radial-gradient(26rpx 26rpx at 20% 76%, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0) 76%),
+    radial-gradient(22rpx 22rpx at 82% 82%, rgba(255, 255, 255, 0.24) 0%, rgba(255, 255, 255, 0) 76%),
+    linear-gradient(165deg, #fff5f7 0%, #fff0f5 38%, #fffbeb 100%);
+  font-family: var(--app-font-family);
+  color: #333;
+  letter-spacing: 0.2rpx;
+}
+
+/* 全局文本组件统一字体（覆盖页面内单独声明） */
+view,
+text,
+button,
+input,
+textarea,
+picker,
+label,
+navigator {
+  font-family: var(--app-font-family) !important;
+}
+
+/* 通用容器 */
+.container {
+  min-height: 100vh;
+  background:
+    radial-gradient(320rpx 200rpx at 88% 8%, rgba(254, 243, 199, 0.35), rgba(254, 243, 199, 0)),
+    radial-gradient(380rpx 240rpx at 85% -2%, rgba(253, 230, 240, 0.22), rgba(253, 230, 240, 0)),
+    radial-gradient(420rpx 280rpx at 6% 102%, rgba(252, 231, 243, 0.24), rgba(252, 231, 243, 0)),
+    linear-gradient(to bottom, #fff5f7, #fffbeb);
+}
+
+/* 卡片样式 */
+.card {
+  background: var(--glass-bg);
+  border-radius: 24rpx;
+  border: 2rpx solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  padding: 32rpx;
+  margin: 24rpx;
+  backdrop-filter: blur(10rpx);
+  -webkit-backdrop-filter: blur(10rpx);
+}
+
+/* 按钮样式 */
+.btn-primary {
+  background: linear-gradient(135deg, #fef3c7 0%, #fbcfe8 40%, #f0a3c2 100%);
+  color: white;
+  border-radius: 48rpx;
+  padding: 24rpx 48rpx;
+  font-weight: bold;
+  font-size: 32rpx;
+  border: none;
+  box-shadow: 0 8rpx 24rpx rgba(240, 163, 194, 0.3);
+  border: 2rpx solid rgba(255, 255, 255, 0.62);
+}
+
+.btn-secondary {
+  background: var(--glass-strong);
+  color: var(--purple-text);
+  border-radius: 48rpx;
+  padding: 24rpx 48rpx;
+  font-weight: bold;
+  font-size: 32rpx;
+  border: 2rpx solid var(--glass-border);
+  box-shadow: 0 6rpx 16rpx rgba(190, 24, 93, 0.1);
+}
+
+/* 玻璃感基础组件（可在各页面复用） */
+.glass-card {
+  background: var(--glass-bg);
+  border: 2rpx solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(10rpx);
+  -webkit-backdrop-filter: blur(10rpx);
+  border-radius: 28rpx;
+}
+
+.glass-pill {
+  background: rgba(255, 255, 255, 0.66);
+  border: 2rpx solid rgba(255, 255, 255, 0.86);
+  box-shadow: 0 6rpx 16rpx rgba(190, 24, 93, 0.1);
+  backdrop-filter: blur(8rpx);
+  -webkit-backdrop-filter: blur(8rpx);
+  border-radius: 999rpx;
+}
+
+input,
+textarea,
+.input,
+.textarea {
+  background: rgba(255, 255, 255, 0.62);
+  border: 2rpx solid rgba(255, 255, 255, 0.88);
+  box-shadow: 0 6rpx 14rpx rgba(190, 24, 93, 0.08);
+  border-radius: 20rpx;
+}
+
+/* 统一标题色阶 */
+.section-title,
+.title-bold {
+  color: var(--purple-text);
+}
+
+.subtitle,
+.text-gray-500,
+.text-gray-600 {
+  color: var(--purple-soft-text);
+}
+
+/* 粉黄渐变（主按钮/强调块） */
+.purple-gradient {
+  background: linear-gradient(160deg, #fde68a, #fbcfe8 45%, #f0a3c2);
+}
+
+/* 标题文字 */
+.title-bold {
+  font-weight: 900;
+  font-size: 40rpx;
+  color: #1f2937;
+}
+
+.subtitle {
+  font-weight: 700;
+  font-size: 30rpx;
+  color: #5d5679;
+  line-height: 1.45;
+}
+
+/* Flex 布局 */
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-center {
+  justify-content: center;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+/* 间距 */
+.gap-1 {
+  gap: 8rpx;
+}
+
+.gap-2 {
+  gap: 16rpx;
+}
+
+.gap-3 {
+  gap: 24rpx;
+}
+
+.gap-4 {
+  gap: 32rpx;
+}
+
+/* 内边距 */
+.p-2 {
+  padding: 16rpx;
+}
+
+.p-3 {
+  padding: 24rpx;
+}
+
+.p-4 {
+  padding: 32rpx;
+}
+
+.p-5 {
+  padding: 40rpx;
+}
+
+.px-4 {
+  padding-left: 32rpx;
+  padding-right: 32rpx;
+}
+
+.py-3 {
+  padding-top: 24rpx;
+  padding-bottom: 24rpx;
+}
+
+/* 外边距 */
+.m-2 {
+  margin: 16rpx;
+}
+
+.mt-3 {
+  margin-top: 24rpx;
+}
+
+.mb-3 {
+  margin-bottom: 24rpx;
+}
+
+/* 圆角 */
+.rounded-full {
+  border-radius: 9999rpx;
+}
+
+.rounded-xl {
+  border-radius: 24rpx;
+}
+
+.rounded-2xl {
+  border-radius: 32rpx;
+}
+
+.rounded-3xl {
+  border-radius: 48rpx;
+}
+
+/* 阴影 */
+.shadow {
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.1);
+}
+
+.shadow-lg {
+  box-shadow: 0 8rpx 24rpx rgba(0, 0, 0, 0.15);
+}
+
+/* 文字颜色 */
+.text-purple-500 {
+  color: #f0a3c2;
+}
+
+.text-purple-600 {
+  color: #e879a9;
+}
+
+.text-purple-700 {
+  color: #e879a9;
+}
+
+.text-white {
+  color: white;
+}
+
+.text-gray-500 {
+  color: #a8989e;
+  font-size: 24rpx;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.text-gray-600 {
+  color: #9a8a92;
+  font-size: 25rpx;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+/* 全局辅助文本层级，减少“过小小字” */
+.meta-text,
+.helper-text,
+.caption-text {
+  font-size: 24rpx;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #a8989e;
+}
+
+.text-yellow-500 {
+  color: #eab308;
+}
+
+/* 背景颜色 */
+.bg-white {
+  background-color: white;
+}
+
+.bg-purple-50 {
+  background-color: #fdf2f8;
+}
+
+.bg-purple-100 {
+  background-color: #fce7f3;
+}
+
+.bg-purple-500 {
+  background-color: #f0a3c2;
+}
+
+.bg-yellow-50 {
+  background-color: #fefce8;
+}
+
+.bg-pink-50 {
+  background-color: #fdf2f8;
+}
+
+.bg-blue-50 {
+  background-color: #fff5f7;
+}
+
+/* 边框 */
+.border {
+  border: 2rpx solid #e5e7eb;
+}
+
+.border-2 {
+  border: 4rpx solid #e5e7eb;
+}
+
+.border-white {
+  border-color: white;
+}
+
+.border-purple-100 {
+  border-color: #fce7f3;
+}
+
+/* 文字对齐 */
+.text-center {
+  text-align: center;
+}
+
+/* 字体粗细 */
+.font-bold {
+  font-weight: bold;
+}
+
+.font-black {
+  font-weight: 900;
+}
+
+/* 溢出处理 */
+.overflow-hidden {
+  overflow: hidden;
+}
+
+/* 动画 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(20rpx);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10rpx);
+  }
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 2s linear infinite;
+}
+
+/* 星星闪烁动画 */
+@keyframes sparkle {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.2);
+  }
+}
+
+.animate-sparkle {
+  animation: sparkle 1.5s ease-in-out infinite;
+}

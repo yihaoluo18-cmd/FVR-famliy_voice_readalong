@@ -1,0 +1,74 @@
+<view class="pet-egg-garden-section">
+  <view class="hero-card">
+    <text class="hero-emoji">🥚</text>
+    <view class="hero-texts">
+      <text class="hero-title">宠物蛋乐园</text>
+      <text class="hero-sub">签到和阅读都会让蛋蛋长大，凑满条件就可以领新伙伴哦～</text>
+    </view>
+  </view>
+
+  <view class="stats-bar" wx:if="{{!loading}}">
+    <text class="stats-text">{{hintLine}}</text>
+    <text class="stats-badge" wx:if="{{has_ready_to_claim}}">有可领取 ✨</text>
+  </view>
+
+  <view class="loading-box" wx:if="{{loading}}">
+    <text class="loading-text">加载中…</text>
+  </view>
+
+  <view class="egg-grid" wx:if="{{!loading}}">
+    <view
+      wx:for="{{slots}}"
+      wx:key="slot_index"
+      class="egg-cell"
+      style="background: {{item.bgColor || 'rgba(255, 255, 255, 0.98)'}};"
+    >
+      <view class="egg-shape">
+        <text class="egg-emoji">{{item.emoji}}</text>
+        <image
+          class="egg-poster"
+          wx:if="{{item.ui_state === 'claimed' && item.posterUrl2d}}"
+          src="{{item.posterUrl2d}}"
+          mode="aspectFit"
+        />
+        <view
+          class="glass-mask {{item.ui_state === 'locked' ? 'glass-locked' : ''}} {{item.ui_state === 'incubating' ? 'glass-soft' : ''}} {{item.ui_state === 'ready' ? 'glass-ready' : ''}}"
+          wx:if="{{item.ui_state !== 'claimed'}}"
+        >
+          <text class="glass-icon" wx:if="{{item.ui_state === 'locked'}}">🔒</text>
+          <text class="glass-icon" wx:elif="{{item.ui_state === 'incubating'}}">✨</text>
+          <text class="glass-icon" wx:elif="{{item.ui_state === 'ready'}}">🎁</text>
+        </view>
+      </view>
+      <text class="egg-label">{{item.label}}</text>
+      <text class="egg-hint">{{item.hint}}</text>
+
+      <view
+        wx:if="{{item.ui_state === 'claimed'}}"
+        class="goto-btn"
+        bindtap="goToCompanion"
+        data-mascot-id="{{item.mascot_id}}"
+      >
+        进入伴宠页面
+      </view>
+
+      <view
+        wx:if="{{item.ui_state === 'ready'}}"
+        class="claim-btn"
+        catchtap="onClaimTap"
+        data-index="{{item.slot_index}}"
+      >
+        领回家
+      </view>
+    </view>
+  </view>
+
+  <view class="unlock-overlay" wx:if="{{showUnlockOverlay}}">
+    <view class="unlock-card">
+      <text class="unlock-title">叮～</text>
+      <text class="unlock-name">{{unlockOverlayLabel}}</text>
+      <text class="unlock-sub">正在打开你的新伙伴…</text>
+    </view>
+  </view>
+</view>
+

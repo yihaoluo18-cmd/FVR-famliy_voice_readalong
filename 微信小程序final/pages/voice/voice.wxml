@@ -1,0 +1,159 @@
+<view class="container {{recordingClass}}">
+  <view class="header-banner">
+    <view class="header-top">
+      <view class="icon-btn" bindtap="goToBooks"> <image src="{{voiceAssetIconBack}}" class="icon-img" mode="aspectFit" /></view>
+      <text class="page-title">魔法声音克隆室</text>
+    </view>
+
+    <view class="mic-icon-box {{pulseClass}}">
+      <text class="mic-icon">🎤</text>
+    </view>
+    <text class="subtitle">让故事真的变成家人的声音</text>
+
+    <view class="ask-box">
+      <text class="ask-label">这是谁的声音呢？</text>
+      <view class="parent-toggle {{showGuide && guideHighlight === 'role' ? 'guide-pulse' : ''}}">
+        <view class="toggle-button {{parentType === 'mom' ? 'active' : ''}}" bindtap="selectMom">
+  <image src="{{voiceAssetMom}}" class="toggle-icon" mode="aspectFit" />
+  <text class="toggle-text">妈妈</text>
+</view>
+<view class="toggle-button {{parentType === 'dad' ? 'active' : ''}}" bindtap="selectDad">
+  <image src="{{voiceAssetDad}}" class="toggle-icon" mode="aspectFit" />
+  <text class="toggle-text">爸爸</text>
+</view>
+        <view class="toggle-button1 {{parentType === 'custom' ? 'active' : ''}}" bindtap="selectCustom">
+          <text class="toggle-text1">✨ 自定义</text>
+        </view>
+      </view>
+      <input
+        wx:if="{{parentType === 'custom'}}"
+        class="custom-role-input"
+        value="{{customRoleName}}"
+        bindinput="onCustomRoleNameInput"
+        maxlength="16"
+        placeholder="请输入称呼，例如：叔叔、老师"
+      />
+    </view>
+  </view>
+  <view class="voice-manage-link" bindtap="goVoiceManager">
+    <text class="voice-manage-link-text">管理已有音色（支持删除）</text>
+  </view>
+
+  <view class="step-indicator {{showGuide && guideHighlight === 'record' ? 'guide-pulse' : ''}}">
+    <view class="step-item">
+      <view class="step-number {{step >= 1 ? 'active' : ''}}"><text class="number-text">1</text></view>
+      <view class="step-line {{step > 1 ? 'active' : ''}}"></view>
+    </view>
+    <view class="step-item">
+      <view class="step-number {{step >= 2 ? 'active' : ''}}"><text class="number-text">2</text></view>
+      <view class="step-line {{step > 2 ? 'active' : ''}}"></view>
+    </view>
+    <view class="step-item">
+      <view class="step-number {{step >= 3 ? 'active' : ''}}"><text class="number-text">3</text></view>
+      <view class="step-line {{step > 3 ? 'active' : ''}}"></view>
+    </view>
+    <view class="step-item">
+      <view class="step-number {{step >= 4 ? 'active' : ''}}"><text class="number-text">4</text></view>
+    </view>
+  </view>
+
+  <view class="content-area">
+    <view class="step-content" wx:if="{{step === 1}}">
+      <view class="sentence-card">
+        <view class="sentence-header">
+          <text class="sentence-index">第 {{sentenceIdx + 1}} / {{totalSentences}} 句</text>
+          <view class="sentence-dots">
+            <view wx:for="{{sentences}}" wx:key="index" class="dot {{recordFiles[index] ? 'done' : ''}} {{sentenceIdx === index ? 'active' : ''}}"></view>
+          </view>
+        </view>
+        <view class="sentence-text-box">
+          <text class="sentence-text">{{currentSentence}}</text>
+        </view>
+      </view>
+
+      <view class="record-area">
+        <view class="record-button" bindtap="{{isRecording ? 'stopRecord' : 'startRecording'}}">
+
+  <image 
+    src="{{isRecording ? voiceAssetRecordBusy : voiceAssetRecordIdle}}" 
+    class="record-icon" 
+    mode="aspectFit"
+  />
+</view>
+        <text class="record-hint {{isRecording ? 'recording' : ''}}">{{isRecording ? '录制中...' : '点击开始录音'}}</text>
+        <view class="progress-bar" wx:if="{{isRecording}}">
+          <view class="progress-fill" style="width: {{progress}}%"></view>
+        </view>
+      </view>
+    </view>
+
+    <view class="step-content" wx:if="{{step === 2}}">
+      <view class="complete-card">
+        <view class="check-icon-wrap">
+  <image src="{{voiceAssetBingo}}" class="check-icon" mode="aspectFit" />
+</view>
+        <text class="complete-title">录音完成</text>
+        <text class="complete-desc">{{totalSentences}}段声音素材已经准备好，可以开启声音魔法了</text>
+      </view>
+      <view class="preview-button" bindtap="previewRecording">
+        <text class="preview-text">{{isAudioPlaying ? '暂停试听' : '试听录音'}}</text>
+      </view>
+      <view class="action-row">
+        <view class="retry-button" bindtap="retryRecording"><text class="retry-text">重新录制</text></view>
+        <view class="clone-button" bindtap="startTraining"><text class="clone-text">开启魔法</text></view>
+      </view>
+    </view>
+
+    <view class="step-content training-step" wx:if="{{step === 3}}">
+      <view class="progress-ring-wrap">
+        <svg class="progress-ring" viewBox="0 0 140 140">
+          <circle class="ring-bg" cx="70" cy="70" r="56" />
+          <circle class="ring-progress" cx="70" cy="70" r="56" stroke-dasharray="351.858" stroke-dashoffset="{{circleOffset}}" />
+        </svg>
+        <view class="circle-center"><text class="circle-percent">{{progress}}%</text></view>
+      </view>
+      <text class="training-title">正在施展声音魔法...</text>
+      <view class="science-card" wx:if="{{scienceTipText}}">
+        <view class="science-mascot-wrap {{isScienceSpeaking ? 'speaking' : ''}}">
+          <image class="science-mascot-img" src="{{scienceMascotImage}}" mode="aspectFit" />
+        </view>
+        <view class="science-bubble">
+          <text class="science-tag">趣味科普进行中</text>
+          <text class="science-text">{{scienceTipText}}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="step-content" wx:if="{{step === 4}}">
+      <view class="success-card">
+        <text class="celebration-icon">🎉</text>
+        <text class="success-title">音色训练完成</text>
+        <text class="success-desc">当前音色：{{selectedVoiceName}}</text>
+
+        <view class="rename-card {{showGuide && guideHighlight === 'name' ? 'guide-pulse' : ''}}">
+          <text class="rename-label">给这个音色取个名字</text>
+          <view class="preset-row">
+            <view wx:for="{{relationOptions}}" wx:key="key" class="preset-chip" data-name="{{item.quickName}}" bindtap="onUsePresetName">{{item.quickName}}</view>
+          </view>
+          <input class="rename-input" maxlength="32" value="{{voiceNameInput}}" bindinput="onVoiceNameInput" placeholder="例如：妈妈讲故事" />
+          <button class="save-name-btn" bindtap="saveVoiceName" loading="{{isSavingVoiceName}}" disabled="{{isSavingVoiceName}}">保存并应用</button>
+        </view>
+
+        <view class="finish-button" bindtap="goToBooks"><text class="finish-text">去听绘本故事 →</text></view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,273 @@
+<view class="container">
+  <!-- 已登录：个人中心 -->
+  <view wx:if="{{isLoggedIn}}" class="profile-view">
+    <!-- 粉色顶部横幅 -->
+    <view class="header-banner">
+      <!-- 用户头像 -->
+      <view class="avatar-container" bindtap="goToProfileEdit">
+        <image class="user-avatar" src="{{userData.avatar}}" mode="aspectFill" />
+      </view>
+      <text class="parent-name">{{userData.parentName}}</text>
+      <text class="account-info">已绑定 1 个宝宝账号</text>
+      
+      <!-- 星数徽章（半浮动） -->
+      <view class="stars-badge">
+        <text class="star-icon">⭐</text>
+        <text class="stars-count">{{stars}} 颗星</text>
+        <text class="sparkle-icon">✨</text>
+        <text class="level-text">Lv.{{level}}</text>
+      </view>
+    </view>
+
+    <!-- 统计数据卡片 -->
+    <view class="menu-section">
+      <view class="stats-row">
+        <view class="stat-card stat-blue">
+          <text class="stat-icon">📚</text>
+          <text class="stat-value">{{booksRead}}</text>
+          <text class="stat-label">已读绘本</text>
+        </view>
+        <view class="stat-card stat-purple">
+          <text class="stat-icon">🎤</text>
+          <text class="stat-value">{{clonedVoices}}</text>
+          <text class="stat-label">克隆声音</text>
+        </view>
+        <view class="stat-card stat-yellow">
+          <text class="stat-icon">⭐</text>
+          <text class="stat-value">{{coloringWorks}}</text>
+          <text class="stat-label">涂色作品</text>
+        </view>
+      </view>
+
+      <!-- 功能菜单列表 -->
+      <view class="menu-list">
+        <view class="menu-item" bindtap="goToFavorites">
+          <view class="menu-icon-box icon-red">
+            <text class="menu-icon">❤️</text>
+          </view>
+          <view class="menu-content">
+            <text class="menu-label">我的喜欢</text>
+            <text class="menu-desc">收藏的绘本</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="menu-item" bindtap="goToVoice">
+          <view class="menu-icon-box icon-purple">
+            <text class="menu-icon">🎤</text>
+          </view>
+          <view class="menu-content">
+            <text class="menu-label">魔法音克隆室</text>
+            <text class="menu-desc">管理声音克隆</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="menu-item" bindtap="goToGrowth">
+          <view class="menu-icon-box icon-green">
+            <text class="menu-icon">🛡️</text>
+          </view>
+          <view class="menu-content">
+            <text class="menu-label">宝宝成长记录</text>
+            <text class="menu-desc">查看阅读报告</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+
+        <view class="menu-item" bindtap="goToNotification">
+          <view class="menu-icon-box icon-orange">
+            <text class="menu-icon">🔔</text>
+          </view>
+          <view class="menu-content">
+            <text class="menu-label">消息通知</text>
+            <text class="menu-desc">阅读提醒设置</text>
+          </view>
+          <text class="chevron">›</text>
+        </view>
+      </view>
+
+      <!-- 退出登录 -->
+      <view class="logout-button" bindtap="handleLogout">
+        <text class="logout-text">退出登录</text>
+      </view>
+
+      <!-- 清除数据（测试用） -->
+      <view class="clear-button" bindtap="handleClearData">
+        <text class="clear-text">🔧 清除所有数据（测试用）</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 未登录：登录/注册表单 -->
+  <view wx:else class="auth-form-view">
+    <!-- 吉祥物 -->
+    <view class="mascot-container">
+      <image class="mascot-image" src="{{mascotUrl}}" mode="aspectFill" />
+    </view>
+
+    <!-- 标题 -->
+    <view class="auth-title">
+      <text class="sparkle">✨</text>
+      <text class="title-text">家长控制台</text>
+      <text class="sparkle">✨</text>
+    </view>
+
+    <!-- 首次进入：优先引导一键注册 -->
+    <view wx:if="{{showFirstVisitHint}}" class="first-visit-hint" bindtap="onFirstVisitHintTap">
+      <text class="first-visit-hint-icon">👋</text>
+      <view class="first-visit-hint-texts">
+        <text class="first-visit-hint-title">首次使用？建议先注册</text>
+        <text class="first-visit-hint-desc">点这里或右侧「注册」填写手机号/邮箱与密码，数据会安全保存</text>
+      </view>
+      <text class="first-visit-hint-arrow">›</text>
+    </view>
+
+    <!-- 登录/注册切换 -->
+    <view class="tab-toggle {{showGuide && guideHighlight === 'tab' ? 'guide-pulse' : ''}}">
+      <view 
+        class="tab-item {{mode === 'login' ? 'active' : ''}}" 
+        bindtap="switchToLogin"
+      >
+        <text class="tab-text">登录</text>
+      </view>
+      <view 
+        class="tab-item {{mode === 'register' ? 'active' : ''}} {{nudgeRegisterTab ? 'tab-nudge' : ''}}" 
+        bindtap="switchToRegister"
+      >
+        <text class="tab-text">注册</text>
+      </view>
+    </view>
+
+    <!-- 表单 -->
+    <view class="form-container">
+      <form bindsubmit="handleSubmit">
+        <!-- 注册时显示宝宝昵称 -->
+        <view class="input-group" wx:if="{{mode === 'register'}}">
+          <text class="input-icon">👤</text>
+          <input 
+            class="input-field" 
+            type="text" 
+            name="babyName"
+            placeholder="宝宝昵称" 
+            placeholder-class="input-placeholder"
+          />
+        </view>
+
+        <!-- 手机号/邮箱 -->
+        <view class="input-group">
+          <text class="input-icon">📱</text>
+          <input 
+            class="input-field" 
+            type="text" 
+            name="account"
+            placeholder="{{mode === 'register' ? '11位手机号或邮箱' : '注册时用的手机号或邮箱'}}" 
+            placeholder-class="input-placeholder"
+          />
+        </view>
+        <text class="field-hint" wx:if="{{mode === 'register'}}">请使用大陆 11 位手机号（1 开头）或常用邮箱格式</text>
+
+        <!-- 密码 -->
+        <view class="input-group">
+          <text class="input-icon">🔒</text>
+          <input 
+            class="input-field" 
+            type="password" 
+            password="true"
+            name="password"
+            placeholder="{{mode === 'register' ? '设置登录密码' : '输入登录密码'}}" 
+            placeholder-class="input-placeholder"
+          />
+        </view>
+        <text class="field-hint" wx:if="{{mode === 'register'}}">至少 8 位，须同时包含英文字母与数字</text>
+
+        <view class="forgot-row" wx:if="{{mode === 'login'}}">
+          <text class="forgot-link" bindtap="openForgotPassword">忘记密码？</text>
+        </view>
+
+        <!-- 提交按钮 -->
+        <button class="submit-button {{showGuide && guideHighlight === 'submit' ? 'guide-pulse' : ''}}" form-type="submit">
+          <text class="submit-text">{{mode === 'login' ? '账号密码登录' : '提交注册'}}</text>
+          <text class="heart-icon">💗</text>
+        </button>
+      </form>
+    </view>
+
+    <view class="wechat-divider">
+      <view class="wechat-divider-line"></view>
+      <text class="wechat-divider-text">或</text>
+      <view class="wechat-divider-line"></view>
+    </view>
+
+    <button
+      class="wechat-auth-btn"
+      bindtap="handleWechatLogin"
+      hover-class="wechat-auth-btn-hover"
+    >
+      <text class="wechat-auth-icon">💬</text>
+      <text class="wechat-auth-label">微信一键注册/登录</text>
+    </button>
+    <text class="wechat-auth-tip">首次使用可直接微信一键创建账号，后续可继续微信快捷登录。</text>
+  </view>
+
+  <view
+    wx:if="{{showForgotPassword}}"
+    class="forgot-mask"
+    catchtouchmove="preventForgotTouchMove"
+    bindtap="closeForgotPassword"
+  >
+    <view class="forgot-sheet" catchtap="preventForgotBubble">
+      <text class="forgot-title">重置登录密码</text>
+      <text class="forgot-tip">仅支持「手机号注册」的账号：请填写注册手机号、设置新密码，并点击下方按钮授权微信绑定手机号以校验身份。邮箱注册请使用微信登录或联系客服。</text>
+      <view class="forgot-input-wrap">
+        <text class="forgot-icon">📱</text>
+        <input
+          class="forgot-input"
+          type="number"
+          maxlength="11"
+          placeholder="注册时的11位手机号"
+          value="{{forgotAccount}}"
+          bindinput="onForgotAccountInput"
+        />
+      </view>
+      <view class="forgot-input-wrap">
+        <text class="forgot-icon">🔒</text>
+        <input
+          class="forgot-input"
+          type="password"
+          password="true"
+          placeholder="新密码（8位+字母与数字）"
+          value="{{forgotPassword}}"
+          bindinput="onForgotPwdInput"
+        />
+      </view>
+      <view class="forgot-input-wrap">
+        <text class="forgot-icon">🔁</text>
+        <input
+          class="forgot-input"
+          type="password"
+          password="true"
+          placeholder="再次输入新密码"
+          value="{{forgotPwd2}}"
+          bindinput="onForgotPwd2Input"
+        />
+      </view>
+      <button class="forgot-phone-btn" open-type="getPhoneNumber" bindgetphonenumber="onPhoneForReset">
+        验证微信手机号并重置
+      </button>
+      <view class="forgot-cancel" bindtap="closeForgotPassword">取消</view>
+    </view>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+</view>

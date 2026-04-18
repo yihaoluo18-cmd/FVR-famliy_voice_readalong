@@ -1,0 +1,56 @@
+{
+  "wx_child_user::cute_bunny": {
+    "fov": 27.0,
+    "camDistMul": 0.2,
+    "camHeightMul": 0.18,
+    "lookAtHeightMul": 0.12,
+    "liftMul": 0.1925,
+    "targetSize": 2.0,
+    "baseRotYDeg": 0.0
+  },
+  "wx_child_user::default": {
+    "fov": 41.0,
+    "camDistMul": 1.5259999999999998,
+    "camHeightMul": 0.3,
+    "lookAtHeightMul": 0.0,
+    "liftMul": 0.22399999999999998,
+    "targetSize": 2.0,
+    "baseRotYDeg": 41.0
+  },
+  "wx_child_user::cute_fox": {
+    "fov": 33.0,
+    "camDistMul": 1.53,
+    "camHeightMul": 1.2,
+    "lookAtHeightMul": 0.3,
+    "liftMul": 0.1,
+    "targetSize": 25.41,
+    "baseRotYDeg": -27.0
+  },
+  "wx_child_user::cute_dino": {
+    "fov": 47.0,
+    "camDistMul": 1.31,
+    "camHeightMul": 0.6,
+    "lookAtHeightMul": 0.14,
+    "liftMul": 0.03,
+    "targetSize": 2.8,
+    "baseRotYDeg": -77.0
+  },
+  "wx_child_user::cute_cat": {
+    "fov": 20.0,
+    "camDistMul": 1.02,
+    "camHeightMul": 0.87,
+    "lookAtHeightMul": 0.34,
+    "liftMul": 0.1,
+    "targetSize": 31.4,
+    "baseRotYDeg": -23.0
+  },
+  "wx_child_user::cute_squirrel": {
+    "fov": 40.3,
+    "camDistMul": 1.292,
+    "camHeightMul": 0.828,
+    "lookAtHeightMul": 0.35,
+    "liftMul": 0.0,
+    "targetSize": 3.0,
+    "baseRotYDeg": -10.800000000000011
+  }
+}

@@ -1,0 +1,270 @@
+.pet-egg-garden-section {
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.hero-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 18rpx;
+  padding: 22rpx 20rpx;
+  background: #ffffff;
+  border-radius: 24rpx;
+  box-shadow: 0 8rpx 28rpx rgba(232, 121, 169, 0.1);
+  border: 2rpx solid rgba(253, 230, 240, 0.45);
+}
+
+.hero-emoji {
+  font-size: 56rpx;
+  line-height: 1;
+}
+
+.hero-texts {
+  flex: 1;
+  min-width: 0;
+}
+
+.hero-title {
+  display: block;
+  font-size: 34rpx;
+  font-weight: 900;
+  color: #9d4e6e;
+  margin-bottom: 8rpx;
+}
+
+.hero-sub {
+  display: block;
+  font-size: 22rpx;
+  color: #6b7280;
+  line-height: 1.45;
+}
+
+.stats-bar {
+  margin-top: 16rpx;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10rpx;
+}
+
+.stats-text {
+  font-size: 22rpx;
+  color: #6b7280;
+}
+
+.stats-badge {
+  font-size: 22rpx;
+  font-weight: 800;
+  color: #e879a9;
+  background: rgba(237, 233, 254, 0.95);
+  padding: 6rpx 16rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid rgba(251, 207, 232, 0.5);
+}
+
+.loading-box {
+  margin-top: 80rpx;
+  text-align: center;
+}
+
+.loading-text {
+  font-size: 26rpx;
+  color: #9ca3af;
+}
+
+.egg-grid {
+  margin-top: 20rpx;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18rpx;
+}
+
+.egg-cell.egg-claimed .egg-emoji {
+  opacity: 1;
+}
+
+.egg-cell {
+  background: #ffffff;
+  border-radius: 22rpx;
+  padding: 18rpx 14rpx 20rpx;
+  box-shadow: 0 6rpx 22rpx rgba(232, 121, 169, 0.08);
+  border: 2rpx solid rgba(252, 231, 243, 0.65);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.egg-shape {
+  position: relative;
+  width: 140rpx;
+  height: 176rpx;
+  border-radius: 50% 50% 48% 48% / 58% 58% 42% 42%;
+  background: linear-gradient(165deg, #fef9c3 0%, #fce7f3 45%, #fef3c7 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 -8rpx 20rpx rgba(251, 207, 232, 0.15);
+}
+
+.egg-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  opacity: 1;
+}
+
+.egg-shape-claimed-gl {
+  overflow: hidden;
+  padding: 0;
+}
+
+.slot-three-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+
+.egg-emoji {
+  font-size: 52rpx;
+  opacity: 0.35;
+  position: relative;
+  z-index: 3;
+}
+
+.glass-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2rpx solid rgba(255, 255, 255, 0.75);
+  box-sizing: border-box;
+}
+
+.glass-locked {
+  background: rgba(255, 255, 255, 0.52);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.glass-soft {
+  background: rgba(245, 243, 255, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.glass-ready {
+  background: rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-color: rgba(34, 197, 94, 0.45);
+  box-shadow: 0 0 0 2rpx rgba(34, 197, 94, 0.2);
+}
+
+.glass-off {
+  display: none;
+}
+
+.glass-icon {
+  font-size: 36rpx;
+  opacity: 0.88;
+}
+
+.egg-label {
+  margin-top: 12rpx;
+  font-size: 26rpx;
+  font-weight: 800;
+  color: #831843;
+  text-align: center;
+}
+
+.egg-hint {
+  margin-top: 8rpx;
+  font-size: 20rpx;
+  color: #6b7280;
+  text-align: center;
+  line-height: 1.35;
+}
+
+.claim-btn {
+  margin-top: 12rpx;
+  width: 100%;
+  height: 56rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #f0a8c0, #fde68a);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.goto-btn {
+  margin-top: 12rpx;
+  width: 100%;
+  height: 56rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #e879a9, #9d4e6e);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.unlock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40rpx;
+}
+
+.unlock-card {
+  width: 100%;
+  max-width: 560rpx;
+  padding: 40rpx 32rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 2rpx solid rgba(253, 230, 240, 0.6);
+  box-shadow: 0 20rpx 48rpx rgba(157, 62, 110, 0.18);
+  text-align: center;
+}
+
+.unlock-title {
+  display: block;
+  font-size: 40rpx;
+  font-weight: 900;
+  color: #e879a9;
+}
+
+.unlock-name {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 32rpx;
+  font-weight: 900;
+  color: #1f2937;
+}
+
+.unlock-sub {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #6b7280;
+}
+

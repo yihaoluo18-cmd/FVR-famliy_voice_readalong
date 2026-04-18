@@ -1,0 +1,133 @@
+<view class="page">
+  <view class="header-banner">
+    <view class="header-top">
+      <view class="header-badge">🥚 宠物蛋乐园</view>
+      <view class="header-ready" wx:if="{{has_ready_to_claim}}">可领取</view>
+    </view>
+    <view class="header-icons">
+      <text class="header-icon-item">🎠</text>
+      <text class="header-icon-item">🥚</text>
+      <text class="header-icon-item">✨</text>
+    </view>
+    <text class="header-stats" wx:if="{{!loading}}">{{hintLine}}</text>
+  </view>
+
+  <view class="loading-box" wx:if="{{loading}}">
+    <text class="loading-text">加载中…</text>
+  </view>
+
+  <view wx:if="{{!loading}}" class="showcase-block">
+    <view class="showcase-title-row">
+      <text class="showcase-title">伴宠蛋展示槽</text>
+    </view>
+    <scroll-view
+      class="showcase-scroll"
+      scroll-x
+      enhanced
+      show-scrollbar="{{false}}"
+      scroll-left="{{showcaseScrollLeft}}"
+      scroll-with-animation="{{showcaseScrollWithAnimation}}"
+      bindtouchstart="onShowcaseTouchStart"
+      bindtouchend="onShowcaseTouchEnd"
+      bindtouchcancel="onShowcaseTouchEnd"
+    >
+      <view class="showcase-track">
+        <view
+          wx:for="{{showcaseSlots}}"
+          wx:key="__k"
+          class="showcase-item"
+        >
+          <view class="showcase-egg {{item.ui_state}}">
+            <text class="showcase-emoji">{{item.emoji}}</text>
+          </view>
+          <text class="showcase-label">{{item.label}}</text>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <view wx:if="{{!loading}}" class="aquarium-block">
+    <view class="aquarium-header">
+      <text class="aquarium-title">互动玻璃舱</text>
+      <view class="title-icons">
+        <text class="title-icon-item">🫳</text>
+        <text class="title-icon-item">🥚</text>
+        <text class="title-icon-item">💥</text>
+      </view>
+    </view>
+    <view
+      id="aquariumContainer"
+      class="aquarium-container"
+      catchtouchmove="onAquariumTouchMove"
+      catchtouchend="onAquariumTouchEnd"
+      catchtouchcancel="onAquariumTouchEnd"
+    >
+      <view class="aquarium-water-layer"></view>
+      <view
+        wx:for="{{aquariumEggs}}"
+        wx:key="id"
+        class="aquarium-egg {{item.ui_state}}"
+        style="{{item.style}}"
+        catchtouchstart="onAquariumEggTouchStart"
+        data-id="{{item.id}}"
+      >
+        <text class="aquarium-egg-emoji">{{item.emoji}}</text>
+      </view>
+      <view class="aquarium-glass-glare"></view>
+    </view>
+  </view>
+
+  <view wx:if="{{!loading}}" class="market-block">
+    <view class="market-title-row">
+      <text class="market-title">伴宠蛋仓库</text>
+      <view class="title-icons">
+        <text class="title-icon-item">🎁</text>
+        <text class="title-icon-item">⏳</text>
+        <text class="title-icon-item">🗂️</text>
+      </view>
+    </view>
+    <view class="market-grid">
+      <view
+        wx:for="{{productSlots}}"
+        wx:key="slot_index"
+        class="product-card card-float-{{index % 4}}"
+        style="background: {{item.bgColor || 'rgba(255, 255, 255, 0.98)'}};"
+      >
+        <view class="product-cover">
+          <view class="product-egg-shell {{item.ui_state}}">
+            <text class="product-egg-emoji">{{item.emoji}}</text>
+            <view class="product-glass {{item.ui_state}}" wx:if="{{item.ui_state !== 'claimed'}}">
+              <view class="product-state-badge" wx:if="{{item.ui_state === 'locked'}}">🔒</view>
+              <view class="product-state-badge" wx:elif="{{item.ui_state === 'incubating'}}">✨</view>
+              <view class="product-state-badge" wx:elif="{{item.ui_state === 'ready'}}">🎁</view>
+            </view>
+          </view>
+          <view class="product-tag tag-{{item.ui_state}}">
+            {{item.ui_state === 'ready' ? '立即领取' : (item.ui_state === 'claimed' ? '已拥有' : (item.ui_state === 'incubating' ? '孵化中' : '未解锁'))}}
+          </view>
+        </view>
+        <text class="product-name">{{item.label}}</text>
+        <text class="product-desc">{{item.hint}}</text>
+        <view wx:if="{{item.ui_state === 'claimed'}}" class="goto-btn" bindtap="goToCompanion" data-mascot-id="{{item.mascot_id}}">进入伴宠页面</view>
+        <view
+          wx:if="{{item.ui_state === 'ready'}}"
+          class="claim-btn"
+          catchtap="onClaimTap"
+          data-index="{{item.slot_index}}"
+        >领回家</view>
+      </view>
+    </view>
+  </view>
+
+  <view class="bottom-action">
+    <view class="ghost-btn" bindtap="goHome">返回首页</view>
+  </view>
+
+  <view class="unlock-overlay" wx:if="{{showUnlockOverlay}}">
+    <view class="unlock-card">
+      <text class="unlock-title">叮～</text>
+      <text class="unlock-name">{{unlockOverlayLabel}}</text>
+      <text class="unlock-sub">正在打开你的新伙伴…</text>
+    </view>
+  </view>
+</view>

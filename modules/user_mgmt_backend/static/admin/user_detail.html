@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>用户详情 · 粉宝后台</title>
+  <link rel="stylesheet" href="/admin/static/admin-theme.css" />
+</head>
+<body class="admin-shell">
+  <header class="admin-header">
+    <h1>用户详情</h1>
+    <p id="headerSub">加载中…</p>
+  </header>
+  <main class="admin-main">
+    <div class="nav-pills">
+      <a href="/admin/static/index.html">首页</a>
+      <a href="/admin/static/users.html">用户列表</a>
+      <a href="/admin/static/games.html">游戏测试说明</a>
+    </div>
+
+    <div class="admin-card">
+      <div class="admin-toolbar">
+        <input id="apiKey" type="password" placeholder="ADMIN_API_KEY（与列表页共用本地保存）" style="min-width:260px;flex:1;" />
+        <button class="btn btn-primary btn-sm" type="button" id="saveKey">保存密钥</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="reloadAll">全部刷新</button>
+      </div>
+    </div>
+
+    <div class="admin-card">
+      <div class="tabs" role="tablist">
+        <button type="button" class="active" data-tab="tab-profile">资料与等级</button>
+        <button type="button" data-tab="tab-companion">伴宠进度</button>
+        <button type="button" data-tab="tab-voices">音色训练</button>
+        <button type="button" data-tab="tab-danger">危险操作</button>
+      </div>
+
+      <div id="tab-profile" class="tab-panel active">
+        <div class="level-pill" id="levelPill">Lv.— · ★ —</div>
+        <dl class="kv-grid" id="profileKv" style="margin-top:16px;"></dl>
+        <h2 style="margin-top:20px;">管控与等级</h2>
+        <div class="form-grid">
+          <div>
+            <label>账号启用 is_active（1 启用 / 0 禁用）</label>
+            <select id="f_active">
+              <option value="1">启用</option>
+              <option value="0">禁用</option>
+            </select>
+          </div>
+          <div>
+            <label>黑名单 blacklisted</label>
+            <select id="f_bl">
+              <option value="0">否</option>
+              <option value="1">是</option>
+            </select>
+          </div>
+          <div>
+            <label>封禁/备注原因 ban_reason</label>
+            <input id="f_ban" type="text" placeholder="用户可见或内部记录" />
+          </div>
+          <div>
+            <label>reader_level</label>
+            <input id="f_lv" type="number" min="1" step="1" />
+          </div>
+          <div>
+            <label>reader_stars</label>
+            <input id="f_stars" type="number" min="0" step="1" />
+          </div>
+          <div style="grid-column:1/-1;">
+            <label>运营备注 admin_note（仅后台）</label>
+            <textarea id="f_note" placeholder="内部备注，不面向小程序"></textarea>
+          </div>
+        </div>
+        <div class="admin-toolbar" style="margin-top:12px;">
+          <button class="btn btn-primary" type="button" id="btnSaveProfile">保存修改</button>
+          <span class="muted" id="saveHint"></span>
+        </div>
+      </div>
+
+      <div id="tab-companion" class="tab-panel">
+        <div class="admin-toolbar">
+          <button class="btn btn-primary btn-sm" type="button" id="btnRefreshCompanion">刷新伴宠快照</button>
+          <span class="muted">数据来自服务端 JSON 与伴宠模块聚合；刷新会读取最新存档。</span>
+        </div>
+        <p class="muted" id="companionErr"></p>
+        <div id="companionSlots"></div>
+        <h3 style="margin:18px 0 10px;font-size:1rem;color:var(--admin-pink-deep);">已解锁 mascot</h3>
+        <p class="muted" id="unlockedList"></p>
+        <h3 style="margin:18px 0 10px;font-size:1rem;color:var(--admin-pink-deep);">各伙伴成长概览</h3>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>mascot_id</th>
+                <th>等级</th>
+                <th>阶段</th>
+                <th>成长%</th>
+                <th>形态档</th>
+                <th>更新</th>
+              </tr>
+            </thead>
+            <tbody id="companionMascotBody"></tbody>
+          </table>
+        </div>
+        <details style="margin-top:14px;">
+          <summary class="muted" style="cursor:pointer;font-weight:700;">原始 JSON（调试）</summary>
+          <pre class="json-view" id="companionRaw"></pre>
+        </details>
+      </div>
+
+      <div id="tab-voices" class="tab-panel">
+        <p class="muted">共 <strong id="voiceTotal">0</strong> 条音色模型记录</p>
+        <div class="admin-table-wrap">
+          <table class="admin-table">
+            <thead>
+              <tr>
+                <th>voice_id</th>
+                <th>名称</th>
+                <th>类型</th>
+                <th>场景</th>
+                <th>情感</th>
+                <th>训练时间</th>
+                <th>GPT 权重</th>
+                <th>SoVITS</th>
+              </tr>
+            </thead>
+            <tbody id="voiceBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="tab-danger" class="tab-panel">
+        <div class="danger-zone">
+          <h3>清除伴宠 JSON 数据</h3>
+          <p class="muted">从蛋槽、伙伴、成长等 JSON 存档中移除该 user_id，不删除数据库账号。用于重置伴宠进度。</p>
+          <button class="btn btn-danger btn-sm" type="button" id="btnClearCompanion">确认清除伴宠数据</button>
+          <pre class="json-view" id="clearReport" style="margin-top:12px;display:none;max-height:200px;"></pre>
+        </div>
+        <div class="danger-zone" style="margin-top:18px;">
+          <h3>删除用户账号</h3>
+          <p class="muted">先清除伴宠 JSON，再删除 SQLite 用户行及关联音色。不可恢复。</p>
+          <button class="btn btn-danger" type="button" id="btnDeleteUser">删除该用户</button>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script>
+    const KEY = "admin_api_key_v1";
+    const sp = new URLSearchParams(location.search);
+    const userId = (sp.get("user_id") || "").trim();
+
+    function getApiKey() {
+      const el = document.getElementById("apiKey");
+      let k = (el && el.value) ? el.value.trim() : "";
+      if (!k) {
+        try { k = (localStorage.getItem(KEY) || "").trim(); } catch (e) {}
+        if (el && k) el.value = k;
+      }
+      return k;
+    }
+
+    function headers() {
+      const k = getApiKey();
+      return { "X-Admin-Api-Key": k, "Content-Type": "application/json" };
+    }
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s == null ? "" : String(s);
+      return d.innerHTML;
+    }
+
+    function shortPath(p, max) {
+      const t = String(p || "");
+      if (t.length <= max) return t;
+      return "…" + t.slice(-(max - 1));
+    }
+
+    document.querySelectorAll(".tabs button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        const id = btn.getAttribute("data-tab");
+        document.querySelectorAll(".tabs button").forEach(function (b) {
+          b.classList.toggle("active", b === btn);
+        });
+        document.querySelectorAll(".tab-panel").forEach(function (p) {
+          p.classList.toggle("active", p.id === id);
+        });
+      });
+    });
+
+    document.getElementById("saveKey").addEventListener("click", function () {
+      const k = document.getElementById("apiKey").value.trim();
+      try {
+        localStorage.setItem(KEY, k);
+        document.getElementById("saveHint").textContent = "密钥已保存";
+      } catch (e) {
+        alert("保存失败");
+      }
+    });
+
+    let cachedUser = null;
+
+    async function loadUser() {
+      if (!userId) {
+        alert("缺少 user_id");
+        return;
+      }
+      const k = getApiKey();
+      if (!k) {
+        alert("请填写 ADMIN_API_KEY");
+        return;
+      }
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId), { headers: headers() });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && String(data.detail)) || "加载用户失败");
+        return;
+      }
+      cachedUser = data.user || {};
+      document.getElementById("headerSub").textContent =
+        (cachedUser.parent_name || "") +
+        " · " +
+        (cachedUser.baby_name || "") +
+        " · " +
+        userId;
+      const lv = cachedUser.reader_level != null ? cachedUser.reader_level : 1;
+      const st = cachedUser.reader_stars != null ? cachedUser.reader_stars : 0;
+      document.getElementById("levelPill").textContent = "Lv." + lv + " · ★ " + st;
+
+      const kv = document.getElementById("profileKv");
+      const rows = [
+        ["user_id", cachedUser.user_id],
+        ["openid", cachedUser.openid],
+        ["手机", cachedUser.phone],
+        ["邮箱", cachedUser.email],
+        ["昵称", cachedUser.nickname],
+        ["注册", cachedUser.created_at],
+        ["更新", cachedUser.updated_at],
+        ["最近登录", cachedUser.last_login_at],
+        ["音色条数", String(data.voice_count != null ? data.voice_count : "")],
+      ];
+      kv.innerHTML = rows
+        .map(function (r) {
+          return "<dt>" + esc(r[0]) + "</dt><dd>" + esc(r[1]) + "</dd>";
+        })
+        .join("");
+
+      document.getElementById("f_active").value = Number(cachedUser.is_active) === 0 ? "0" : "1";
+      document.getElementById("f_bl").value = Number(cachedUser.blacklisted) === 1 ? "1" : "0";
+      document.getElementById("f_ban").value = cachedUser.ban_reason || "";
+      document.getElementById("f_lv").value = lv;
+      document.getElementById("f_stars").value = st;
+      document.getElementById("f_note").value = cachedUser.admin_note || "";
+    }
+
+    document.getElementById("btnSaveProfile").addEventListener("click", async function () {
+      const k = getApiKey();
+      if (!k) {
+        alert("请填写密钥");
+        return;
+      }
+      const lv = parseInt(document.getElementById("f_lv").value, 10);
+      const st = parseInt(document.getElementById("f_stars").value, 10);
+      if (!Number.isFinite(lv) || lv < 1) {
+        alert("reader_level 须为 ≥1 的整数");
+        return;
+      }
+      if (!Number.isFinite(st) || st < 0) {
+        alert("reader_stars 须为 ≥0 的整数");
+        return;
+      }
+      const body = {
+        is_active: parseInt(document.getElementById("f_active").value, 10),
+        blacklisted: parseInt(document.getElementById("f_bl").value, 10),
+        ban_reason: document.getElementById("f_ban").value.trim() || null,
+        reader_level: lv,
+        reader_stars: st,
+        admin_note: document.getElementById("f_note").value.trim() || null,
+      };
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId), {
+        method: "PATCH",
+        headers: headers(),
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && String(data.detail)) || "保存失败");
+        return;
+      }
+      document.getElementById("saveHint").textContent = "已保存 " + new Date().toLocaleTimeString();
+      cachedUser = data.user;
+      await loadUser();
+    });
+
+    function renderCompanion(c) {
+      document.getElementById("companionErr").textContent = "";
+      const errs = (c && c.errors) || [];
+      if (errs.length) {
+        document.getElementById("companionErr").innerHTML =
+          '<span style="color:#b91c1c;font-weight:700;">' + esc(errs.join("；")) + "</span>";
+      }
+      const slots = (c && c.slots_summary) || [];
+      const wrap = document.getElementById("companionSlots");
+      wrap.innerHTML = "<h3 style='margin:0 0 10px;font-size:1rem;color:var(--admin-pink-deep);'>蛋槽进度</h3>";
+      if (!slots.length) {
+        wrap.innerHTML += '<p class="muted">暂无槽位数据或尚未初始化。</p>';
+      } else {
+        slots.forEach(function (s) {
+          const pct = Math.max(0, Math.min(100, Number(s.progress_percent) || 0));
+          const row = document.createElement("div");
+          row.className = "progress-row";
+          row.innerHTML =
+            '<span style="min-width:88px;">槽 ' +
+            esc(s.index) +
+            "</span>" +
+            '<div class="progress-bar"><i style="width:' +
+            pct +
+            '%"></i></div>' +
+            '<span style="min-width:42px;">' +
+            pct +
+            "%</span>";
+          wrap.appendChild(row);
+          const sub = document.createElement("div");
+          sub.className = "muted";
+          sub.style.marginLeft = "98px";
+          sub.style.marginBottom = "10px";
+          sub.textContent =
+            (s.mascot_id || "") +
+            " · " +
+            (s.label || "") +
+            " · " +
+            (s.ui_state || "") +
+            (s.hint ? " · " + s.hint : "");
+          wrap.appendChild(sub);
+        });
+      }
+      const unlocked = (c && c.unlocked_mascot_ids) || [];
+      document.getElementById("unlockedList").textContent =
+        unlocked.length ? unlocked.join("，") : "（暂无额外解锁，默认含主宠线）";
+
+      const mascots = (c && c.mascots) || {};
+      const tb = document.getElementById("companionMascotBody");
+      tb.innerHTML = "";
+      Object.keys(mascots).forEach(function (mid) {
+        const m = mascots[mid];
+        if (m && m._error) {
+          const tr = document.createElement("tr");
+          tr.innerHTML =
+            "<td>" +
+            esc(mid) +
+            "</td><td colspan='5' style='color:#b91c1c;'>" +
+            esc(m._error) +
+            "</td><td></td>";
+          tb.appendChild(tr);
+          return;
+        }
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td>" +
+          esc(mid) +
+          "</td><td>" +
+          esc(m.level) +
+          "</td><td>" +
+          esc(m.stage) +
+          "</td><td>" +
+          esc(m.growth_percent) +
+          "</td><td>" +
+          esc(m.display_form_tier) +
+          "</td><td style='font-size:12px;white-space:nowrap;'>" +
+          esc(m.updated_at) +
+          "</td>";
+        tb.appendChild(tr);
+      });
+      document.getElementById("companionRaw").textContent = JSON.stringify(c, null, 2);
+    }
+
+    async function loadCompanion() {
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId) + "/companion", {
+        headers: headers(),
+      });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        document.getElementById("companionErr").textContent =
+          (data.detail && String(data.detail)) || "加载失败";
+        return;
+      }
+      renderCompanion(data.companion);
+    }
+
+    document.getElementById("btnRefreshCompanion").addEventListener("click", loadCompanion);
+
+    async function loadVoices() {
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId) + "/voices", {
+        headers: headers(),
+      });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && String(data.detail)) || "加载音色失败");
+        return;
+      }
+      const voices = data.voices || [];
+      document.getElementById("voiceTotal").textContent = String(voices.length);
+      const tb = document.getElementById("voiceBody");
+      tb.innerHTML = "";
+      voices.forEach(function (v) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td style='max-width:120px;word-break:break-all;font-size:12px;'>" +
+          esc(v.voice_id) +
+          "</td><td>" +
+          esc(v.display_name) +
+          "</td><td>" +
+          esc(v.model_type) +
+          "</td><td>" +
+          esc(v.scene) +
+          "</td><td>" +
+          esc(v.emotion) +
+          "</td><td style='font-size:12px;white-space:nowrap;'>" +
+          esc(v.trained_at) +
+          "</td><td style='font-size:11px;max-width:160px;word-break:break-all;' title='" +
+          esc(v.gpt_path) +
+          "'>" +
+          esc(shortPath(v.gpt_path, 36)) +
+          "</td><td style='font-size:11px;max-width:160px;word-break:break-all;' title='" +
+          esc(v.sovits_path) +
+          "'>" +
+          esc(shortPath(v.sovits_path, 36)) +
+          "</td>";
+        tb.appendChild(tr);
+      });
+    }
+
+    document.getElementById("btnClearCompanion").addEventListener("click", async function () {
+      if (!confirm("确定从伴宠 JSON 中清除该用户的存档？")) return;
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId) + "/clear-companion-data", {
+        method: "POST",
+        headers: headers(),
+      });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && String(data.detail)) || "操作失败");
+        return;
+      }
+      const pre = document.getElementById("clearReport");
+      pre.style.display = "block";
+      pre.textContent = JSON.stringify(data.cleared, null, 2);
+      await loadCompanion();
+    });
+
+    document.getElementById("btnDeleteUser").addEventListener("click", async function () {
+      if (!confirm("最后确认：将永久删除该用户及音色记录，是否继续？")) return;
+      const res = await fetch("/admin/users/" + encodeURIComponent(userId), {
+        method: "DELETE",
+        headers: headers(),
+      });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && String(data.detail)) || "删除失败");
+        return;
+      }
+      alert("已删除");
+      location.href = "/admin/static/users.html";
+    });
+
+    document.getElementById("reloadAll").addEventListener("click", async function () {
+      await loadUser();
+      await loadCompanion();
+      await loadVoices();
+    });
+
+    (function init() {
+      const el = document.getElementById("apiKey");
+      try {
+        const s = localStorage.getItem(KEY);
+        if (s) el.value = s;
+      } catch (e) {}
+      if (!userId) {
+        document.getElementById("headerSub").textContent = "缺少 user_id";
+        return;
+      }
+      loadUser();
+      loadCompanion();
+      loadVoices();
+    })();
+  </script>
+</body>
+</html>

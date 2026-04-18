@@ -1,0 +1,537 @@
+.page {
+  min-height: 100vh;
+  padding: 28rpx 24rpx 48rpx;
+  box-sizing: border-box;
+  background: linear-gradient(180deg, #fdf2f8 0%, #ffffff 42%, #f6f1ff 100%);
+}
+
+.header-banner {
+  border-radius: 30rpx;
+  padding: 24rpx 22rpx;
+  background: linear-gradient(135deg, rgba(232, 121, 169, 0.95), rgba(168, 85, 247, 0.9));
+  box-shadow: 0 14rpx 34rpx rgba(232, 121, 169, 0.22);
+  color: #fff;
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16rpx;
+}
+
+.header-badge {
+  font-size: 32rpx;
+  font-weight: 900;
+}
+
+.header-ready {
+  padding: 6rpx 16rpx;
+  border-radius: 999rpx;
+  background: rgba(255, 255, 255, 0.24);
+  border: 2rpx solid rgba(255, 255, 255, 0.45);
+  font-size: 22rpx;
+  font-weight: 800;
+}
+
+.header-sub {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  opacity: 0.95;
+}
+
+.header-icons {
+  margin-top: 10rpx;
+  display: flex;
+  align-items: center;
+  gap: 14rpx;
+}
+
+.header-icon-item {
+  width: 40rpx;
+  height: 40rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.26);
+  border: 2rpx solid rgba(255, 255, 255, 0.38);
+  font-size: 24rpx;
+}
+
+.header-stats {
+  display: block;
+  margin-top: 12rpx;
+  padding-top: 12rpx;
+  border-top: 2rpx solid rgba(255, 255, 255, 0.26);
+  font-size: 22rpx;
+  opacity: 0.92;
+}
+
+.showcase-block {
+  margin-top: 22rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2rpx solid rgba(253, 230, 240, 0.5);
+  box-shadow: 0 10rpx 26rpx rgba(232, 121, 169, 0.08);
+  padding: 18rpx;
+}
+
+.showcase-title-row,
+.market-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+}
+
+.showcase-title,
+.market-title {
+  font-size: 30rpx;
+  font-weight: 900;
+  color: #9d4e6e;
+}
+
+.showcase-hint,
+.market-sub {
+  font-size: 22rpx;
+  color: #f0a3c2;
+}
+
+.title-icons {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.title-icon-item {
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(232, 121, 169, 0.08);
+  border: 2rpx solid rgba(251, 207, 232, 0.24);
+  font-size: 22rpx;
+}
+
+.showcase-scroll {
+  margin-top: 14rpx;
+  white-space: nowrap;
+}
+
+.showcase-track {
+  display: inline-flex;
+  gap: 16rpx;
+  padding-right: 20rpx;
+}
+
+.showcase-item {
+  width: 144rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.showcase-egg {
+  width: 116rpx;
+  height: 140rpx;
+  border-radius: 50% 50% 46% 46% / 58% 58% 42% 42%;
+  background: linear-gradient(160deg, #fff7ed, #fef3c7);
+  box-shadow: 0 8rpx 20rpx rgba(232, 121, 169, 0.14), inset 0 -8rpx 16rpx rgba(190, 24, 93, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.showcase-egg.ready {
+  box-shadow: 0 10rpx 24rpx rgba(34, 197, 94, 0.22), inset 0 -8rpx 16rpx rgba(22, 163, 74, 0.16);
+}
+
+.showcase-poster {
+  width: 100%;
+  height: 100%;
+}
+
+.showcase-emoji {
+  font-size: 46rpx;
+  opacity: 0.88;
+}
+
+.showcase-label {
+  width: 100%;
+  font-size: 20rpx;
+  color: #831843;
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aquarium-block {
+  margin-top: 24rpx;
+  border-radius: 28rpx;
+  padding: 16rpx;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.75), rgba(237, 233, 254, 0.86));
+  border: 2rpx solid rgba(253, 230, 240, 0.58);
+}
+
+.aquarium-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12rpx;
+}
+
+.aquarium-title {
+  font-size: 30rpx;
+  font-weight: 900;
+  color: #9d4e6e;
+}
+
+.aquarium-sub {
+  font-size: 20rpx;
+  color: #e879a9;
+}
+
+.aquarium-container {
+  height: 260rpx;
+  border-radius: 26rpx;
+  border: 3rpx solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 12rpx 26rpx rgba(232, 121, 169, 0.12), inset 0 0 0 2rpx rgba(253, 230, 240, 0.35);
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(219, 234, 254, 0.32), rgba(167, 243, 208, 0.3)),
+    radial-gradient(circle at 20% 10%, rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0) 46%),
+    linear-gradient(180deg, rgba(243, 244, 246, 0.4), rgba(226, 232, 240, 0.42));
+}
+
+.aquarium-water-layer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 56%;
+  background: linear-gradient(180deg, rgba(125, 211, 252, 0.08), rgba(59, 130, 246, 0.2));
+}
+
+.aquarium-glass-glare {
+  position: absolute;
+  left: 16rpx;
+  top: 12rpx;
+  width: 200rpx;
+  height: 46rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.05));
+  pointer-events: none;
+}
+
+.aquarium-egg {
+  position: absolute;
+  border-radius: 50% 50% 46% 46% / 58% 58% 42% 42%;
+  background: linear-gradient(160deg, #fff7ed, #f5d0fe);
+  box-shadow: 0 6rpx 14rpx rgba(232, 121, 169, 0.16), inset 0 -6rpx 10rpx rgba(232, 121, 169, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aquarium-egg.ready {
+  box-shadow: 0 8rpx 18rpx rgba(34, 197, 94, 0.24), inset 0 -6rpx 10rpx rgba(22, 163, 74, 0.1);
+}
+
+.aquarium-egg-poster {
+  width: 100%;
+  height: 100%;
+}
+
+.aquarium-egg-emoji {
+  font-size: 26rpx;
+}
+
+.market-block {
+  margin-top: 24rpx;
+}
+
+.market-grid {
+  margin-top: 14rpx;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16rpx;
+}
+
+.product-card {
+  border-radius: 24rpx;
+  padding: 16rpx 14rpx 18rpx;
+  border: 2rpx solid rgba(255, 255, 255, 0.84);
+  box-shadow: 0 10rpx 24rpx rgba(157, 62, 110, 0.12), inset 0 2rpx 8rpx rgba(255, 255, 255, 0.72);
+  position: relative;
+  overflow: hidden;
+}
+
+.card-float-0 { animation: cardFloatA 3.2s ease-in-out infinite; }
+.card-float-1 { animation: cardFloatB 3.6s ease-in-out infinite; }
+.card-float-2 { animation: cardFloatC 3.1s ease-in-out infinite; }
+.card-float-3 { animation: cardFloatD 3.4s ease-in-out infinite; }
+
+.product-cover {
+  position: relative;
+}
+
+.product-egg-shell {
+  width: 136rpx;
+  height: 170rpx;
+  margin: 0 auto;
+  border-radius: 50% 50% 48% 48% / 58% 58% 42% 42%;
+  background: linear-gradient(165deg, #fef9c3 0%, #fce7f3 45%, #fef3c7 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 -8rpx 20rpx rgba(251, 207, 232, 0.15), 0 8rpx 16rpx rgba(232, 121, 169, 0.12);
+  position: relative;
+}
+
+.loading-box {
+  margin-top: 80rpx;
+  text-align: center;
+}
+
+.loading-text {
+  font-size: 26rpx;
+  color: #9ca3af;
+}
+
+.product-poster {
+  width: 100%;
+  height: 100%;
+}
+
+.product-egg-emoji {
+  font-size: 50rpx;
+  opacity: 0.9;
+}
+
+.product-glass {
+  position: relative;
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  display: block;
+  border: 2rpx solid rgba(255, 255, 255, 0.75);
+}
+
+.product-glass.locked {
+  background: rgba(255, 255, 255, 0.52);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.product-glass.incubating {
+  background: rgba(245, 243, 255, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.product-glass.ready {
+  background: rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-color: rgba(34, 197, 94, 0.45);
+  box-shadow: 0 0 0 2rpx rgba(34, 197, 94, 0.2);
+}
+
+.product-state-badge {
+  position: absolute;
+  right: 10rpx;
+  top: 10rpx;
+  width: 34rpx;
+  height: 34rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.86);
+  border: 2rpx solid rgba(255, 255, 255, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20rpx;
+  line-height: 1;
+  box-shadow: 0 2rpx 8rpx rgba(76, 29, 149, 0.18);
+}
+
+.product-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 4rpx 12rpx;
+  border-radius: 0 0 12rpx 0;
+  font-size: 18rpx;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.tag-ready {
+  color: #166534;
+  background: rgba(187, 247, 208, 0.95);
+}
+
+.tag-incubating {
+  color: #e879a9;
+  background: rgba(233, 213, 255, 0.95);
+}
+
+.tag-locked {
+  color: #4b5563;
+  background: rgba(229, 231, 235, 0.95);
+}
+
+.tag-claimed {
+  color: #1d4ed8;
+  background: rgba(191, 219, 254, 0.95);
+}
+
+.product-name {
+  margin-top: 12rpx;
+  font-size: 26rpx;
+  font-weight: 800;
+  color: #831843;
+  text-align: center;
+}
+
+.product-desc {
+  margin-top: 8rpx;
+  font-size: 20rpx;
+  color: #6b7280;
+  text-align: center;
+  line-height: 1.35;
+}
+
+.claim-btn {
+  margin-top: 12rpx;
+  width: 100%;
+  height: 56rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #f0a8c0, #fde68a);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.goto-btn {
+  margin-top: 12rpx;
+  width: 100%;
+  height: 56rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #e879a9, #9d4e6e);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bottom-action {
+  margin-top: 36rpx;
+  display: flex;
+  justify-content: center;
+}
+
+.ghost-btn {
+  padding: 16rpx 36rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid #fde68a;
+  color: #9d4e6e;
+  font-size: 24rpx;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.unlock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40rpx;
+}
+
+.unlock-card {
+  width: 100%;
+  max-width: 560rpx;
+  padding: 40rpx 32rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 2rpx solid rgba(253, 230, 240, 0.6);
+  box-shadow: 0 20rpx 48rpx rgba(157, 62, 110, 0.18);
+  text-align: center;
+}
+
+.unlock-title {
+  display: block;
+  font-size: 40rpx;
+  font-weight: 900;
+  color: #e879a9;
+}
+
+.unlock-name {
+  display: block;
+  margin-top: 12rpx;
+  font-size: 32rpx;
+  font-weight: 900;
+  color: #1f2937;
+}
+
+.unlock-sub {
+  display: block;
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #6b7280;
+}
+
+/* 孵化弹窗样式已废弃：孵化流程转入伴宠详情页 */
+
+@keyframes eggFloatA {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10rpx); }
+}
+
+@keyframes eggFloatB {
+  0%, 100% { transform: translateY(-2rpx); }
+  50% { transform: translateY(-12rpx); }
+}
+
+@keyframes eggFloatC {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8rpx); }
+}
+
+@keyframes cardFloatA {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6rpx); }
+}
+
+@keyframes cardFloatB {
+  0%, 100% { transform: translateY(-2rpx); }
+  50% { transform: translateY(-7rpx); }
+}
+
+@keyframes cardFloatC {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5rpx); }
+}
+
+@keyframes cardFloatD {
+  0%, 100% { transform: translateY(-1rpx); }
+  50% { transform: translateY(-8rpx); }
+}

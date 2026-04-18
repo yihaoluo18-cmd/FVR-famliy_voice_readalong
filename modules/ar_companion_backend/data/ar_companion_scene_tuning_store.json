@@ -1,0 +1,13 @@
+{
+  "wx_child_user::default::companion": {
+    "fov": 45.0,
+    "camDistMul": 1.2,
+    "camHeightMul": 0.18,
+    "lookAtHeightMul": 0.12,
+    "liftMul": -53.278,
+    "targetSize": 1.59,
+    "baseRotYDeg": 0.0,
+    "position_x": 0.0,
+    "position_z": -270.0
+  }
+}

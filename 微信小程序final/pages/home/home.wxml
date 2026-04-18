@@ -1,0 +1,333 @@
+<view class="container">
+  <!-- 用户欢迎栏 -->
+  <view class="welcome-bar">
+    <!-- 左侧：用户头像和名称 -->
+    <view class="user-info" bindtap="goToAuth">
+      <image class="avatar" src="{{userData.avatar}}" mode="aspectFill" />
+      <view class="user-details">
+        <text class="baby-name">{{userData.babyName}}</text>
+        <view class="stars-info">
+          <text class="star-icon">⭐</text>
+          <text class="stars-text">{{stars}} 颗星</text>
+        </view>
+      </view>
+    </view>
+    <!-- 右侧：标题 -->
+    <view class="title-section">
+      <text class="sparkle">✨</text>
+      <text class="app-title">童心故事园</text>
+      <text class="sparkle">✨</text>
+    </view>
+  </view>
+
+  <!-- 顶部：伴宠 3D + 信息 -->
+  <view class="home-hero">
+    <!-- 3D 展示卡片保持稳定：不使用浮动动画，避免模型上下漂移 -->
+    <view class="home-pet-card {{homeThreeLoading ? 'home-pet-card-switching' : ''}} {{showGuide && guideHighlight === 'pet' ? 'guide-pulse' : ''}}" bindtap="toggleAvatarPicker">
+      <view class="home-tune-fab" catchtap="onToggleHomeTuning">调参</view>
+      <view class="home-switch-fab" catchtap="onHomeOpenSwitch">切换</view>
+      <view class="home-pet-stage" style="background: {{homePetStageBg}};">
+        <view wx:if="{{homeThreeLoading}}" class="home-switching-overlay">
+          <view class="home-switching-ring"></view>
+          <text class="home-switching-text">形态切换中…</text>
+        </view>
+        <view
+          class="home-three-interact-layer"
+          bindtouchstart="onHomeThreeTouchStart"
+          bindtouchmove="onHomeThreeTouchMove"
+          bindtouchend="onHomeThreeTouchEnd"
+          bindtouchcancel="onHomeThreeTouchEnd"
+          bindwheel="onHomeMouseWheel"
+          bindmousewheel="onHomeMouseWheel"
+        >
+          <canvas
+            type="webgl"
+            id="homePetThreeCanvas"
+            class="home-three-canvas"
+            bindwheel="onHomeMouseWheel"
+            bindmousewheel="onHomeMouseWheel"
+          ></canvas>
+        </view>
+      </view>
+      <!-- 仅让阴影轻微呼吸，不影响模型稳定性 -->
+      <view class="home-pet-shadow bubbleClass"></view>
+    </view>
+
+    <!-- 首页切换弹窗（美观居中）：切换伴宠 / 切换形态 -->
+    <view wx:if="{{showHomeSwitchModal}}" class="home-switch-mask" catchtap="onHomeCloseSwitch">
+      <view class="home-switch-modal" catchtap="noop">
+        <view class="home-switch-header">
+          <text class="home-switch-title">切换小伙伴</text>
+          <text class="home-switch-close" catchtap="onHomeCloseSwitch">✕</text>
+        </view>
+
+        <view wx:if="{{homeSwitchStep === 'menu'}}" class="home-switch-menu">
+          <view class="home-switch-item" catchtap="onHomeSwitchPickMascot">
+            <text class="home-switch-item-title">切换伴宠</text>
+            <text class="home-switch-item-sub">从已解锁的小伙伴里选择</text>
+          </view>
+          <view class="home-switch-item" catchtap="onHomeSwitchPickForm">
+            <text class="home-switch-item-title">切换形态</text>
+            <text class="home-switch-item-sub">初阶 / 中阶 / 高阶（三种）</text>
+          </view>
+        </view>
+
+        <view wx:elif="{{homeSwitchStep === 'mascot'}}" class="home-switch-body">
+          <view class="home-switch-back" catchtap="onHomeSwitchBack">‹ 返回</view>
+          <view class="home-switch-grid">
+            <view
+              wx:for="{{mascotAvatars}}"
+              wx:key="id"
+              class="home-switch-mascot {{item.locked ? 'home-switch-locked' : ''}}"
+              catchtap="onHomeSelectMascotFromModal"
+              data-mascot="{{item}}"
+            >
+              <image class="home-switch-mascot-img {{item.locked ? 'home-switch-img-dim' : ''}}" src="{{item.url}}" mode="aspectFill" />
+              <view class="home-switch-mascot-name mascot-name-{{item.id}}">{{item.name}}</view>
+              <view class="home-switch-lock" wx:if="{{item.locked}}">🔒</view>
+            </view>
+          </view>
+        </view>
+
+        <view wx:elif="{{homeSwitchStep === 'form'}}" class="home-switch-body">
+          <view class="home-switch-back" catchtap="onHomeSwitchBack">‹ 返回</view>
+          <view class="home-form-grid">
+            <view
+              wx:for="{{[1,2,3]}}"
+              wx:key="*this"
+              class="home-form-card {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-locked' : ''}}"
+              catchtap="onHomeSelectFormTier"
+              data-tier="{{item}}"
+            >
+              <view class="home-form-poster">
+                <image class="home-form-poster-img {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-img-dim' : ''}}" src="{{currentMascot.url}}" mode="aspectFill" />
+                <view class="home-form-badge">形态{{item}}</view>
+              </view>
+              <view class="home-form-title">
+                {{item === 1 ? '初阶形态' : (item === 2 ? '中阶形态' : '高阶形态')}}
+              </view>
+              <view class="home-switch-lock" wx:if="{{homeUnlockedFormTiers.indexOf(item) === -1}}">🔒</view>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <view class="home-pet-meta">
+      <view class="home-pet-name-row">
+        <text class="home-pet-name mascot-name-{{currentMascot.id}}">{{currentMascot.name}}</text>
+      </view>
+
+    <view class="status-grid {{showGuide && guideHighlight === 'status' ? 'guide-pulse' : ''}}">
+  <!-- 第一行：饥饿 + 清洁 -->
+  <view class="status-row">
+    <!-- 饥饿值：加 class="status-hunger" -->
+    <view class="status-item status-hunger">
+      <view class="status-circle">
+        <view class="status-circle-bg"></view>
+        <view class="status-circle-progress" style="--progress: {{hungerLevel}}%; --color: #f59e0b;"></view>
+        <view class="status-circle-content">
+          <text class="mini-emoji">🍎</text>
+          <text class="status-percent">{{hungerLevel}}%</text>
+        </view>
+      </view>
+      <text class="status-label">饥饿值</text>
+    </view>
+
+    <!-- 清洁度：加 class="status-clean" -->
+    <view class="status-item status-clean">
+      <view class="status-circle">
+        <view class="status-circle-bg"></view>
+        <view class="status-circle-progress" style="--progress: {{cleanLevel}}%; --color: #ec4899;"></view>
+        <view class="status-circle-content">
+          <text class="mini-emoji">🧼</text>
+          <text class="status-percent">{{cleanLevel}}%</text>
+        </view>
+      </view>
+      <text class="status-label">清洁度</text>
+    </view>
+  </view>
+
+  <!-- 第二行：心情 + 睡眠 -->
+  <view class="status-row">
+    <!-- 心情值：加 class="status-mood" -->
+    <view class="status-item status-mood">
+      <view class="status-circle">
+        <view class="status-circle-bg"></view>
+        <view class="status-circle-progress" style="--progress: {{moodLevel}}%; --color: #f0a8c0;"></view>
+        <view class="status-circle-content">
+          <text class="mini-emoji">⚽</text>
+          <text class="status-percent">{{moodLevel}}%</text>
+        </view>
+      </view>
+      <text class="status-label">心情值</text>
+    </view>
+
+    <!-- 睡眠值：加 class="status-sleepy" -->
+    <view class="status-item status-sleepy">
+      <view class="status-circle">
+        <view class="status-circle-bg"></view>
+        <view class="status-circle-progress" style="--progress: {{sleepyLevel}}%; --color: #fde68a;"></view>
+        <view class="status-circle-content">
+          <text class="mini-emoji">🛏️</text>
+          <text class="status-percent">{{sleepyLevel}}%</text>
+        </view>
+      </view>
+      <text class="status-label">睡眠值</text>
+    </view>
+  </view>
+</view>
+    </view>
+  </view>
+
+  <view class="home-tuning-panel" wx:if="{{showHomeTuning}}" catchtap="noop">
+    <view class="home-tuning-header">
+      <text class="home-tuning-title">模型设置（{{currentMascot.name}} / {{homeEggModelActive ? 'egg' : ('tier' + homeDisplayFormTier)}}）</text>
+      <text class="home-tuning-close" bindtap="onToggleHomeTuning">✕</text>
+    </view>
+
+    <view class="home-tune-row">
+      <text class="home-tune-label">位置 X: {{homeTunePosX}}</text>
+      <slider min="-200" max="200" step="1" value="{{homeTunePosX}}" data-key="homeTunePosX" bindchanging="onHomeTuningSlider" />
+    </view>
+    <view class="home-tune-row">
+      <text class="home-tune-label">位置 Y: {{homeTunePosY}}</text>
+      <slider
+        min="-10000"
+        max="200"
+        step="0.1"
+        value="{{homeTunePosY}}"
+        data-key="homeTunePosY"
+        bindchanging="onHomeTuningSlider"
+      />
+      <view class="home-tune-input-row">
+        <input
+          class="home-tune-input"
+          type="text"
+          placeholder="输入小数，如 0.2"
+          value="{{homeTunePosYText}}"
+          bindinput="onHomeTunePosYTextInput"
+        />
+      </view>
+    </view>
+    <view class="home-tune-row">
+      <text class="home-tune-label">位置 Z: {{homeTunePosZ}}</text>
+      <slider min="-200" max="200" step="1" value="{{homeTunePosZ}}" data-key="homeTunePosZ" bindchanging="onHomeTuningSlider" />
+    </view>
+    <view class="home-tune-row">
+      <text class="home-tune-label">缩放: {{homeTuneScalePct}}%</text>
+      <slider min="20" max="300" step="1" value="{{homeTuneScalePct}}" data-key="homeTuneScalePct" bindchanging="onHomeTuningSlider" />
+    </view>
+    <view class="home-tune-row">
+      <text class="home-tune-label">旋转Y: {{homeTuneRotY}}°</text>
+      <slider min="-180" max="180" step="1" value="{{homeTuneRotY}}" data-key="homeTuneRotY" bindchanging="onHomeTuningSlider" />
+    </view>
+
+    <view class="home-tuning-actions">
+      <view class="home-tuning-btn btn-light" bindtap="onHomeResetTuning">重置</view>
+      <view class="home-tuning-btn btn-primary" bindtap="onHomeSaveTuning">保存到后端</view>
+    </view>
+  </view>
+
+  <!-- 头像选择器 -->
+  <view class="avatar-picker {{showAvatarPicker ? 'show' : 'hide'}}" wx:if="{{showAvatarPicker}}">
+    <view class="picker-title">
+      <text>选择你的小伙伴 ✨</text>
+    </view>
+    <view class="avatar-grid">
+      <view
+        wx:for="{{mascotAvatars}}"
+        wx:key="id"
+        class="avatar-option {{currentMascot.id === item.id ? 'selected' : ''}} {{item.locked ? 'avatar-option-locked' : ''}}"
+        bindtap="selectMascot"
+        data-mascot="{{item}}"
+      >
+        <image class="option-image {{item.locked ? 'option-image-dim' : ''}}" src="{{item.url}}" mode="aspectFill" />
+        <view class="avatar-frost" wx:if="{{item.locked}}">
+          <text class="avatar-frost-icon">🔒</text>
+        </view>
+        <view class="option-name">{{item.name}}</view>
+        <view class="selected-mark" wx:if="{{currentMascot.id === item.id}}">✓</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 中部：两个进度卡 -->
+  <view class="home-metrics-row">
+    <view class="metric-card" bindtap="goToGrowth">
+  <view class="metric-button-3d">
+    <text class="metric-button-text">阅读计划</text>
+  </view>
+  <text class="metric-label">今日阅读 {{readingMinutesToday}} / {{readingGoalMinutes}} 分钟</text>
+</view>
+    <view class="metric-card" bindtap="goToGrowth">
+      <view class="metric-ring metric-ring-yellow">
+        <view class="metric-ring-bg"></view>
+        <view class="metric-ring-fg metric-ring-fg-yellow" style="--p: {{starsProgress}};"></view>
+        <view class="metric-center">
+          <text class="metric-value">{{starsProgress}}%</text>
+          <text class="metric-sub">今日星星</text>
+        </view>
+      </view>
+      <text class="metric-label">已获得 {{starsToday}} / {{starsGoalToday}} ⭐</text>
+    </view>
+  </view>
+
+  <!-- 四个快捷入口（小游戏前四项） -->
+  <view class="quick-grid">
+    <view
+      wx:for="{{homeQuickGames}}"
+      wx:key="id"
+      class="quick-item {{item.locked ? 'quick-item-locked' : ''}}"
+      bindtap="onQuickGameTap"
+      data-game="{{item}}"
+    >
+      <view class="quick-icon-ball ball-{{item.id}}">
+        <text class="quick-icon">{{item.iconEmoji}}</text>
+      </view>
+      <text class="quick-title">{{item.title}}</text>
+    </view>
+  </view>
+  
+  <!-- 绘本阅读（底部两块） -->
+  <view class="section">
+    <text class="section-title">📖 听读乐园</text>
+    <view class="reading-stack">
+      <view class="reading-menu-item reading-books" bindtap="goToBooks">
+        <view class="reading-menu-icon-box">
+          <text class="reading-menu-icon">📚</text>
+        </view>
+        <view class="reading-menu-text">
+          <text class="reading-menu-title">看绘本</text>
+          <text class="reading-menu-desc">故事书架 · 选一本就开始</text>
+        </view>
+        <image class="reading-menu-sticker reading-sticker-book" src="{{mpAssetIconBase}}/icons/book1.png" mode="aspectFit" />
+      </view>
+
+      <view class="reading-menu-item reading-voice {{showGuide && guideHighlight === 'voice' ? 'guide-pulse' : ''}}" bindtap="goToVoice">
+        <view class="reading-menu-icon-box">
+          <text class="reading-menu-icon">🎤</text>
+        </view>
+        <view class="reading-menu-text">
+          <text class="reading-menu-title">克隆魔法音</text>
+          <text class="reading-menu-desc">训练专属音色 · 更像家人讲读</text>
+        </view>
+        <image class="reading-menu-sticker reading-sticker-mic" src="{{mpAssetIconBase}}/icons/microphone.png" mode="aspectFit" />
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view wx:if="{{guideHighlight === 'voice'}}" class="guide-btn primary" bindtap="onGuideGoVoice">去克隆</view>
+        <view wx:else class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+</view>

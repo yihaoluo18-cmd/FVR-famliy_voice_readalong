@@ -1,0 +1,458 @@
+/* 容器 */
+.container {
+  min-height: 100vh;
+  background: linear-gradient(to bottom, #fdf2f8, #fff);
+  padding-bottom: 120rpx;
+}
+
+/* 粉色顶部横幅 */
+.header-banner {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48rpx 32rpx 80rpx;
+  background: linear-gradient(160deg, #e879a9 0%, #e879a9 100%);
+}
+
+.calendar-icon-box {
+  width: 160rpx;
+  height: 160rpx;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24rpx;
+  border: 8rpx solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 8rpx 32rpx rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(20rpx);
+  animation: scaleIn 0.5s ease-out;
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.calendar-icon {
+  font-size: 80rpx;
+}
+
+.page-title {
+  color: white;
+  font-size: 40rpx;
+  font-weight: 900;
+  margin-bottom: 16rpx;
+}
+
+.month-text {
+  color: #fef3c7;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+/* 统计卡片 */
+.stats-cards {
+  position: absolute;
+  bottom: -64rpx;
+  left: 32rpx;
+  right: 32rpx;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16rpx;
+}
+
+.stat-card {
+  background: white;
+  border-radius: 32rpx;
+  padding: 24rpx;
+  box-shadow: 0 8rpx 24rpx rgba(240, 163, 194, 0.2);
+  border: 4rpx solid #fce7f3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8rpx;
+}
+
+.stat-icon {
+  font-size: 40rpx;
+}
+
+.stat-value {
+  font-size: 32rpx;
+  font-weight: 900;
+  color: #b87a94;
+}
+
+.stat-label {
+  font-size: 18rpx;
+  font-weight: 700;
+  color: #9ca3af;
+}
+
+/* 签到按钮区域 */
+.check-in-button-area {
+  padding: 96rpx 32rpx 40rpx;
+}
+
+.check-in-button {
+  width: 100%;
+  padding: 32rpx;
+  border-radius: 48rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16rpx;
+  background: linear-gradient(to right, #f0a3c2, #ec4899);
+  border: 4rpx solid white;
+  box-shadow: 0 8rpx 32rpx rgba(240, 163, 194, 0.4);
+  transition: all 0.2s;
+}
+
+.check-in-button:active {
+  transform: scale(0.97);
+}
+
+.check-in-button.checked {
+  background: #f3f4f6;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.05);
+}
+
+.button-icon {
+  font-size: 48rpx;
+}
+
+.button-text {
+  color: white;
+  font-size: 32rpx;
+  font-weight: 900;
+}
+
+.check-in-button.checked .button-text {
+  color: #9ca3af;
+}
+
+.button-reward {
+  color: #fef3c7;
+  font-size: 28rpx;
+  font-weight: 900;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 8rpx 16rpx;
+  border-radius: 24rpx;
+}
+
+/* 日历区域 */
+.calendar-section {
+  padding: 0 32rpx 40rpx;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+  margin-bottom: 24rpx;
+}
+
+.title-icon {
+  font-size: 40rpx;
+}
+
+.title-text {
+  color: #b87a94;
+  font-size: 30rpx;
+  font-weight: 900;
+}
+
+/* 日历网格 */
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 12rpx;
+}
+
+.calendar-day {
+  aspect-ratio: 1;
+  border-radius: 24rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  border: 4rpx solid #e5e7eb;
+  background: white;
+  transition: all 0.2s;
+  animation: fadeInScale 0.3s ease-out both;
+}
+
+@keyframes fadeInScale {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.calendar-day.future {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+}
+
+.calendar-day.checked {
+  background: linear-gradient(135deg, #fce7f3 0%, #fce7f3 100%);
+  border-color: #f472b6;
+  box-shadow: 0 2rpx 8rpx rgba(240, 163, 194, 0.2);
+}
+
+.calendar-day.today {
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 4rpx rgba(251, 191, 36, 0.2);
+}
+
+.day-number {
+  font-size: 26rpx;
+  font-weight: 900;
+  color: #9ca3af;
+}
+
+.calendar-day.checked .day-number {
+  color: #e879a9;
+}
+
+.calendar-day.future .day-number {
+  color: #d1d5db;
+}
+
+.check-mark {
+  position: absolute;
+  top: -4rpx;
+  right: -4rpx;
+  font-size: 28rpx;
+  animation: pop 0.3s ease-out;
+}
+
+@keyframes pop {
+  0% { transform: scale(0); }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.today-dot {
+  position: absolute;
+  bottom: -4rpx;
+  width: 12rpx;
+  height: 12rpx;
+  background: #fbbf24;
+  border-radius: 50%;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 奖励区域 */
+.rewards-section {
+  padding: 0 32rpx 40rpx;
+}
+
+.rewards-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24rpx;
+}
+
+.reward-card {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde047 100%);
+  border-radius: 32rpx;
+  padding: 32rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12rpx;
+  border: 4rpx solid white;
+  box-shadow: 0 4rpx 16rpx rgba(245, 158, 11, 0.2);
+  position: relative;
+  transition: all 0.2s;
+}
+
+.reward-card.can-claim {
+  background: linear-gradient(135deg, #fbcfe8 0%, #f0a3c2 100%);
+  box-shadow: 0 8rpx 24rpx rgba(240, 163, 194, 0.4);
+  animation: glow 2s ease-in-out infinite;
+}
+
+@keyframes glow {
+  0%, 100% { box-shadow: 0 8rpx 24rpx rgba(240, 163, 194, 0.4); }
+  50% { box-shadow: 0 12rpx 32rpx rgba(240, 163, 194, 0.6); }
+}
+
+.reward-card.claimed {
+  background: #f3f4f6;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+}
+
+.reward-icon-box {
+  position: relative;
+  width: 80rpx;
+  height: 80rpx;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.reward-card.can-claim .reward-icon-box {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.reward-card.claimed .reward-icon-box {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.reward-icon {
+  font-size: 48rpx;
+}
+
+.claimed-badge {
+  position: absolute;
+  top: -8rpx;
+  right: -8rpx;
+  background: #e879a9;
+  padding: 4rpx 12rpx;
+  border-radius: 24rpx;
+  border: 2rpx solid white;
+}
+
+.badge-text {
+  color: white;
+  font-size: 16rpx;
+  font-weight: 900;
+}
+
+.reward-days {
+  font-size: 28rpx;
+  font-weight: 900;
+  color: #713f12;
+}
+
+.reward-card.can-claim .reward-days {
+  color: white;
+}
+
+.reward-card.claimed .reward-days {
+  color: #9ca3af;
+}
+
+.reward-amount {
+  font-size: 32rpx;
+  font-weight: 900;
+  color: #854d0e;
+}
+
+.reward-card.can-claim .reward-amount {
+  color: #fef3c7;
+}
+
+.reward-card.claimed .reward-amount {
+  color: #d1d5db;
+}
+
+.claim-button {
+  margin-top: 8rpx;
+  padding: 12rpx 32rpx;
+  border-radius: 48rpx;
+  background: rgba(255, 255, 255, 0.3);
+  border: 2rpx solid rgba(255, 255, 255, 0.5);
+}
+
+.claim-button.active {
+  background: white;
+  border-color: white;
+  box-shadow: 0 4rpx 12rpx rgba(0, 0, 0, 0.1);
+  animation: shake 0.5s ease-in-out infinite;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4rpx); }
+  75% { transform: translateX(4rpx); }
+}
+
+.claim-button.claimed {
+  background: rgba(244, 194, 212, 0.2);
+  border-color: #f0a8c0;
+}
+
+.claim-text {
+  font-size: 24rpx;
+  font-weight: 900;
+  color: #713f12;
+}
+
+.claim-button.active .claim-text {
+  color: #e879a9;
+}
+
+.claim-button.claimed .claim-text {
+  color: #b87a94;
+}
+
+/* 彩带效果 */
+.confetti-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.confetti {
+  position: absolute;
+  font-size: 64rpx;
+  animation: confettiFall 2s ease-out forwards;
+}
+
+.confetti-1 {
+  left: 10%;
+  animation-delay: 0s;
+}
+
+.confetti-2 {
+  left: 30%;
+  animation-delay: 0.2s;
+}
+
+.confetti-3 {
+  left: 50%;
+  animation-delay: 0.4s;
+}
+
+.confetti-4 {
+  left: 70%;
+  animation-delay: 0.6s;
+}
+
+.confetti-5 {
+  left: 20%;
+  animation-delay: 0.8s;
+}
+
+.confetti-6 {
+  left: 80%;
+  animation-delay: 1s;
+}
+
+@keyframes confettiFall {
+  0% {
+    top: -100rpx;
+    opacity: 1;
+    transform: rotate(0deg);
+  }
+  100% {
+    top: 100%;
+    opacity: 0;
+    transform: rotate(720deg);
+  }
+}

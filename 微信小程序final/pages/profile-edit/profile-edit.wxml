@@ -1,0 +1,133 @@
+<view class="container">
+  <!-- 粉色顶部横幅 -->
+  <view class="header-banner">
+    <!-- 头像区域 -->
+    <view class="avatar-section">
+      <view class="avatar-container">
+        <image class="avatar-image" src="{{selectedAvatar || avatarOptions[0]}}" mode="aspectFill" />
+      </view>
+      <view class="camera-button" bindtap="toggleAvatarPicker">
+        <text class="camera-icon">📷</text>
+      </view>
+    </view>
+    
+    <view class="page-title">
+      <text class="sparkle">✨</text>
+      <text class="title-text">编辑个人资料</text>
+      <text class="sparkle">✨</text>
+    </view>
+  </view>
+
+  <!-- 头像选择器 -->
+  <view class="avatar-picker" wx:if="{{showAvatarPicker}}">
+    <view class="picker-title">
+      <text class="title-icon">📷</text>
+      <text class="title-text">选择头像</text>
+    </view>
+    <view class="avatars-grid">
+      <view 
+        wx:for="{{avatarOptions}}" 
+        wx:key="index"
+        class="avatar-option {{selectedAvatar === item ? 'selected' : ''}}"
+        bindtap="selectAvatar"
+        data-url="{{item}}"
+      >
+        <image class="option-image" src="{{item}}" mode="aspectFill" />
+      </view>
+    </view>
+  </view>
+
+  <!-- 编辑表单 -->
+  <form bindsubmit="handleSave" class="edit-form">
+    <!-- 家长昵称 -->
+    <view class="form-item">
+      <view class="item-label purple">
+        <text class="label-icon">👤</text>
+        <text class="label-text">家长昵称</text>
+      </view>
+      <input 
+        class="item-input purple"
+        type="text"
+        name="parentName"
+        value="{{formData.parentName}}"
+        bindinput="onParentNameInput"
+        placeholder="请输入家长昵称"
+        placeholder-class="input-placeholder"
+      />
+    </view>
+
+    <!-- 宝宝昵称 -->
+    <view class="form-item">
+      <view class="item-label pink">
+        <text class="label-icon">✨</text>
+        <text class="label-text">宝宝昵称</text>
+      </view>
+      <input 
+        class="item-input pink"
+        type="text"
+        name="babyName"
+        value="{{formData.babyName}}"
+        bindinput="onBabyNameInput"
+        placeholder="请输入宝宝昵称"
+        placeholder-class="input-placeholder"
+      />
+    </view>
+
+    <!-- 宝宝年龄 -->
+    <view class="form-item">
+      <view class="item-label blue">
+        <text class="label-icon">🎂</text>
+        <text class="label-text">宝宝年龄</text>
+      </view>
+      <picker 
+        class="item-picker blue"
+        mode="selector"
+        range="{{ageOptions}}"
+        value="{{ageIndex}}"
+        bindchange="onAgeChange"
+      >
+        <view class="picker-value">{{formData.babyAge}} 岁</view>
+      </picker>
+    </view>
+
+    <!-- 邮箱 -->
+    <view class="form-item">
+      <view class="item-label green">
+        <text class="label-icon">📧</text>
+        <text class="label-text">邮箱</text>
+      </view>
+      <input 
+        class="item-input green"
+        type="text"
+        name="email"
+        value="{{formData.email}}"
+        bindinput="onEmailInput"
+        placeholder="请输入邮箱"
+        placeholder-class="input-placeholder"
+      />
+    </view>
+
+    <!-- 手机号 -->
+    <view class="form-item">
+      <view class="item-label orange">
+        <text class="label-icon">📱</text>
+        <text class="label-text">手机号</text>
+      </view>
+      <input 
+        class="item-input orange"
+        type="text"
+        name="phone"
+        value="{{formData.phone}}"
+        bindinput="onPhoneInput"
+        placeholder="请输入手机号"
+        placeholder-class="input-placeholder"
+      />
+    </view>
+
+    <!-- 保存按钮 -->
+    <button class="save-button" form-type="submit">
+      <text class="save-icon">💾</text>
+      <text class="save-text">保存修改</text>
+    </button>
+  </form>
+</view>

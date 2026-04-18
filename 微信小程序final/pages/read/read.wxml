@@ -1,0 +1,108 @@
+<view class="container">
+  <view class="read-topbar">
+    <view class="mini-circle-btn" bindtap="goBack">←</view>
+    <view class="top-page-pill">PAGE {{pageIndex + 1}} OF {{totalPages}}</view>
+    <view class="top-right-actions">
+      <view class="mini-circle-btn" bindtap="onToggleReadSettingsPanel">⚙</view>
+      <view class="mini-circle-btn" bindtap="onToggleCompanionPanel">🐾</view>
+    </view>
+  </view>
+
+  <view class="story-image-window">
+    <image class="story-main-image" src="{{book && book.image ? book.image : ''}}" mode="aspectFit" />
+  </view>
+
+  <view class="story-text-window" animation="{{textAnimation}}">
+    <view class="page-label">
+      <text class="star-icon">⭐</text>
+      <text class="label-text">第 {{pageIndex + 1}} 页 / 共 {{totalPages}} 页</text>
+      <view class="voice-indicator" wx:if="{{isPlaying}}">
+        <text class="voice-icon">🔊</text>
+        <text class="voice-text">{{selectedVoiceName || '朗读中'}}</text>
+      </view>
+    </view>
+    <view class="story-text">
+      <text class="text-content" style="font-size: {{readFontSize}}rpx; line-height: {{readFontLineHeight}};" wx:if="{{bookLoading}}">正在加载这一页的故事…</text>
+      <text class="text-content" style="font-size: {{readFontSize}}rpx; line-height: {{readFontLineHeight}};" wx:elif="{{bookError}}">加载失败：{{bookError}}</text>
+      <text class="text-content" style="font-size: {{readFontSize}}rpx; line-height: {{readFontLineHeight}};" wx:elif="{{!totalPages}}">这本绘本还没有内容页</text>
+      <text class="text-content" style="font-size: {{readFontSize}}rpx; line-height: {{readFontLineHeight}};" wx:else>{{currentText}}</text>
+    </view>
+    <view class="page-indicators">
+      <view wx:for="{{book && book.pages ? book.pages : []}}" wx:key="index" class="indicator {{pageIndex === index ? 'active' : ''}}"></view>
+    </view>
+  </view>
+
+  <view class="voice-buttons compact {{showGuide && guideHighlight === 'voice' ? 'guide-pulse' : ''}}">
+    <view class="voice-button custom-button {{isPlaying ? 'active' : ''}}" bindtap="onTapCustomReadVoice">
+      <view class="voice-icon-box {{isPlaying ? 'active' : ''}}">
+        <image class="play-pause-icon" src="{{readPlayIconCustom}}" mode="aspectFit" />
+      </view>
+      <text class="voice-label">听你想听的声音读</text>
+    </view>
+  </view>
+
+  <view class="voice-start-wrap" wx:if="{{showReadStartButton}}">
+    <view class="voice-start-btn {{isPlaying ? 'active' : ''}}" bindtap="onTapStartReadBySelectedVoice">
+      <text class="voice-start-main">{{isPlaying ? '停止朗读' : '开始朗读'}}</text>
+      <text class="voice-start-meta">当前音色：{{selectedVoiceName || '基础音色（默认）'}}</text>
+    </view>
+  </view>
+
+  <view class="navigation-buttons compact {{showGuide && guideHighlight === 'next' ? 'guide-pulse' : ''}}">
+    <view wx:if="{{isFirstPage && hasPrevBook}}" class="nav-button prev-button" bindtap="gotoPrevBook"><text class="skip-icon">⏪</text></view>
+    <view wx:else class="nav-button prev-button {{!canGoPrev ? 'disabled' : ''}}" bindtap="prevPage"><text class="skip-icon">⏪</text></view>
+    <view class="like-button {{isFavorite ? 'liked' : ''}}" bindtap="toggleFavorite">
+      <text class="like-icon">❤️</text>
+      <text class="like-text">{{isFavorite ? '已喜欢' : '好听！'}}</text>
+    </view>
+    <view wx:if="{{isLastPage && hasNextBook}}" class="nav-button next-button" bindtap="gotoNextBook"><text class="skip-icon">⏩</text></view>
+    <view wx:else class="nav-button next-button {{!canGoNext ? 'disabled' : ''}}" bindtap="nextPage"><text class="skip-icon">⏩</text></view>
+  </view>
+
+  <view class="settings-panel-mini" wx:if="{{showReadSettingsPanel}}">
+    <view class="mini-panel-title">阅读设置</view>
+    <view class="mini-row">
+      <text class="mini-label">字体</text>
+      <view class="mini-options">
+        <view class="mini-chip {{readFontScale === 'sm' ? 'active' : ''}}" data-scale="sm" bindtap="onSelectReadFont">小</view>
+        <view class="mini-chip {{readFontScale === 'md' ? 'active' : ''}}" data-scale="md" bindtap="onSelectReadFont">中</view>
+        <view class="mini-chip {{readFontScale === 'lg' ? 'active' : ''}}" data-scale="lg" bindtap="onSelectReadFont">大</view>
+      </view>
+    </view>
+    <view class="mini-row voice-row">
+      <text class="mini-label">音色</text>
+      <scroll-view class="voice-scroll" scroll-y enhanced show-scrollbar="{{false}}">
+        <view class="mini-voice-item {{currentVoiceId === item.id ? 'active' : ''}}" wx:for="{{voiceOptions}}" wx:key="id" data-voice-id="{{item.id}}" bindtap="onSelectReadVoice">{{item.name}}</view>
+      </scroll-view>
+    </view>
+  </view>
+
+  <view class="companion-panel-mini" wx:if="{{showCompanionPanel}}">
+    <view class="mini-panel-title">伴宠选择</view>
+    <scroll-view class="pet-scroll" scroll-y enhanced show-scrollbar="{{false}}">
+      <view class="mini-pet-item {{selectedCompanionId === item.id ? 'active' : ''}}" wx:for="{{companionOptions}}" wx:key="id" data-mascot-id="{{item.id}}" bindtap="onSelectCompanion">
+        <text class="pet-emoji">{{item.emoji}}</text>
+        <text class="pet-name">{{item.name}}</text>
+      </view>
+    </scroll-view>
+    <view class="mini-chip summon-btn" bindtap="onToggleSummonedCompanion">{{showSummonedCompanion ? '收起伴宠' : '召唤伴宠'}}</view>
+  </view>
+
+  <view class="summoned-companion" wx:if="{{showSummonedCompanion}}">
+    <text class="summon-emoji">{{summonedCompanionEmoji}}</text>
+    <text class="summon-name">{{summonedCompanionName}}</text>
+  </view>
+
+  <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>
+  <view wx:if="{{showGuide}}" class="guide-card-wrap">
+    <view class="guide-card">
+      <view class="guide-dot"></view>
+      <text class="guide-title">{{guideTitle}}</text>
+      <text class="guide-desc">{{guideDesc}}</text>
+      <view class="guide-actions">
+        <view class="guide-btn ghost" bindtap="closeGuide">跳过</view>
+        <view class="guide-btn primary" bindtap="onGuideNext">下一步</view>
+      </view>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,19 @@
+{
+  "id": "custom_20260120_071635_3f4d72ac8b48",
+  "title": "小明和小鸟的友谊",
+  "level": 1,
+  "age": "4-7",
+  "sentences": [
+    "小明在森林里遇见一只小鸟。",
+    "小鸟停在他手上，开心地唱歌。",
+    "小明轻轻抚摸小鸟，它们成了好朋友。",
+    "从此，小明每天都会来看望小鸟。"
+  ],
+  "cover_image": "uploads/custom_20260120_071635_3f4d72ac8b48.jpg",
+  "meta": {
+    "source": "image_ai",
+    "child_name": "小明",
+    "scene_hint": "在公园玩耍",
+    "style": "温暖童话"
+  }
+}

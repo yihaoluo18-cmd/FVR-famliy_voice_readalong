@@ -1,0 +1,18 @@
+# Local env (secrets)
+wx_api.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp/outputs
+TEMP/
+output/
+logs/
+train/runtime/
+train/train_logs/
+train/temp_raw_audio/
+train/temp_wav_audio/
+train/user_datasets/
+train/user_models/

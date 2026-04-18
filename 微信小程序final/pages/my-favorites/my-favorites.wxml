@@ -1,0 +1,61 @@
+<view class="container">
+  <!-- 粉色顶部横幅 -->
+  <view class="header-banner">
+    <view class="heart-icon-box">
+      <text class="heart-icon">❤️</text>
+    </view>
+    <text class="page-title">我的喜欢</text>
+    <text class="subtitle">共收藏 {{favoritesCount}} 本绘本</text>
+  </view>
+
+  <!-- 空状态 -->
+  <view class="empty-state" wx:if="{{favoritesCount === 0}}">
+    <view class="empty-icon-box">
+      <text class="empty-icon">💔</text>
+    </view>
+    <text class="empty-title">还没有喜欢的绘本</text>
+    <text class="empty-desc">快去绘本馆挑选喜欢的故事吧！</text>
+    <view class="goto-books-button" bindtap="gotoBooks">
+      <text class="button-text">去绘本馆看看</text>
+    </view>
+  </view>
+
+  <!-- 收藏列表 -->
+  <view class="favorites-list" wx:else>
+    <view 
+      wx:for="{{favorites}}" 
+      wx:key="id"
+      class="favorite-item"
+      style="animation-delay: {{index * 0.05}}s"
+    >
+      <view class="item-container">
+        <!-- 封面图 -->
+        <view class="book-cover" bindtap="readBook" data-id="{{item.id}}">
+          <image class="cover-image" src="{{item.cover}}" mode="aspectFill" />
+        </view>
+
+        <!-- 书籍信息 -->
+        <view class="book-info">
+          <view class="book-title" bindtap="readBook" data-id="{{item.id}}">
+            <text class="title-text">{{item.title}}</text>
+          </view>
+          <view class="book-meta">
+            <text class="calendar-icon">📅</text>
+            <text class="date-text">{{item.favoritedTime}}</text>
+          </view>
+          
+          <!-- 操作按钮 -->
+          <view class="action-buttons">
+            <view class="read-button" bindtap="readBook" data-id="{{item.id}}">
+              <text class="read-icon">📖</text>
+              <text class="read-text">开始阅读</text>
+            </view>
+            <view class="unfavorite-button" bindtap="unfavorite" data-book="{{item}}">
+              <text class="unfavorite-icon">❤️</text>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+</view>

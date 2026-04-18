@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>用户管理 · 粉宝后台</title>
+  <link rel="stylesheet" href="/admin/static/admin-theme.css" />
+</head>
+<body class="admin-shell">
+  <header class="admin-header">
+    <h1>用户管理</h1>
+    <p>搜索、筛选状态、查看等级与伴宠入口</p>
+  </header>
+  <main class="admin-main">
+    <div class="nav-pills">
+      <a href="/admin/static/index.html">首页</a>
+      <a class="active" href="/admin/static/users.html">用户列表</a>
+      <a href="/admin/static/games.html">游戏测试说明</a>
+    </div>
+
+    <div class="admin-card">
+      <div class="admin-toolbar">
+        <input id="apiKey" type="password" placeholder="ADMIN_API_KEY" style="min-width:200px;" />
+        <input id="keyword" placeholder="搜索 user_id / 手机 / 邮箱 / 昵称 / 家长 / 宝宝" style="min-width:260px;flex:1;" />
+        <select id="active">
+          <option value="-1">账号：全部</option>
+          <option value="1">账号：启用</option>
+          <option value="0">账号：禁用</option>
+        </select>
+        <select id="blacklisted">
+          <option value="-1">黑名单：全部</option>
+          <option value="0">黑名单：否</option>
+          <option value="1">黑名单：是</option>
+        </select>
+        <button class="btn btn-primary" type="button" id="searchBtn">查询</button>
+      </div>
+      <p class="muted" id="summary">加载中…</p>
+      <div class="admin-table-wrap">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>user_id</th>
+              <th>家长</th>
+              <th>宝宝</th>
+              <th>电话</th>
+              <th>邮箱</th>
+              <th>等级</th>
+              <th>星星</th>
+              <th>状态</th>
+              <th>音色</th>
+              <th>最近登录</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div class="admin-toolbar" style="margin-top:12px;">
+        <button class="btn btn-ghost" type="button" id="prevBtn">上一页</button>
+        <span class="muted" id="pageInfo"></span>
+        <button class="btn btn-ghost" type="button" id="nextBtn">下一页</button>
+      </div>
+    </div>
+  </main>
+  <script>
+    const KEY = "admin_api_key_v1";
+    let page = 1;
+    const pageSize = 20;
+    let total = 0;
+
+    function getApiKey() {
+      const el = document.getElementById("apiKey");
+      let k = (el && el.value) ? el.value.trim() : "";
+      if (!k) {
+        try { k = (localStorage.getItem(KEY) || "").trim(); } catch (e) {}
+        if (el && k) el.value = k;
+      } else {
+        try { localStorage.setItem(KEY, k); } catch (e) {}
+      }
+      return k;
+    }
+
+    function statusBadges(u) {
+      const parts = [];
+      const bl = Number(u.blacklisted || 0) === 1;
+      const ac = Number(u.is_active || 0) === 1;
+      if (bl) parts.push('<span class="badge badge-bad">黑名单</span>');
+      else if (!ac) parts.push('<span class="badge badge-warn">已禁用</span>');
+      else parts.push('<span class="badge badge-ok">正常</span>');
+      return parts.join(" ");
+    }
+
+    async function loadUsers() {
+      const kw = encodeURIComponent((document.getElementById("keyword").value || "").trim());
+      const active = document.getElementById("active").value;
+      const bl = document.getElementById("blacklisted").value;
+      const key = getApiKey();
+      if (!key) {
+        alert("请先填写 ADMIN_API_KEY");
+        return;
+      }
+      const url = `/admin/users?keyword=${kw}&is_active=${active}&blacklisted=${bl}&page=${page}&page_size=${pageSize}`;
+      const res = await fetch(url, { headers: { "X-Admin-Api-Key": key } });
+      const data = await res.json();
+      if (!res.ok || Number(data.code) !== 0) {
+        alert((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "加载失败");
+        return;
+      }
+      total = Number(data.total || 0);
+      document.getElementById("summary").textContent = "总用户数: " + total + "（本页 " + (data.items || []).length + " 条）";
+      document.getElementById("pageInfo").textContent =
+        "第 " + page + " / " + Math.max(1, Math.ceil(total / pageSize)) + " 页";
+      const tb = document.getElementById("tbody");
+      tb.innerHTML = "";
+      (data.items || []).forEach((u) => {
+        const tr = document.createElement("tr");
+        const uid = encodeURIComponent(u.user_id || "");
+        tr.innerHTML =
+          "<td style='max-width:180px;word-break:break-all;font-size:12px;'>" +
+          (u.user_id || "") +
+          "</td>" +
+          "<td>" +
+          (u.parent_name || "") +
+          "</td>" +
+          "<td>" +
+          (u.baby_name || "") +
+          "</td>" +
+          "<td>" +
+          (u.phone || "") +
+          "</td>" +
+          "<td style='max-width:140px;word-break:break-all;font-size:12px;'>" +
+          (u.email || "") +
+          "</td>" +
+          "<td>Lv." +
+          (u.reader_level != null ? u.reader_level : "1") +
+          "</td>" +
+          "<td>" +
+          (u.reader_stars != null ? u.reader_stars : "0") +
+          "</td>" +
+          "<td>" +
+          statusBadges(u) +
+          "</td>" +
+          "<td>" +
+          (u.voice_count || 0) +
+          "</td>" +
+          "<td style='font-size:12px;white-space:nowrap;'>" +
+          (u.last_login_at || "") +
+          "</td>" +
+          "<td><a href='/admin/static/user_detail.html?user_id=" +
+          uid +
+          "'>详情</a></td>";
+        tb.appendChild(tr);
+      });
+    }
+
+    document.getElementById("searchBtn").addEventListener("click", function () {
+      page = 1;
+      loadUsers();
+    });
+    document.getElementById("prevBtn").addEventListener("click", function () {
+      if (page > 1) {
+        page -= 1;
+        loadUsers();
+      }
+    });
+    document.getElementById("nextBtn").addEventListener("click", function () {
+      if (page * pageSize < total) {
+        page += 1;
+        loadUsers();
+      }
+    });
+
+    (function init() {
+      const el = document.getElementById("apiKey");
+      try {
+        const s = localStorage.getItem(KEY);
+        if (s) el.value = s;
+      } catch (e) {}
+      loadUsers();
+    })();
+  </script>
+</body>
+</html>

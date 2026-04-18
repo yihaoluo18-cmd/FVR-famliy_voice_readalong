@@ -1,0 +1,42 @@
+{
+  "voice_001": {
+    "name": "温柔姐姐",
+    "model_type": "pretrained",
+    "provider": "qwen_tts",
+    "qwen_voice": "Cherry",
+    "qwen_voice_candidates": [
+      "Cherry",
+      "Clover",
+      "Nora"
+    ],
+    "is_builtin": true,
+    "can_delete": false,
+    "can_rename": false,
+    "gender": "female",
+    "scene": "绘本故事",
+    "emotion": "温柔",
+    "voice_group": "qwen_base",
+    "quick_story": true,
+    "trained_at": ""
+  },
+  "voice_002": {
+    "name": "俊朗哥哥",
+    "model_type": "pretrained",
+    "provider": "qwen_tts",
+    "qwen_voice": "Ethan",
+    "qwen_voice_candidates": [
+      "Ethan",
+      "Atlas",
+      "Echo"
+    ],
+    "is_builtin": true,
+    "can_delete": false,
+    "can_rename": false,
+    "gender": "male",
+    "scene": "绘本故事",
+    "emotion": "自然",
+    "voice_group": "qwen_base",
+    "quick_story": true,
+    "trained_at": ""
+  }
+}

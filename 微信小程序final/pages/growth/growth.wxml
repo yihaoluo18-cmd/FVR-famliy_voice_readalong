@@ -1,0 +1,166 @@
+<view class="container">
+  <!-- 粉色顶部横幅 -->
+  <view class="header-banner">
+    <view class="star-icon-box">
+      <text class="star-icon">⭐</text>
+    </view>
+    <text class="total-stars">{{stars}} 颗星星</text>
+    <view class="level-info">
+      <text class="sparkle">✨</text>
+      <text class="level-text">当前等级：Lv.{{level}} {{levelIcon}} {{levelTitle}}</text>
+      <text class="sparkle">✨</text>
+    </view>
+    
+    <!-- 升级进度条 -->
+    <view class="level-progress" wx:if="{{hasNextLevel}}">
+      <view class="progress-labels">
+        <text class="level-label">Lv.{{level}}</text>
+        <text class="level-label">Lv.{{level + 1}}</text>
+      </view>
+      <view class="progress-bar">
+        <view class="progress-fill" style="width: {{progressPercent}}%"></view>
+      </view>
+      <text class="progress-hint">再获得 {{starsToNextLevel}} 颗星升级！</text>
+    </view>
+  </view>
+
+  <!-- 统计概览 -->
+  <view class="stats-overview">
+    <view class="stat-card stat-blue">
+      <view class="stat-icon-box">
+        <text class="stat-icon">📚</text>
+      </view>
+      <text class="stat-value">{{booksReadCount}}</text>
+      <text class="stat-label">本周阅读</text>
+    </view>
+    
+    <view class="stat-card stat-purple">
+      <view class="stat-icon-box">
+        <text class="stat-icon">🎮</text>
+      </view>
+      <text class="stat-value">{{gamesCompletedCount}}</text>
+      <text class="stat-label">游戏完成</text>
+    </view>
+    
+    <view class="stat-card stat-yellow">
+      <view class="stat-icon-box">
+        <text class="stat-icon">🏆</text>
+      </view>
+      <text class="stat-value">{{achievementsUnlockedCount}}</text>
+      <text class="stat-label">成就解锁</text>
+    </view>
+  </view>
+
+  <!-- 最近阅读 -->
+  <view class="section">
+    <view class="section-header">
+      <view class="section-title">
+        <text class="title-icon">📚</text>
+        <text class="title-text">最近阅读</text>
+      </view>
+      <view class="see-all" bindtap="seeAllBooks">
+        <text class="see-all-text">全部</text>
+        <text class="chevron">›</text>
+      </view>
+    </view>
+    
+    <view class="books-list" wx:if="{{isLoggedIn}}">
+      <view 
+        wx:for="{{booksRead}}" 
+        wx:key="id"
+        class="book-item"
+        style="animation-delay: {{index * 0.1}}s"
+      >
+        <view class="book-emoji-box">
+          <text class="book-emoji">{{item.emoji}}</text>
+        </view>
+        <view class="book-info">
+          <view class="book-header">
+            <text class="book-title">{{item.title}}</text>
+            <view class="stars-badge">
+              <text class="star-small">⭐</text>
+              <text class="stars-value">+{{item.stars}}</text>
+            </view>
+          </view>
+          <view class="book-meta">
+            <text class="date-icon">📅</text>
+            <text class="date-text">{{item.date}}</text>
+            <view class="status-badge {{item.progress === 100 ? 'completed' : 'ongoing'}}">
+              <text class="status-text">{{item.progress === 100 ? '已完成 ✓' : item.progress + '%'}}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+    <!-- 未登录提示：明确引导登录 -->
+    <view class="empty-tip" wx:else>
+      <text>请先登录，即可记录阅读轨迹与成长数据~</text>
+    </view>
+  </view>
+
+  <!-- 完成的游戏 -->
+  <view class="section">
+    <view class="section-header">
+      <view class="section-title">
+        <text class="title-icon">🎮</text>
+        <text class="title-text">完成的游戏</text>
+      </view>
+    </view>
+    
+    <view class="games-list" wx:if="{{isLoggedIn}}">
+      <view 
+        wx:for="{{gamesCompleted}}" 
+        wx:key="id"
+        class="game-item game-{{item.type}}"
+        style="animation-delay: {{index * 0.1}}s"
+      >
+        <view class="game-icon-box">
+          <text class="game-icon">🎮</text>
+        </view>
+        <view class="game-info">
+          <text class="game-title">{{item.title}}</text>
+          <view class="game-meta">
+            <text class="game-date">{{item.date}}</text>
+            <view class="game-stars">
+              <text class="star-tiny">⭐</text>
+              <text class="stars-amount">+{{item.stars}}</text>
+            </view>
+          </view>
+        </view>
+        <view class="game-type-badge">
+          <text class="type-text">{{item.typeLabel}}</text>
+        </view>
+      </view>
+    </view>
+    <!-- 未登录提示：明确引导登录 -->
+    <view class="empty-tip" wx:else>
+      <text>请先登录，即可记录游戏成就与积分~</text>
+    </view>
+  </view>
+
+  <!-- 成就徽章 -->
+  <view class="section">
+    <view class="section-header">
+      <view class="section-title">
+        <text class="title-icon">🏅</text>
+        <text class="title-text">成就徽章</text>
+      </view>
+    </view>
+    
+    <view class="achievements-grid">
+      <view 
+        wx:for="{{achievements}}" 
+        wx:key="index"
+        class="achievement-card {{item.unlocked ? 'unlocked' : 'locked'}}"
+        style="animation-delay: {{index * 0.1}}s"
+      >
+        <view class="achievement-icon-box">
+          <!-- 核心：未解锁展示🔒，已解锁展示对应图标 -->
+          <text class="achievement-icon">{{item.unlocked ? item.icon : '🔒'}}</text>
+        </view>
+        <text class="achievement-label">{{item.label}}</text>
+        <text class="achievement-desc">{{item.desc}}</text>
+      </view>
+    </view>
+  </view>
+</view>

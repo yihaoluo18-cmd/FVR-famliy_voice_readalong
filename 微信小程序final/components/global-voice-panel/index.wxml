@@ -1,0 +1,36 @@
+<view class="voice-overlay" wx:if="{{dropdownOpen}}" bindtap="onCloseDropdown"></view>
+
+<view class="voice-panel" catchtap="noop">
+  <view class="voice-pill" bindtap="onToggleDropdown">
+    <text class="voice-pill-label">音色</text>
+    <text class="voice-pill-name">{{currentVoiceName}}</text>
+    <text class="voice-pill-arrow">{{dropdownOpen ? '▲' : '▼'}}</text>
+  </view>
+
+  <view class="voice-dropdown" wx:if="{{dropdownOpen}}" catchtap="noop">
+    <view class="voice-item" bindtap="onChooseDefault">
+      <text class="voice-item-title">基础音色（默认）</text>
+      <text class="voice-item-check" wx:if="{{currentVoiceId === defaultVoiceId}}">✓</text>
+    </view>
+
+    <view
+      class="voice-item"
+      wx:for="{{voiceList}}"
+      wx:key="voice_id"
+      data-voice-id="{{item.voice_id}}"
+      data-voice-name="{{item.name || item.voice_id}}"
+      bindtap="onChooseVoice"
+    >
+      <text class="voice-item-title">{{item.name || item.voice_id}}</text>
+      <text class="voice-item-check" wx:if="{{currentVoiceId === item.voice_id}}">✓</text>
+    </view>
+
+    <view class="voice-train-entry" bindtap="onGoTrain">
+      <text class="voice-train-text">+ 训练新音色</text>
+    </view>
+
+    <view class="voice-manage-entry" bindtap="onManageVoices">
+      <text class="voice-manage-text">管理音色（可删除）</text>
+    </view>
+  </view>
+</view>

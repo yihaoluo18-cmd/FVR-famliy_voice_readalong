@@ -1,0 +1,43 @@
+<view class="container">
+  <view class="header">
+    <text class="title">音色管理</text>
+    <text class="desc">可切换当前音色，也可删除不需要的音色</text>
+  </view>
+
+  <view class="card" bindtap="chooseDefault">
+    <view class="left">
+      <text class="name">基础音色（默认）</text>
+      <text class="meta">系统内置</text>
+    </view>
+    <view class="right">
+      <text class="badge default">不可删</text>
+      <text class="check" wx:if="{{currentVoiceId === defaultVoiceId}}">✓</text>
+    </view>
+  </view>
+
+  <view wx:if="{{!voiceList.length && !loading}}" class="empty">暂无可管理的自定义音色</view>
+
+  <view class="card" wx:for="{{voiceList}}" wx:key="voice_id">
+    <view class="left" bindtap="chooseVoice" data-voice-id="{{item.voice_id}}" data-voice-name="{{item.name || item.voice_id}}">
+      <text class="name">{{item.name || item.voice_id}}</text>
+      <text class="meta">ID: {{item.voice_id}}</text>
+    </view>
+    <view class="right">
+      <text class="check" wx:if="{{currentVoiceId === item.voice_id}}">✓</text>
+      <button
+        class="del-btn"
+        size="mini"
+        data-voice-id="{{item.voice_id}}"
+        data-voice-name="{{item.name || item.voice_id}}"
+        data-is-default="{{item.voice_id === defaultVoiceId ? '1' : '0'}}"
+        data-is-builtin="{{item.is_builtin ? '1' : '0'}}"
+        data-can-delete="{{item.can_delete === false ? '0' : '1'}}"
+        bindtap="deleteVoice"
+      >删除</button>
+    </view>
+  </view>
+
+  <view class="footer-actions">
+    <button class="clone-btn" bindtap="goToClone">去魔法声音克隆室</button>
+  </view>
+</view>

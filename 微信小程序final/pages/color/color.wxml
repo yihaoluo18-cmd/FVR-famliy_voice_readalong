@@ -1,0 +1,498 @@
+<view class="container">
+  
+  <!-- ════════════════════════════════════════════════
+       MODE 1: 项目列表（选择涂色）
+  ════════════════════════════════════════════════ -->
+  <view wx:if="{{mode === 'list'}}" class="list-mode">
+    <!-- 顶部横幅（模仿“小小演说家”：进度条在横幅里） -->
+    <view class="header-banner">
+      <view class="crayon-icon-box">
+        <text class="crayon-icon">🖍️</text>
+      </view>
+      <text class="page-title">涂色小画家</text>
+      <text class="subtitle">选一张题库图，开始涂色吧 ⭐</text>
+
+      <!-- 模式切换（同“小小演说家”）：按钮在粉色区域内且透明 -->
+      <view class="mode-switch">
+        <view class="mode-pill {{listMode==='train' ? 'active' : ''}}" bindtap="switchListMode" data-mode="train">
+          <text class="mode-text">填色训练</text>
+        </view>
+        <view class="mode-pill {{listMode==='studio' ? 'active' : ''}}" bindtap="switchListMode" data-mode="studio">
+          <text class="mode-text">小小画室</text>
+        </view>
+      </view>
+
+      <view class="progress-bar-container" wx:if="{{bankTotalQuestions > 0}}">
+        <text class="progress-label">题目进度</text>
+        <view class="progress-bar">
+          <view class="progress-fill" style="width: {{bankProgressPercent}}%"></view>
+        </view>
+        <text class="progress-text">{{bankCurrentIndex + 1}} / {{bankTotalQuestions}}</text>
+      </view>
+    </view>
+
+    <!-- ===================== 填色训练 ===================== -->
+    <!-- 题库：小缩略图点选（只展示附近少量题目，避免拖动复杂） -->
+    <view class="bank-strip" wx:if="{{listMode === 'train' && bankFlatItems && bankFlatItems.length}}">
+      <scroll-view scroll-x class="bank-scroll">
+        <view
+          class="bank-item"
+          wx:for="{{bankFlatItems}}"
+          wx:for-index="index"
+          wx:key="metaNum"
+          bindtap="setBankIndex"
+          data-index="{{index}}"
+        >
+          <image
+            class="bank-thumb"
+            src="{{item.local_thumb || item.lineart_url}}"
+            mode="aspectFill"
+            binderror="onSketchImageError"
+            data-sketch-id="{{item.id || item.metaNum || item.title}}"
+          />
+          <text class="bank-qid">{{item.qid}}</text>
+        </view>
+      </scroll-view>
+    </view>
+
+    <!-- 图片卡片（题目展示） -->
+    <view class="image-card" wx:if="{{listMode === 'train' && bankCurrentItem}}">
+      <image
+        class="story-image"
+        src="{{bankCurrentItem.local_thumb || bankCurrentItem.lineart_url}}"
+        mode="aspectFill"
+        binderror="onSketchImageError"
+        data-sketch-id="{{bankCurrentItem.id || bankCurrentItem.metaNum || bankCurrentItem.title}}"
+      />
+
+      <!-- 标签/简介提示（放在右下方渐变区域，模仿演说家） -->
+      <view class="image-prompt">
+        <text class="prompt-text">{{bankCurrentItem.title || '题目'}}</text>
+        <text class="prompt-sub">
+          {{(bankCurrentItem.intro || bankCurrentItem.introduction) || '点下面小图换题吧'}}
+        </text>
+      </view>
+    </view>
+
+    <!-- 题库问题卡片（标签 + 简介 + 开始涂色） -->
+    <view class="question-card" wx:if="{{listMode === 'train' && bankCurrentItem}}">
+      <view class="qc-header">
+        <text class="qc-title">{{bankCurrentItem.title || ''}}</text>
+        <view class="qc-tag" wx:if="{{(bankCurrentItem.tags && bankCurrentItem.tags.length) || bankCurrentItem.metaCategory}}">
+          <text class="qc-tag-text">
+            {{ (bankCurrentItem.tags && bankCurrentItem.tags.length) ? bankCurrentItem.tags[0] : bankCurrentItem.metaCategory }}
+          </text>
+        </view>
+      </view>
+
+      <text class="qc-intro">{{bankCurrentItem.intro || bankCurrentItem.introduction || ''}}</text>
+
+      <view class="bank-start-row">
+        <view class="bank-start-button" bindtap="startColoringFromBank">
+          <text class="bank-start-button-text">开始涂色 🖍️</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- ===================== 小小画室 ===================== -->
+    <view class="studio-section" wx:if="{{listMode === 'studio'}}">
+      <view class="studio-header">
+        <view class="studio-title-row">
+          <text class="studio-icon">🖼️</text>
+          <text class="studio-title">小小画室</text>
+          <text class="studio-subtitle">把你的作品挂进画室里 ✨</text>
+        </view>
+        <text class="studio-count" wx:if="{{studioWorks && studioWorks.length}}">
+          已收藏 {{studioWorks.length}} 幅
+        </text>
+      </view>
+
+      <view class="studio-empty" wx:if="{{!studioWorks || studioWorks.length === 0}}">
+        <text class="studio-empty-title">还没有作品呢</text>
+        <text class="studio-empty-sub">完成涂色后点“保存作品”，就会自动出现在这里</text>
+      </view>
+
+      <!-- 展示架：最新/精选 -->
+      <view wx:if="{{studioFeatured && studioFeatured.length}}" class="studio-rack">
+        <view class="rack-top">
+          <text class="rack-title">展示架</text>
+          <text class="rack-hint">（最新作品）</text>
+        </view>
+        <scroll-view
+          class="rack-scroll"
+          scroll-x
+          enhanced
+          scroll-with-animation="{{rackScrollWithAnimation}}"
+          show-scrollbar="{{false}}"
+          scroll-left="{{rackScrollLeft}}"
+          bindscroll="onRackScroll"
+          bindtouchstart="onRackTouchStart"
+          bindtouchend="onRackTouchEnd"
+          bindtouchcancel="onRackTouchEnd"
+        >
+          <view
+            class="rack-item"
+            wx:for="{{studioRackRenderItems}}"
+            wx:key="__k"
+          >
+            <view class="easel">
+              <view class="easel-leg left"></view>
+              <view class="easel-leg right"></view>
+              <view class="easel-crossbar"></view>
+              <view class="glass-frame"
+                bindtap="openStudioPreview"
+                data-workid="{{item.id}}"
+              >
+                <image class="glass-img" src="{{item.image_path}}" mode="aspectFill" />
+                <view class="glass-frost"></view>
+                <view class="glass-glare"></view>
+                <view class="glass-shine"></view>
+                <view class="glass-spark"></view>
+              </view>
+            </view>
+          </view>
+        </scroll-view>
+      </view>
+
+      <!-- 仓库：全部作品玻璃画框 -->
+      <view wx:if="{{studioWorks && studioWorks.length}}" class="studio-warehouse">
+        <view class="warehouse-top">
+          <text class="warehouse-title">画室仓库</text>
+          <text class="warehouse-hint">每幅画都用玻璃画框裱起来</text>
+        </view>
+        <view class="warehouse-grid">
+          <view class="warehouse-col">
+            <view
+              class="warehouse-item"
+              wx:for="{{studioLeftWorks}}"
+              wx:key="id"
+              bindtap="openStudioPreview"
+              data-workid="{{item.id}}"
+            >
+              <view class="glass-frame {{item.frameClass}}">
+                <image class="glass-img" src="{{item.image_path}}" mode="aspectFill" />
+                <view class="glass-frost"></view>
+                <view class="glass-glare"></view>
+                <view class="glass-shine"></view>
+                <view class="glass-spark"></view>
+                <view class="glass-edge"></view>
+                <view
+                  class="studio-delete"
+                  catchtap="deleteStudioWork"
+                  data-workid="{{item.id}}"
+                >×</view>
+              </view>
+            </view>
+          </view>
+
+          <view class="warehouse-col">
+            <view
+              class="warehouse-item"
+              wx:for="{{studioRightWorks}}"
+              wx:key="id"
+              bindtap="openStudioPreview"
+              data-workid="{{item.id}}"
+            >
+              <view class="glass-frame {{item.frameClass}}">
+                <image class="glass-img" src="{{item.image_path}}" mode="aspectFill" />
+                <view class="glass-frost"></view>
+                <view class="glass-glare"></view>
+                <view class="glass-shine"></view>
+                <view class="glass-spark"></view>
+                <view class="glass-edge"></view>
+                <view
+                  class="studio-delete"
+                  catchtap="deleteStudioWork"
+                  data-workid="{{item.id}}"
+                >×</view>
+              </view>
+            </view>
+          </view>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ════════════════════════════════════════════════
+       MODE 2: 涂色界面
+  ════════════════════════════════════════════════ -->
+  <view wx:if="{{mode === 'coloring'}}" class="coloring-mode">
+    
+    <!-- 顶部标题栏 -->
+    <view class="title-bar">
+      <view class="back-button" bindtap="backToList">
+        <text class="back-icon">←</text>
+      </view>
+      <view class="title-info">
+        <text class="title-text">{{currentSketch ? currentSketch.title : ''}}</text>
+      </view>
+      <view class="undo-button {{fillHistory.length === 0 ? 'disabled' : ''}}" bindtap="undoColor">
+        <text class="undo-icon">↶</text>
+      </view>
+    </view>
+
+    <!-- 卡通涂色进度：全宽条 + 轨道上滑动的小图标 -->
+    <view
+      wx:if="{{canvasReady && !evaluating}}"
+      class="paint-progress-strip"
+    >
+      <view class="paint-progress-strip-inner">
+        <view class="paint-progress-top">
+          <view class="paint-progress-title-block">
+            <text class="paint-progress-stars">✨</text>
+            <text class="paint-progress-title">涂色进度</text>
+            <text class="paint-progress-stars">✨</text>
+          </view>
+          <view class="paint-progress-percent-wrap">
+            <text class="paint-progress-percent-num">{{coloringProgressPercent}}</text>
+            <text class="paint-progress-percent-sign">%</text>
+          </view>
+        </view>
+        <view class="paint-progress-rail">
+          <view class="paint-progress-rail-meter">
+            <view class="paint-progress-rail-bg">
+              <view class="paint-progress-fill" style="width: {{coloringProgressPercent}}%"></view>
+            </view>
+            <view
+              class="paint-progress-thumb"
+              style="left: {{progressThumbLeftPercent}}%"
+            >
+              <view class="paint-progress-thumb-bubble">
+                <text class="paint-progress-thumb-emoji">{{progressMascot}}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+        <text class="paint-progress-hint">
+          {{coloringProgressPercent < 30 ? '先涂一点点，超勇敢！' : (coloringProgressPercent < 80 ? '继续加油呀～' : '快完成啦！棒棒！')}}
+        </text>
+      </view>
+    </view>
+
+    <!-- 绘画区域 -->
+    <view class="drawing-area" style="border-color: {{selectedColor}}">
+      <view class="canvas-container" id="canvasContainer" bindtap="handleTap">
+        <!-- 强制可见底图层：使用本地 temp 图片，不走 http -->
+        <image
+          wx:if="{{lineArtDisplayUrl && !showBaseCanvasLineArt}}"
+          class="forced-lineart-image"
+          src="{{lineArtDisplayUrl}}"
+          mode="aspectFit"
+          binderror="onLineArtImageError"
+        />
+
+        <!-- 主合成画布：线稿+填色都绘制在同一层，避免多层 canvas 同层渲染冲突 -->
+        <canvas canvas-id="paintCanvas" class="paint-canvas" width="{{canvasWidth}}" height="{{canvasHeight}}"></canvas>
+
+        <!-- 隐藏画布：线稿像素缓存（用于前端闭合区域 flood fill） -->
+        <canvas canvas-id="baseCanvas" class="base-canvas lineart-canvas" width="{{canvasWidth}}" height="{{canvasHeight}}"></canvas>
+
+        <!-- 隐藏画布：区域索引图 -->
+        <canvas canvas-id="regionCanvas" class="hidden-canvas" width="{{canvasWidth}}" height="{{canvasHeight}}"></canvas>
+
+        <!-- 隐藏画布：合成输出 -->
+        <canvas canvas-id="mergeCanvas" class="hidden-canvas" width="{{canvasWidth}}" height="{{canvasHeight}}"></canvas>
+        
+        <!-- 点击特效 -->
+        <view 
+          wx:for="{{sparkles}}" 
+          wx:key="id"
+          class="sparkle"
+          style="left: {{item.x}}px; top: {{item.y}}px; color: {{selectedColor}}"
+        >
+          ✨
+        </view>
+      </view>
+
+    </view>
+
+    <!-- 区域提示与推荐色 -->
+    <view class="hint-card" wx:if="{{selectedRegion}}">
+      <view class="hint-row">
+        <text class="hint-title">💡 提示：</text>
+        <text class="hint-text">{{selectedRegion.hint}}</text>
+      </view>
+      <view class="hint-row" wx:if="{{recommendedColors && recommendedColors.length}}">
+        <text class="hint-title">🎨 推荐色：</text>
+        <view class="rec-colors">
+          <view
+            wx:for="{{recommendedColors}}"
+            wx:key="*this"
+            class="rec-color"
+            style="background-color: {{item}}"
+            bindtap="selectColor"
+            data-color="{{item}}"
+          ></view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 完成按钮 -->
+    <view class="button-group">
+      <view class="finish-button answer-button" bindtap="autoCompleteColoring">
+        <text class="finish-text">参考配色 👀</text>
+      </view>
+      <view class="finish-button" bindtap="finishColoring">
+        <text class="finish-text">{{ evaluating ? 'AI正在评价...' : '完成涂色 · 计入游乐园' }}</text>
+      </view>
+    </view>
+
+    <!-- 彩带效果 -->
+    <view class="confetti-container" wx:if="{{showConfetti}}">
+      <view class="confetti confetti-1" style="background-color: {{colors[0]}}"></view>
+      <view class="confetti confetti-2" style="background-color: {{colors[1]}}"></view>
+      <view class="confetti confetti-3" style="background-color: {{colors[2]}}"></view>
+      <view class="confetti confetti-4" style="background-color: {{colors[3]}}"></view>
+      <view class="confetti confetti-5" style="background-color: {{colors[4]}}"></view>
+      <view class="confetti confetti-6" style="background-color: {{colors[5]}}"></view>
+      <view class="confetti confetti-7" style="background-color: {{colors[6]}}"></view>
+      <view class="confetti confetti-8" style="background-color: {{colors[7]}}"></view>
+    </view>
+  </view>
+
+  <!-- ════════════════════════════════════════════════
+       评价弹窗
+  ════════════════════════════════════════════════ -->
+  <!-- 画室作品预览 -->
+  <view class="modal-overlay" wx:if="{{showStudioPreview}}" bindtap="closeStudioPreview">
+    <view class="studio-preview-modal" catchtap="">
+      <view class="studio-preview-header">
+        <text class="studio-preview-title">{{studioPreviewWork ? studioPreviewWork.title : '作品'}}</text>
+        <view class="studio-preview-close" bindtap="closeStudioPreview">
+          <text class="studio-preview-close-text">✕</text>
+        </view>
+      </view>
+      <view class="glass-frame preview">
+        <image class="glass-img" src="{{studioPreviewWork ? studioPreviewWork.image_path : ''}}" mode="aspectFit" />
+        <view class="glass-frost"></view>
+        <view class="glass-glare"></view>
+        <view class="glass-shine"></view>
+        <view class="glass-spark"></view>
+        <view class="glass-edge"></view>
+      </view>
+      <text class="studio-preview-meta" wx:if="{{studioPreviewWork && studioPreviewWork.timestamp}}">
+        收藏时间：{{studioPreviewWork.timestamp}}
+      </text>
+    </view>
+  </view>
+
+  <!-- 完成预览弹窗：先展示色稿，再选择保存/AI打分 -->
+  <view class="modal-overlay" wx:if="{{showFinishModal}}" bindtap="">
+    <view class="finish-modal" catchtap="">
+      <view class="finish-header">
+        <text class="finish-title">完成啦！看看你的作品</text>
+        <view class="finish-close" bindtap="closeFinishModal">
+          <text class="finish-close-text">✕</text>
+        </view>
+      </view>
+
+      <image
+        class="finish-preview-image"
+        src="{{finishPreviewPath}}"
+        mode="aspectFit"
+      />
+
+      <view class="finish-actions">
+        <view class="finish-action-btn primary" bindtap="finishModalSave">
+          <text class="finish-action-text">保存作品</text>
+        </view>
+        <view class="finish-action-btn" bindtap="finishModalAiScore">
+          <text class="finish-action-text">AI打分</text>
+        </view>
+      </view>
+
+      <view class="finish-sub-actions">
+        <view class="finish-continue" bindtap="closeFinishModal">
+          <text class="finish-continue-text">继续修改</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view class="modal-overlay" wx:if="{{showScore}}" bindtap="">
+    <view class="score-modal">
+      <view class="score-header">
+        <text class="score-title">🎉 AI评价</text>
+      </view>
+
+      <view class="score-content">
+        <view class="score-display">
+          <text class="score-number">{{aiScore}}</text>
+          <text class="score-unit">分</text>
+        </view>
+
+        <view class="stars-row">
+          <view wx:for="{{5}}" wx:key="*this" class="star {{index < fullStars ? 'filled' : ''}}">
+            ⭐
+          </view>
+        </view>
+
+        <text class="eval-feedback">{{evalResult ? evalResult.feedback : ''}}</text>
+      </view>
+
+      <view class="score-actions">
+        <view class="action-button save-button" bindtap="closeScore">
+          <text class="action-text">保存作品</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ════════════════════════════════════════════════
+       保存对话框
+  ════════════════════════════════════════════════ -->
+  <view class="modal-overlay" wx:if="{{showSaveDialog}}" bindtap="">
+    <view class="save-modal">
+      <view class="save-header">
+        <text class="save-title">💾 保存作品</text>
+      </view>
+
+      <view class="save-options">
+        <view class="save-option" bindtap="saveTCloud">
+          <text class="option-icon">🖼️</text>
+          <text class="option-text">保存到画室<text class="option-hint">（会出现在“小小画室”里）</text></text>
+        </view>
+        <view class="save-option" bindtap="saveToLocal">
+          <text class="option-icon">💾</text>
+          <text class="option-text">保存到本地<text class="option-hint">（仅本设备可用）</text></text>
+        </view>
+      </view>
+
+      <view class="save-result-card" wx:if="{{saveResult.cloudStatus || saveResult.localAlbumStatus || saveResult.localRecordPath}}">
+        <text class="save-result-title">保存结果详情</text>
+        <text class="save-result-line" wx:if="{{saveResult.cloudStatus}}">云端状态：{{saveResult.cloudStatus}}</text>
+        <text class="save-result-line" wx:if="{{saveResult.cloudWorkId}}">云端 work_id：{{saveResult.cloudWorkId}}</text>
+        <text class="save-result-line" wx:if="{{saveResult.localAlbumStatus}}">本地相册：{{saveResult.localAlbumStatus}}</text>
+        <text class="save-result-line" wx:if="{{saveResult.localRecordPath}}">本地记录路径：{{saveResult.localRecordPath}}</text>
+      </view>
+
+      <view class="save-done-btn" bindtap="finishSaveDialog">
+        <text class="save-done-btn-text">完成并返回</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- ════════════════════════════════════════════════
+       参考答案小窗口
+  ════════════════════════════════════════════════ -->
+  <view class="modal-overlay" wx:if="{{showReferenceModal}}" bindtap="closeReferenceModal">
+    <view class="reference-modal" catchtap="">
+      <view class="reference-header">
+        <text class="reference-title">参考答案 👀</text>
+        <view class="reference-close" bindtap="closeReferenceModal">
+          <text class="reference-close-text">✕</text>
+        </view>
+      </view>
+
+      <image
+        class="reference-image"
+        src="{{referenceAnswerUrl}}"
+        mode="aspectFit"
+        binderror=""
+      />
+
+      <text class="reference-hint">看一看，再继续把自己涂得更漂亮！</text>
+    </view>
+  </view>
+
+</view>

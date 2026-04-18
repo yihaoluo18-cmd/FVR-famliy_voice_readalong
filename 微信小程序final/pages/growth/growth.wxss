@@ -1,0 +1,601 @@
+/* 容器 */
+.container {
+  min-height: 100vh;
+  background: linear-gradient(to bottom, #fdf2f8, #fff);
+  padding-bottom: 120rpx;
+}
+
+/* 粉色顶部横幅 */
+.header-banner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48rpx 32rpx 64rpx;
+  background: linear-gradient(160deg, #e879a9 0%, #e879a9 100%);
+  margin-bottom: 32rpx;
+}
+
+.star-icon-box {
+  width: 224rpx;
+  height: 224rpx;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24rpx;
+  border: 8rpx solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 8rpx 32rpx rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(20rpx);
+  animation: scaleIn 0.5s ease-out;
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.star-icon {
+  font-size: 112rpx;
+}
+
+.total-stars {
+  color: white;
+  font-size: 40rpx;
+  font-weight: 900;
+  margin-bottom: 8rpx;
+}
+
+.level-info {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-bottom: 32rpx;
+}
+
+.sparkle {
+  font-size: 28rpx;
+}
+
+.level-text {
+  color: #fef3c7;
+  font-size: 26rpx;
+  font-weight: 700;
+}
+
+/* 升级进度 */
+.level-progress {
+  width: 100%;
+  max-width: 560rpx;
+}
+
+.progress-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12rpx;
+}
+
+.level-label {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.progress-bar {
+  height: 24rpx;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 48rpx;
+  overflow: hidden;
+  border: 4rpx solid rgba(255, 255, 255, 0.3);
+  margin-bottom: 12rpx;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(to right, #fde047, #fbbf24);
+  border-radius: 48rpx;
+  transition: width 1s ease-out;
+}
+
+.progress-hint {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 20rpx;
+  font-weight: 700;
+  text-align: center;
+  display: block;
+}
+
+/* 统计概览 */
+.stats-overview {
+  padding: 0 32rpx 40rpx;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24rpx;
+}
+
+.stat-card {
+  border-radius: 32rpx;
+  padding: 28rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12rpx;
+  border: 4rpx solid white;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.1);
+  animation: fadeInUp 0.5s ease-out both;
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(40rpx); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.stat-blue {
+  background: linear-gradient(135deg, #fff1f2 0%, #fce7f3 100%);
+}
+
+.stat-purple {
+  background: linear-gradient(135deg, #fce7f3 0%, #fef3c7 100%);
+}
+
+.stat-yellow {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+}
+
+.stat-icon-box {
+  width: 80rpx;
+  height: 80rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stat-blue .stat-icon-box {
+  background: #fbcfe8;
+}
+
+.stat-purple .stat-icon-box {
+  background: #fef3c7;
+}
+
+.stat-yellow .stat-icon-box {
+  background: #fde68a;
+}
+
+.stat-icon {
+  font-size: 40rpx;
+}
+
+.stat-value {
+  font-size: 36rpx;
+  font-weight: 900;
+}
+
+.stat-blue .stat-value {
+  color: #1e3a8a;
+}
+
+.stat-purple .stat-value {
+  color: #831843;
+}
+
+.stat-yellow .stat-value {
+  color: #713f12;
+}
+
+.stat-label {
+  font-size: 20rpx;
+  font-weight: 700;
+  text-align: center;
+}
+
+.stat-blue .stat-label {
+  color: #b87a94;
+}
+
+.stat-purple .stat-label {
+  color: #e879a9;
+}
+
+.stat-yellow .stat-label {
+  color: #d97706;
+}
+
+/* 区域 */
+.section {
+  padding: 0 32rpx 40rpx;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24rpx;
+  padding: 0 8rpx;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 12rpx;
+}
+
+.title-icon {
+  font-size: 32rpx;
+}
+
+.title-text {
+  color: #b87a94;
+  font-size: 30rpx;
+  font-weight: 900;
+}
+
+.see-all {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+}
+
+.see-all-text {
+  color: #f472b6;
+  font-size: 24rpx;
+  font-weight: 700;
+}
+
+.chevron {
+  color: #f472b6;
+  font-size: 28rpx;
+  font-weight: 300;
+}
+
+/* 阅读列表 */
+.books-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.book-item {
+  background: white;
+  border-radius: 32rpx;
+  padding: 28rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+  border: 2rpx solid #f3f4f6;
+  display: flex;
+  align-items: center;
+  gap: 24rpx;
+  animation: slideInLeft 0.5s ease-out both;
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-40rpx); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.book-emoji-box {
+  width: 96rpx;
+  height: 96rpx;
+  background: linear-gradient(135deg, #fffbeb 0%, #fce7f3 100%);
+  border-radius: 24rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.book-emoji {
+  font-size: 48rpx;
+}
+
+.book-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.book-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 8rpx;
+}
+
+.book-title {
+  color: #1f2937;
+  font-size: 28rpx;
+  font-weight: 900;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stars-badge {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+  background: #fef3c7;
+  padding: 8rpx 16rpx;
+  border-radius: 48rpx;
+  border: 2rpx solid #fde047;
+}
+
+.star-small {
+  font-size: 24rpx;
+}
+
+.stars-value {
+  color: #a16207;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.book-meta {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.date-icon {
+  font-size: 22rpx;
+}
+
+.date-text {
+  color: #9ca3af;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.status-badge {
+  margin-left: auto;
+  padding: 8rpx 16rpx;
+  border-radius: 48rpx;
+  font-weight: 900;
+  border: 2rpx solid;
+}
+
+.status-badge.completed {
+  background: #fff5f7;
+  color: #b87a94;
+  border-color: #fce7f3;
+}
+
+.status-badge.ongoing {
+  background: #fffbeb;
+  color: #b45309;
+  border-color: #fde68a;
+}
+
+.status-text {
+  font-size: 20rpx;
+}
+
+/* 游戏列表 */
+.games-list {
+  display: flex;
+  flex-direction: column;
+  gap: 20rpx;
+}
+
+.game-item {
+  border-radius: 32rpx;
+  padding: 28rpx;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+  border: 4rpx solid white;
+  display: flex;
+  align-items: center;
+  gap: 24rpx;
+  animation: slideInLeft 0.5s ease-out both;
+}
+
+.game-tuse {
+  background: #fce7f3;
+}
+
+.game-pintu {
+  background: #fffbeb;
+}
+
+.game-zhaobutong {
+  background: #fce7f3;
+}
+
+.game-icon-box {
+  width: 80rpx;
+  height: 80rpx;
+  background: white;
+  border-radius: 24rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.game-icon {
+  font-size: 36rpx;
+}
+
+.game-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.game-title {
+  color: #1f2937;
+  font-size: 28rpx;
+  font-weight: 900;
+  display: block;
+  margin-bottom: 4rpx;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.game-tuse .game-title {
+  color: #be185d;
+}
+
+.game-pintu .game-title {
+  color: #1e40af;
+}
+
+.game-zhaobutong .game-title {
+  color: #b87a94;
+}
+
+.game-meta {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+}
+
+.game-date {
+  color: #9ca3af;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.game-stars {
+  display: flex;
+  align-items: center;
+  gap: 4rpx;
+}
+
+.star-tiny {
+  font-size: 22rpx;
+}
+
+.stars-amount {
+  color: #a16207;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.game-type-badge {
+  padding: 12rpx 20rpx;
+  border-radius: 48rpx;
+  background: white;
+  border: 4rpx solid;
+  flex-shrink: 0;
+}
+
+.game-tuse .game-type-badge {
+  border-color: #fce7f3;
+}
+
+.game-pintu .game-type-badge {
+  border-color: #fde68a;
+}
+
+.game-zhaobutong .game-type-badge {
+  border-color: #fce7f3;
+}
+
+.type-text {
+  font-size: 20rpx;
+  font-weight: 900;
+}
+
+.game-tuse .type-text {
+  color: #be185d;
+}
+
+.game-pintu .type-text {
+  color: #1e40af;
+}
+
+.game-zhaobutong .type-text {
+  color: #b87a94;
+}
+
+/* 成就网格 */
+.achievements-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24rpx;
+}
+
+.achievement-card {
+  border-radius: 32rpx;
+  padding: 32rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16rpx;
+  border: 4rpx solid;
+  animation: scaleIn 0.5s ease-out both;
+}
+
+.achievement-card.unlocked {
+  background: linear-gradient(135deg, #fef3c7 0%, #fed7aa 100%);
+  border-color: #fde047;
+  box-shadow: 0 4rpx 16rpx rgba(245, 158, 11, 0.3);
+}
+
+.achievement-card.locked {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  opacity: 0.6;
+}
+
+.achievement-icon-box {
+  width: 112rpx;
+  height: 112rpx;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.achievement-card.unlocked .achievement-icon-box {
+  background: white;
+  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+}
+
+.achievement-card.locked .achievement-icon-box {
+  background: #f3f4f6;
+}
+
+.achievement-icon {
+  font-size: 60rpx;
+}
+
+.achievement-label {
+  font-size: 24rpx;
+  font-weight: 900;
+  text-align: center;
+}
+
+.achievement-card.unlocked .achievement-label {
+  color: #713f12;
+}
+
+.achievement-card.locked .achievement-label {
+  color: #9ca3af;
+}
+
+.achievement-desc {
+  font-size: 20rpx;
+  font-weight: 700;
+  text-align: center;
+  line-height: 30rpx;
+}
+
+.achievement-card.unlocked .achievement-desc {
+  color: #d97706;
+}
+
+.achievement-card.locked .achievement-desc {
+  color: #9ca3af;
+}
+
+/* 未登录空状态样式 */
+.empty-tip {
+  padding: 60rpx 20rpx;
+  text-align: center;
+  color: #666;
+  font-size: 28rpx;
+  line-height: 40rpx;
+  background-color: #f9f9f9;
+  border-radius: 20rpx;
+  margin: 20rpx;
+}

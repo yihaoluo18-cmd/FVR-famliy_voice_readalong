@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>粉宝 · 数据管理台</title>
+  <link rel="stylesheet" href="/admin/static/admin-theme.css" />
+</head>
+<body class="admin-shell">
+  <header class="admin-header">
+    <h1>粉宝故事园 · 数据管理台</h1>
+    <p>用户账号 · 伴宠进度 · 音色训练 · 游戏测试一站式</p>
+  </header>
+  <main class="admin-main">
+    <div class="admin-card">
+      <h2>连接服务</h2>
+      <div class="admin-toolbar">
+        <input id="apiKey" type="password" placeholder="ADMIN_API_KEY（将保存在本机浏览器）" style="min-width:280px;flex:1;" />
+        <button class="btn btn-primary" type="button" id="saveKey">保存密钥</button>
+      </div>
+      <p class="muted">需与后端环境变量 <code>ADMIN_API_KEY</code> 一致。所有管理接口均需携带此密钥。</p>
+    </div>
+
+    <div class="stat-grid" id="statGrid">
+      <div class="stat-card"><div class="label">注册用户</div><div class="value" id="stUsers">—</div></div>
+      <div class="stat-card"><div class="label">黑名单</div><div class="value" id="stBl">—</div></div>
+      <div class="stat-card"><div class="label">仅禁用（非黑）</div><div class="value" id="stDis">—</div></div>
+      <div class="stat-card"><div class="label">音色模型条数</div><div class="value" id="stVo">—</div></div>
+    </div>
+
+    <div class="admin-card">
+      <h2>快捷入口</h2>
+      <div class="nav-pills">
+        <a class="active" href="/admin/static/users.html">用户列表与管控</a>
+        <a href="/admin/static/user_detail.html">用户详情（需从列表进入）</a>
+        <a href="/admin/static/games.html">游戏板块 · 测试说明与示例</a>
+      </div>
+      <p class="muted">列表支持搜索、筛选启用/黑名单、查看伴宠蛋槽进度、音色训练详情与危险操作（清伴宠数据 / 删账号）。</p>
+    </div>
+  </main>
+  <script>
+    (function () {
+      const KEY = "admin_api_key_v1";
+      const input = document.getElementById("apiKey");
+      try {
+        const s = localStorage.getItem(KEY);
+        if (s) input.value = s;
+      } catch (e) {}
+      document.getElementById("saveKey").addEventListener("click", function () {
+        try {
+          localStorage.setItem(KEY, (input.value || "").trim());
+          alert("已保存");
+        } catch (e) {
+          alert("保存失败");
+        }
+      });
+      async function loadStats() {
+        const k = (input.value || "").trim() || (function(){ try { return localStorage.getItem(KEY) || ""; } catch(e){ return ""; } })();
+        if (!k) return;
+        try {
+          const res = await fetch("/admin/stats", { headers: { "X-Admin-Api-Key": k } });
+          const data = await res.json();
+          if (!res.ok || Number(data.code) !== 0) throw new Error(data.detail || "fail");
+          const s = data.stats || {};
+          document.getElementById("stUsers").textContent = s.total_users ?? "0";
+          document.getElementById("stBl").textContent = s.blacklisted_users ?? "0";
+          document.getElementById("stDis").textContent = s.disabled_users ?? "0";
+          document.getElementById("stVo").textContent = s.total_voice_models ?? "0";
+        } catch (e) {
+          document.getElementById("stUsers").textContent = "!";
+        }
+      }
+      loadStats();
+    })();
+  </script>
+</body>
+</html>
