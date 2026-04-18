@@ -34,3 +34,57 @@
 
 - 推荐将本目录解压后直接 `git init` / `git add .` / `git commit` / `git push`
 - 首次上传后，后续仅提交代码变更，不要把模型、资源和本地环境再传上去。
+
+## GitHub Release 上传大资源
+
+把以下两个大目录单独压缩后上传到 Release 附件：
+
+- `GPT_SoVITS_part01.zip`
+- `GPT_SoVITS_part02.zip`
+- `GPT_SoVITS_part03.zip`
+- `GPT_SoVITS_part04.zip`
+- `assets_release.zip`
+
+### 1) 本地打包（已生成）
+
+- `d:\部署测试\release_packages\GPT_SoVITS_part01.zip`
+- `d:\部署测试\release_packages\GPT_SoVITS_part02.zip`
+- `d:\部署测试\release_packages\GPT_SoVITS_part03.zip`
+- `d:\部署测试\release_packages\GPT_SoVITS_part04.zip`
+- `d:\部署测试\release_packages\assets_release.zip`
+
+### 2) 上传到 GitHub Release
+
+1. 打开仓库页面 -> `Releases` -> `Draft a new release`
+2. 填写 Tag（例如 `v1.0.0`）
+3. 在 Attach binaries 区域上传上面两个 zip
+4. Publish release
+
+## 一键拉取 Release 并部署
+
+仓库已提供脚本：
+
+- Windows: `scripts/bootstrap_from_release.ps1`
+- Linux/macOS: `scripts/bootstrap_from_release.sh`
+
+### Windows 一键执行
+
+在项目根目录 PowerShell 执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_from_release.ps1 -Repo "yihaoluo18-cmd/FVR-famliy_voice_readalong" -Tag "v1.0.0" -TargetRoot "." -AssetsAssetName "assets_release.zip"
+```
+
+随后启动：
+
+```bash
+bash ./start_wx_api.sh
+```
+
+### Linux/macOS 一键执行
+
+```bash
+chmod +x ./scripts/bootstrap_from_release.sh
+./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
+bash ./start_wx_api.sh
+```
