@@ -36,11 +36,42 @@
 - 首次上传后，后续仅提交代码变更，不要把模型、资源和本地环境再传上去。
 
 ## GitHub Release 大资源清单
+
+**随 Release 可一并上传（维护者）：**
+
 - `GPT_SoVITS_part01.zip`
 - `GPT_SoVITS_part02.zip`
 - `GPT_SoVITS_part03.zip`
 - `GPT_SoVITS_part04.zip`
 - `assets_release.zip`
+- `fvr_deploy_output.zip`（**推荐上传**：`./output/` 默认数据快照；**一键脚本会尝试下载**；若该 Tag 的 Release 未附带此文件则跳过并提示，不影响 GPT/assets 安装）
+
+**一键脚本默认会下载：** 四个 `GPT_SoVITS_part*.zip` + `assets_release.zip`，并**尝试**下载 `fvr_deploy_output.zip` 解压到 `./output`（会替换已有 `output/` 目录）。若你不想覆盖本地 `output/`，请使用下方「跳过 output」参数。
+
+### 跳过 `./output`（保留本地数据）
+
+- Windows：在命令末尾加 `-SkipDeployOutput`
+- Linux/macOS：`FVR_SKIP_OUTPUT=1 ./scripts/bootstrap_from_release.sh ...` 或第 5 个参数传 `skip`（见脚本 `--help` 式说明）
+
+### Release 页面可复制英文备注（给维护者）
+
+```
+FVR deployment assets for one-click bootstrap.
+
+Included assets:
+- GPT_SoVITS_part01.zip
+- GPT_SoVITS_part02.zip
+- GPT_SoVITS_part03.zip
+- GPT_SoVITS_part04.zip
+- assets_release.zip
+- fvr_deploy_output.zip (recommended: ./output snapshot; bootstrap downloads it when attached to the release; use -SkipDeployOutput / FVR_SKIP_OUTPUT=1 to skip.)
+
+Usage:
+- Run scripts/bootstrap_from_release.ps1 (Windows)
+- or scripts/bootstrap_from_release.sh (Linux/macOS)
+
+Bootstrap downloads GPT-SoVITS parts, assets_release.zip, and attempts fvr_deploy_output.zip (skipped automatically if not published on this release).
+```
 
 ## 一键拉取 Release 并部署
 
@@ -55,6 +86,7 @@
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_from_release.ps1 -Repo "yihaoluo18-cmd/FVR-famliy_voice_readalong" -Tag "v1.0.0" -TargetRoot "." -AssetsAssetName "assets_release.zip"
+# 不覆盖本地 output/：再加 -SkipDeployOutput
 ```
 
 随后启动：
@@ -68,5 +100,6 @@ bash ./start_wx_api.sh
 ```bash
 chmod +x ./scripts/bootstrap_from_release.sh
 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
+# 不覆盖本地 output/：FVR_SKIP_OUTPUT=1 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
 bash ./start_wx_api.sh
 ```

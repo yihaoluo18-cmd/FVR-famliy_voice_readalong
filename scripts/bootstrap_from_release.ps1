@@ -1,3 +1,5 @@
+# One-click bootstrap: downloads GPT_SoVITS_part*.zip, assets_release.zip, and (if present on the release)
+# optional fvr_deploy_output.zip into ./output. Use -SkipDeployOutput to skip the output bundle.
 param(
     [Parameter(Mandatory = $true)]
     [string]$Repo,
@@ -6,6 +8,8 @@ param(
     [string]$TargetRoot = ".",
     [string[]]$GptPartAssets = @("GPT_SoVITS_part01.zip", "GPT_SoVITS_part02.zip", "GPT_SoVITS_part03.zip", "GPT_SoVITS_part04.zip"),
     [string]$AssetsAssetName = "assets_release.zip",
+    [string]$OutputAssetName = "fvr_deploy_output.zip",
+    [switch]$SkipDeployOutput,
     [switch]$SkipStart
 )
 
@@ -45,6 +49,21 @@ foreach ($partName in $GptPartAssets) {
     Download-Asset -Url "$baseUrl/$partName" -OutFile (Join-Path $tmpDir $partName)
 }
 
+$outputZip = Join-Path $tmpDir $OutputAssetName
+$outputDownloaded = $false
+if (-not $SkipDeployOutput) {
+    try {
+        Write-Host "Downloading optional release asset: $OutputAssetName"
+        Download-Asset -Url "$baseUrl/$OutputAssetName" -OutFile $outputZip
+        if (Test-Path $outputZip) {
+            $outputDownloaded = $true
+        }
+    }
+    catch {
+        Write-Host "WARN: Optional asset $OutputAssetName is not on this release or download failed. Skipping ./output. ($($_.Exception.Message))"
+    }
+}
+
 foreach ($partName in $GptPartAssets) {
     $partZip = Join-Path $tmpDir $partName
     if (-not (Test-Path $partZip)) {
@@ -67,19 +86,33 @@ foreach ($partName in $GptPartAssets) {
 
 Extract-Zip -ZipPath $assetsZip -DestinationPath (Join-Path $root "assets")
 
+if ($outputDownloaded) {
+    $outputDir = Join-Path $root "output"
+    if (Test-Path $outputDir) {
+        Write-Host "Removing existing directory: $outputDir"
+        Remove-Item $outputDir -Recurse -Force
+    }
+    Write-Host "Extracting: $OutputAssetName -> ./output"
+    Expand-Archive -Path $outputZip -DestinationPath $root -Force
+}
+
 Remove-Item $tmpDir -Recurse -Force
 
 Write-Host "Bootstrap completed."
 Write-Host "Generated directories:"
 Write-Host " - $(Join-Path $root 'GPT_SoVITS')"
 Write-Host " - $(Join-Path $root 'assets')"
+if ($outputDownloaded) {
+    Write-Host " - $(Join-Path $root 'output')"
+}
 
 if (-not $SkipStart) {
     $startScript = Join-Path $root "start_wx_api.sh"
     if (Test-Path $startScript) {
         Write-Host "Found start script: $startScript"
         Write-Host "Please run it with Git Bash: bash ./start_wx_api.sh"
-    } else {
+    }
+    else {
         Write-Host "start_wx_api.sh not found. Start service manually."
     }
 }

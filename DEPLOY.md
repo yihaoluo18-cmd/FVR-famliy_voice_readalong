@@ -3,7 +3,7 @@
 本文档用于从零部署项目，覆盖：
 
 - 从 GitHub 网页下载或命令行克隆代码
-- 从 GitHub Release 下载大资源（`GPT_SoVITS` + `assets`）
+- 从 GitHub Release 下载大资源（`GPT_SoVITS` + `assets` + 尝试 `fvr_deploy_output.zip`，见第 5 节）
 - 配置环境变量（含 AI Key）
 - 执行一键脚本完成资源安装
 - 启动服务并验证可用
@@ -24,7 +24,8 @@
 - `GPT_SoVITS_part02.zip`
 - `GPT_SoVITS_part03.zip`
 - `GPT_SoVITS_part04.zip`
-- `assets_release.zip`
+- `assets_release.zip`（由本地 **`仓库/assets`** 打包，根目录下为 `images/`、`paint_basement_generated/` 等，解压到项目根目录应对齐为 `./assets/...`）
+- `fvr_deploy_output.zip`（**推荐**：默认运行时 `output/` 快照；一键脚本会**尝试自动下载**并解压到 `./output/`。若 Release 未上传该文件则跳过。含伴宠/涂色等数据，部署前请确认是否覆盖本地 `output/`）
 
 ---
 
@@ -123,17 +124,29 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_from_release.ps1 -R
 
 - `GPT_SoVITS_part01.zip` ~ `GPT_SoVITS_part04.zip`
 - `assets_release.zip`
+- **尝试** `fvr_deploy_output.zip`（若该 Tag 的 Release 未附带此附件，则打印警告并跳过，其余资源照常安装）
 
 并解压到项目根目录：
 
 - `./GPT_SoVITS`
 - `./assets`
+- `./output`（仅当成功下载到 `fvr_deploy_output.zip` 时；脚本会先删除已有 `output/` 再解压，**等同于覆盖**）
+
+**不想覆盖本地 `output/`：** 增加 `-SkipDeployOutput`。
 
 ### 5.2 Linux/macOS
 
 ```bash
 chmod +x ./scripts/bootstrap_from_release.sh
 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
+```
+
+与 5.1 相同：会尝试拉取 `fvr_deploy_output.zip`。不想覆盖本地 `output/` 时：
+
+```bash
+FVR_SKIP_OUTPUT=1 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
+# 或第五个参数传 skip：
+# ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip skip
 ```
 
 ---
@@ -173,6 +186,27 @@ curl -sS http://127.0.0.1:9881/readalong/health
 
 - `train/runtime/`
 
+### 7.1 伴宠 3D 视角参数：小程序接入与配置落盘
+
+与本地 `@仓库/微信小程序final` 对齐的约定如下（主仓 `FVR_github` 已统一实现）。
+
+**小程序侧（读哪些字段、写哪个 scope）**
+
+| 页面 | 读后端 `companion/state` 的字段 | 保存调参 `set_view_tuning` 的 `view_scope` |
+|------|----------------------------------|--------------------------------------------|
+| 宠详情 `pages/pet-detail/pet-detail` | `form_view_tuning` | `pet_detail`（默认） |
+| 首页 `pages/home/home` | `form_view_tuning_home`，缺省再读 `form_view_tuning` | `home` |
+| 伴读 `pages/companion/companion` | 合并 `form_view_tuning` → `form_view_tuning_home` → `form_view_tuning_companion`（后者优先）；逻辑集中在 `微信小程序final/utils/companion-view-tuning.js` | `companion` |
+
+HTTP 封装在 `微信小程序final/utils/pet-growth.js`：`requestCompanionState`、`postCompanionSetViewTuning(..., viewScope)`。
+
+**后端与磁盘（从 GitHub 拉下来后能否读到）**
+
+- 运行时主存储：`output/ar_companion_pet_companion_store.json`（相对项目根目录）。首次启动服务后由后端创建/写入；克隆代码后只要启动过 `wx_api` 且该路径可写，即可持久化。
+- 三套全局调参键名与上述 `view_scope` 对应：`global_form_view_tuning`、`global_form_view_tuning_home`、`global_form_view_tuning_companion`；形态键为 `egg`、`tier1`、`tier2`、`tier3`。
+- 仓库内随代码提供的**历史模板**（可选）：`modules/ar_companion_backend/data/ar_companion_tuning_store.json`、`ar_companion_scene_tuning_store.json`。服务启动时 `pet_companion` 会将其中与伴读相关的记录迁移进 `global_form_view_tuning_companion`，避免旧环境调好的镜头丢失。
+- Release 里的 `assets` / `GPT_SoVITS` 只影响**模型与贴图 URL 是否 404**，不改变上述 JSON 的读写路径；小程序 `app.getApiBaseUrl()` 必须指向已启动的 `9880` 服务。
+
 ---
 
 ## 8. GitHub Release 上传说明（给维护者）
@@ -187,8 +221,28 @@ curl -sS http://127.0.0.1:9881/readalong/health
    - `GPT_SoVITS_part03.zip`
    - `GPT_SoVITS_part04.zip`
    - `assets_release.zip`
+   - （可选）`fvr_deploy_output.zip`：部署用默认 `output/` 数据包
 4. Publish release
 5. 通知部署方把脚本里的 `-Tag` / `<tag>` 改成新版本
+
+**维护者本地打包（与本次生成方式一致）**
+
+在开发机已准备好目录时，可用 Python 一键生成上述两个 zip（单文件不超过 GitHub Release 2GB 限制即可）：
+
+```powershell
+cd <项目根目录>
+python scripts/package_release_assets.py
+```
+
+默认会读取环境变量或脚本内路径：将 **`仓库/assets`** 打成 `release_packages/assets_release.zip`，将 **`test/FVR_deploy_run/output`** 打成 `release_packages/fvr_deploy_output.zip`。生成后请在浏览器打开 GitHub 仓库 → **Releases** → 编辑对应 Tag → **Attach binaries** 上传。
+
+若已安装 [GitHub CLI](https://cli.github.com/) 且已 `gh auth login`，可在生成 zip 后执行（将 `TAG` 换成实际标签）：
+
+```bash
+gh release upload TAG release_packages/assets_release.zip release_packages/fvr_deploy_output.zip --repo yihaoluo18-cmd/FVR-famliy_voice_readalong --clobber
+```
+
+（`GPT_SoVITS_part*.zip` 需自行上传；单文件若超过 2GB 须分卷，与现有 `bootstrap` 脚本约定一致。）
 
 ---
 
