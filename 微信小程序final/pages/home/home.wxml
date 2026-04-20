@@ -100,7 +100,7 @@
               data-tier="{{item}}"
             >
               <view class="home-form-poster">
-                <image class="home-form-poster-img {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-img-dim' : ''}}" src="{{currentMascot.url}}" mode="aspectFill" />
+                <image class="home-form-poster-img {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-img-dim' : ''}}" src="{{homeFormPosterUrls[item - 1] || currentMascot.url}}" mode="aspectFill" />
                 <view class="home-form-badge">形态{{item}}</view>
               </view>
               <view class="home-form-title">

@@ -49,13 +49,13 @@ function enrichSlotsWithPosters(slots) {
   const personaBgMap = {
     default: "rgba(250, 204, 21, 0.16)", // 柴犬淡黄色
     cute_fox: "rgba(236, 72, 153, 0.14)", // 狐狸淡粉色
-    cute_dino: "rgba(34, 197, 94, 0.14)", // 恐龙淡绿色
+    cute_dino: "rgba(34, 197, 94, 0.14)", // 绵羊淡绿色
     cute_cat: "rgba(59, 130, 246, 0.14)", // 猫淡蓝色
     cute_bunny: "rgba(147, 197, 253, 0.14)", // 兔子淡天蓝
     cute_squirrel: "rgba(245, 158, 11, 0.14)", // 松鼠淡橘金
     cute_chick: "rgba(251, 191, 36, 0.14)", // 小鸡淡金黄
     cute_panda: "rgba(232, 121, 169, 0.12)", // 熊猫淡粉
-    cute_koala: "rgba(20, 184, 166, 0.12)", // 考拉淡青
+    cute_koala: "rgba(20, 184, 166, 0.12)", // 仓鼠淡青
     cute_penguin: "rgba(107, 114, 128, 0.12)", // 企鹅淡灰
   };
 
@@ -90,13 +90,13 @@ function getMascotEmoji(mascotId) {
   const map = {
     "cute-dog": "🐶",
     "cute-fox": "🦊",
-    "cute-dino": "🦕",
+    "cute-dino": "🐑",
     "cute-cat": "🐱",
     "cute-bunny": "🐰",
     "cute-squirrel": "🐿️",
     "cute-chick": "🐥",
     "cute-panda": "🐼",
-    "cute-koala": "🐨",
+    "cute-koala": "🐹",
     "cute-penguin": "🐧",
   };
   const id = String(mascotId || "").trim();

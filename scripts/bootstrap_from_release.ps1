@@ -21,7 +21,40 @@ function Download-Asset {
         [string]$OutFile
     )
     Write-Host "Downloading: $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+
+    # Avoid extremely slow progress rendering for large files
+    $oldProgress = $global:ProgressPreference
+    $global:ProgressPreference = "SilentlyContinue"
+    try {
+        $tmpOut = "$OutFile.download"
+        foreach ($p in @($OutFile, $tmpOut)) {
+            if (Test-Path $p) {
+                Remove-Item -Force $p -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Prefer BITS for large GitHub assets (resume/retry friendly)
+        if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+            Start-BitsTransfer -Source $Url -Destination $tmpOut -ErrorAction Stop
+            Move-Item -Force $tmpOut $OutFile
+            return
+        }
+
+        # Fallback to curl.exe (NOT the PowerShell curl alias)
+        $curl = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
+        if ($curl) {
+            & $curl -fL $Url -o $tmpOut
+            Move-Item -Force $tmpOut $OutFile
+            return
+        }
+
+        # Last resort
+        Invoke-WebRequest -Uri $Url -OutFile $tmpOut -UseBasicParsing
+        Move-Item -Force $tmpOut $OutFile
+    }
+    finally {
+        $global:ProgressPreference = $oldProgress
+    }
 }
 
 function Extract-Zip {

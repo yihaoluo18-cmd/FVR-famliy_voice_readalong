@@ -39,13 +39,13 @@ class _SlotDef:
 EGG_SLOT_DEFS: List[_SlotDef] = [
     _SlotDef(0, "cute-dog", "柴柴小星", "🐶", "starter"),
     _SlotDef(1, "cute-fox", "狐狸小橙", "🦊", "checkin_month", checkin_need=3),
-    _SlotDef(2, "cute-dino", "恐龙小绿", "🦕", "checkin_month", checkin_need=7),
+    _SlotDef(2, "cute-dino", "小羊咩咩", "🐑", "checkin_month", checkin_need=7),
     _SlotDef(3, "cute-cat", "小猫咪咪", "🐱", "checkin_month", checkin_need=15),
     _SlotDef(4, "cute-bunny", "兔兔小白", "🐰", "checkin_month", checkin_need=30),
     _SlotDef(5, "cute-squirrel", "松鼠栗栗", "🐿️", "read_count", read_need=4),
     _SlotDef(6, "cute-chick", "嘎嘎小黄", "🐥", "read_count", read_need=7),
     _SlotDef(7, "cute-panda", "熊猫萌萌", "🐼", "read_count", read_need=10),
-    _SlotDef(8, "cute-koala", "考拉困困", "🐨", "checkin_month", checkin_need=20),
+    _SlotDef(8, "cute-koala", "仓鼠团团", "🐹", "checkin_month", checkin_need=20),
     _SlotDef(9, "cute-penguin", "企鹅摇摇", "🐧", "combo", checkin_need=25, read_need=15),
 ]
 

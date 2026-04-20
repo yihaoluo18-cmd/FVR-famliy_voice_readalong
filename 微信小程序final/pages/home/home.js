@@ -9,11 +9,23 @@ const {
   postCompanionSetDisplayForm,
   postCompanionSetViewTuning,
 } = require("../../utils/pet-growth.js");
-const { getPetById, getFormTierModelUrl, getStaticEggModelUrl, getEggModelUrl } = require("../../utils/pets-catalog.js");
+const {
+  getPetById,
+  getPetCoverUrl,
+  getPetFormPosterUrls,
+  getFormTierModelUrl,
+  getFormTierPosterUrl,
+  getStaticEggModelUrl,
+  getEggModelUrl,
+} = require("../../utils/pets-catalog.js");
 const { toMiniprogramAssetUrl, getMiniprogramStaticBase } = require("../../utils/asset-url.js");
 const { isMainDone, markMainDone } = require("../../utils/guide-flow.js");
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:9880";
+
+function buildMascotPhotoList(mascotId) {
+  return getPetFormPosterUrls(mascotId).map((u) => toMiniprogramAssetUrl(u));
+}
 
 function mascotWithResolvedUrl(m) {
   if (!m) return m;
@@ -92,10 +104,10 @@ function getMascotFormDisplayName(mascotId, baseName, formKey) {
       tier3: "小狐·星影旅者",
     },
     "cute-dino": {
-      egg: "小恐龙·化石睡睡中",
-      tier1: "小恐龙·草地探险家",
-      tier2: "小恐龙·岩石小勇士",
-      tier3: "小恐龙·远古守门人",
+      egg: "小羊·棉花蛋壳期",
+      tier1: "小羊·软萌新手",
+      tier2: "小羊·勇气小队员",
+      tier3: "小羊·星光守护者",
     },
     "cute-cat": {
       egg: "小猫·盒子打呼噜",
@@ -128,10 +140,10 @@ function getMascotFormDisplayName(mascotId, baseName, formKey) {
       tier3: "熊猫·山谷守梦人",
     },
     "cute-koala": {
-      egg: "考拉·树杈摇篮",
-      tier1: "考拉·树顶午后客",
-      tier2: "考拉·星空观察员",
-      tier3: "考拉·南半球守望者",
+      egg: "仓鼠·口袋蛋壳期",
+      tier1: "仓鼠·坚果收藏家",
+      tier2: "仓鼠·句子小管家",
+      tier3: "仓鼠·星星储蓄官",
     },
     "cute-penguin": {
       egg: "企鹅·雪球乘客",
@@ -182,16 +194,16 @@ function _shouldApplyStoredPositionFromLocalFlag(mascotId, formKey) {
 
 // 与后端 pet_egg 槽位一致的 10 个小伙伴（暂未单独插图的用小图标占位图）
 const MASCOT_AVATARS_ALL = [
-  { id: "cute-dog", name: "柴小汪", url: "/assets/images/柴犬封面.png", emoji: "🐶" },
-  { id: "cute-fox", name: "小狐狸", url: "/assets/images/狐狸封面.png", emoji: "🦊" },
-  { id: "cute-dino", name: "恐龙", url: "/assets/images/恐龙.png", emoji: "🦕" },
-  { id: "cute-cat", name: "猫小咪", url: "/assets/images/小猫封面.png", emoji: "🐱" },
-  { id: "cute-bunny", name: "兔小白", url: "/assets/images/兔子封面.png", emoji: "🐰" },
-  { id: "cute-squirrel", name: "小松鼠", url: "/assets/images/松鼠封面.png", emoji: "🐿️" },
-  { id: "cute-chick", name: "鸭嘎嘎", url: "/assets/images/小鸭封面.png", emoji: "🐥" },
-  { id: "cute-panda", name: "熊墩墩", url: "/assets/images/熊猫封面.png", emoji: "🐼" },
-  { id: "cute-koala", name: "考拉", url: "/assets/images/小狗.png", emoji: "🐨" },
-  { id: "cute-penguin", name: "企鹅", url: "/assets/images/企鹅封面.png", emoji: "🐧" },
+  { id: "cute-dog", name: "柴小汪", url: getPetCoverUrl("cute-dog"), emoji: "🐶" },
+  { id: "cute-fox", name: "小狐狸", url: getPetCoverUrl("cute-fox"), emoji: "🦊" },
+  { id: "cute-dino", name: "小绵羊", url: getPetCoverUrl("cute-dino"), emoji: "🐑" },
+  { id: "cute-cat", name: "猫小咪", url: getPetCoverUrl("cute-cat"), emoji: "🐱" },
+  { id: "cute-bunny", name: "兔小白", url: getPetCoverUrl("cute-bunny"), emoji: "🐰" },
+  { id: "cute-squirrel", name: "小松鼠", url: getPetCoverUrl("cute-squirrel"), emoji: "🐿️" },
+  { id: "cute-chick", name: "鸭嘎嘎", url: getPetCoverUrl("cute-chick"), emoji: "🐥" },
+  { id: "cute-panda", name: "熊墩墩", url: getPetCoverUrl("cute-panda"), emoji: "🐼" },
+  { id: "cute-koala", name: "小仓鼠", url: getPetCoverUrl("cute-koala"), emoji: "🐹" },
+  { id: "cute-penguin", name: "企鹅", url: getPetCoverUrl("cute-penguin"), emoji: "🐧" },
 ];
 function mapAvatarsWithLock(unlockedList) {
   const unlocked = new Set(unlockedList && unlockedList.length ? unlockedList : ["cute-dog"]);
@@ -298,6 +310,7 @@ Page({
     showHomeSwitchModal: false,
     homeSwitchStep: "menu", // menu | mascot | form
     homeUnlockedFormTiers: [1],
+    homeFormPosterUrls: [],
     floatingClass: 'floatingClass',
     bubbleClass: 'bubbleClass',
     petEntryBadge: false,
@@ -339,13 +352,14 @@ Page({
   },
 
   onLoad() {
-    const dogPhotoList = Array.from({ length: 27 }, (_, i) => toMiniprogramAssetUrl(`/assets/images/${i}.png`));
-    const foxPhotoList = Array.from({ length: 20 }, (_, i) => toMiniprogramAssetUrl(`/assets/images/f${i}.png`));
+    const dogPhotoList = buildMascotPhotoList("cute-dog");
+    const foxPhotoList = buildMascotPhotoList("cute-fox");
     this.setData({
       dogPhotoList,
       foxPhotoList,
       currentPhotoList: dogPhotoList,
       currentImage: dogPhotoList[0] || "",
+      homeFormPosterUrls: buildMascotPhotoList("cute-dog"),
       mpAssetIconBase: getMiniprogramStaticBase(),
     });
     this.loadData();
@@ -477,28 +491,7 @@ Page({
       wx.navigateTo({ url: "/pages/pet-system/pet-system" });
       return;
     }
-    let newPhotoList = this.data.dogPhotoList; // 默认小狗
-
-    // 根据选择的动物切换对应的3D图片列表
-    switch(mascot.id) {
-      case "cute-fox":
-        newPhotoList = this.data.foxPhotoList;
-        break;
-      case "cute-dog":
-        newPhotoList = this.data.dogPhotoList;
-        break;
-      // 其他动物暂时用小狗的3D图，后续可扩展
-      case "cute-dino":
-      case "cute-cat":
-      case "cute-bunny":
-      case "cute-squirrel":
-      case "cute-chick":
-      case "cute-panda":
-      case "cute-koala":
-      case "cute-penguin":
-        newPhotoList = this.data.dogPhotoList;
-        break;
-    }
+    const newPhotoList = buildMascotPhotoList(mascot.id);
 
     this.setData({
       currentMascot: mascot,
@@ -506,7 +499,8 @@ Page({
       showAvatarPicker: false,
       currentIndex: 0, // 重置到第一张图
       currentPhotoList: newPhotoList,
-      currentImage: newPhotoList[0] // 显示对应动物的第一张3D图
+      currentImage: newPhotoList[0] || "", // 显示对应动物的第一张形态图
+      homeFormPosterUrls: newPhotoList
     }, () => this._loadAndBuildHomeThree());
     
     // 保存选择（全局）：伴宠 + 更新时间戳，确保首页能立即刷新
@@ -605,14 +599,14 @@ Page({
       }
       const mascot = MASCOT_AVATARS_ALL.find((m) => m.id === saved);
       if (!mascot) return;
-      let newPhotoList = this.data.dogPhotoList;
-      if (mascot.id === "cute-fox") newPhotoList = this.data.foxPhotoList;
+      const newPhotoList = buildMascotPhotoList(mascot.id);
       this.setData({
         currentMascot: mascotWithResolvedUrl(mascot),
         homePetStageBg: homePetStageBackgroundCss(mascot.id),
         currentPhotoList: newPhotoList,
         currentIndex: 0,
-        currentImage: newPhotoList[0],
+        currentImage: newPhotoList[0] || "",
+        homeFormPosterUrls: newPhotoList,
       }, () => this._loadAndBuildHomeThree());
     } catch (e) {}
   },
@@ -1360,16 +1354,14 @@ Page({
       if (savedMascotId) {
         const mascot = MASCOT_AVATARS_ALL.find(m => m.id === savedMascotId);
         if (mascot) {
-          let newPhotoList = this.data.dogPhotoList;
-          if (mascot.id === "cute-fox") {
-            newPhotoList = this.data.foxPhotoList;
-          }
+          const newPhotoList = buildMascotPhotoList(mascot.id);
           this.setData({
             currentMascot: mascotWithResolvedUrl(mascot),
             homePetStageBg: homePetStageBackgroundCss(mascot.id),
             currentPhotoList: newPhotoList,
             currentIndex: 0,
-            currentImage: newPhotoList[0]
+            currentImage: newPhotoList[0] || "",
+            homeFormPosterUrls: newPhotoList
           });
         }
       }
@@ -1415,7 +1407,13 @@ Page({
   },
 
   onHomeSwitchPickForm() {
-    this.setData({ homeSwitchStep: "form" });
+    // 进入“形态”页时，强制按当前选中伴宠刷新三档海报（避免仍展示上一次伴宠的形态图）
+    let mid = (this.data.currentMascot && this.data.currentMascot.id) || "cute-dog";
+    try {
+      const saved = String(wx.getStorageSync("selectedMascot") || "").trim();
+      if (saved) mid = saved;
+    } catch (e) {}
+    this.setData({ homeSwitchStep: "form", homeFormPosterUrls: buildMascotPhotoList(mid) });
   },
 
   onHomeSwitchBack() {

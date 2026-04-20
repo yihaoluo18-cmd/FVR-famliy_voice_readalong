@@ -106,12 +106,13 @@ class CompanionEngine:
             },
             "cute_chick": {
                 "display_name": "嘎嘎小黄",
-                "model_url": "/ar_companion/assets/chick/scene.gltf",
+                # 资源包当前仅包含 shiba/fox 的 glb，其他物种先复用可用模型避免 404
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_dino": {
-                "display_name": "恐龙小绿",
-                "model_url": "/ar_companion/assets/chick/scene.gltf",
+                "display_name": "小羊咩咩",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_fox": {
@@ -121,32 +122,32 @@ class CompanionEngine:
             },
             "cute_cat": {
                 "display_name": "小猫咪咪",
-                "model_url": "/ar_companion/assets/cat/scene.gltf",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_bunny": {
                 "display_name": "兔兔小白",
-                "model_url": "/ar_companion/assets/bunny/scene.gltf",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 0.85, "targetSize": 5.5, "fov": 38, "lookAtHeightMul": 0.18, "liftMul": 0.12},
             },
             "cute_squirrel": {
                 "display_name": "松鼠栗栗",
-                "model_url": "/ar_companion/assets/squirrel/scene.gltf",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 0.95, "targetSize": 3.0, "fov": 40, "lookAtHeightMul": 0.15},
             },
             "cute_panda": {
                 "display_name": "熊猫萌萌",
-                "model_url": "/ar_companion/assets/cat/scene.gltf",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_koala": {
-                "display_name": "考拉困困",
-                "model_url": "/ar_companion/assets/cat/scene.gltf",
+                "display_name": "仓鼠团团",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_penguin": {
                 "display_name": "企鹅摇摇",
-                "model_url": "/ar_companion/assets/chick/scene.gltf",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "warm_big_sister": {

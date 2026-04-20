@@ -1,12 +1,13 @@
 const app = getApp();
 const { toMiniprogramAssetUrl } = require("../../utils/asset-url.js");
+const { getPetCoverUrl } = require("../../utils/pets-catalog.js");
 
 const MASKS = [
   { id: 'bunny',    name: '兔子', url: '/assets/images/小兔.png'  },
   { id: 'cat',      name: '小猫', url: '/assets/images/小猫.png'  },
   { id: 'dog',      name: '小狗', url: '/assets/images/小狗.png'  },
   { id: 'squirrel', name: '松鼠', url: '/assets/images/松鼠.png'  },
-  { id: 'dino',     name: '恐龙', url: '/assets/images/恐龙.png'  },
+  { id: 'sheep',    name: '绵羊', url: getPetCoverUrl('cute-dino') },
   { id: 'fox',      name: '狐狸', url: '/assets/images/狐狸.png'  },
 ];
 

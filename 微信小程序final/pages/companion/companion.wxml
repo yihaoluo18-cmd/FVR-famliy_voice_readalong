@@ -123,7 +123,7 @@
                 data-tier="{{item}}"
               >
                 <view class="companion-form-poster">
-                  <image class="companion-form-poster-img {{(companionUnlockedFormTiers.indexOf(item) === -1) ? 'companion-switch-img-dim' : ''}}" src="{{companionSwitchPosterMascot.url}}" mode="aspectFill" />
+                  <image class="companion-form-poster-img {{(companionUnlockedFormTiers.indexOf(item) === -1) ? 'companion-switch-img-dim' : ''}}" src="{{companionFormPosterUrls[item - 1] || companionSwitchPosterMascot.url}}" mode="aspectFill" />
                   <view class="companion-form-badge">形态{{item}}</view>
                 </view>
                 <view class="companion-form-title">
