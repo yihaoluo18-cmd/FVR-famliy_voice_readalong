@@ -103,3 +103,13 @@ chmod +x ./scripts/bootstrap_from_release.sh
 # 不覆盖本地 output/：FVR_SKIP_OUTPUT=1 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip
 bash ./start_wx_api.sh
 ```
+
+### 从 Hugging Face 拉取（国内备用）
+
+将 zip 上传到 HF **Dataset** 后，设置环境变量即可（与 GitHub 上 **同名** zip）：
+
+- **只用 HF**：`FVR_ASSET_BASE_URLS` = `https://huggingface.co/datasets/<用户>/<库>/resolve/main`（多个前缀用英文 `;` 分隔，按顺序重试）。
+- **GitHub 失败再试 HF**：不设前者，设 `FVR_ASSET_EXTRA_BASE_URLS`（同上格式）；国内可把域名换成 `https://hf-mirror.com/datasets/...`。
+- **私有库**：再设 `HF_TOKEN`（只读即可）。
+
+详见 `DEPLOY.md` **§5.3**。

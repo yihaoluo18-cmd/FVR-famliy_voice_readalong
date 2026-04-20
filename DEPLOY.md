@@ -149,6 +149,72 @@ FVR_SKIP_OUTPUT=1 ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_
 # ./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 . assets_release.zip skip
 ```
 
+### 5.3 使用 Hugging Face 托管大资源（推荐国内备用）
+
+GitHub Release 在国内可能较慢或中断。可将 **与 Release 同名的 zip** 上传到 Hugging Face **Dataset**（或 Model 仓库根目录），用直链下载；一键脚本已支持多源与失败切换。
+
+#### 在 Hugging Face 上准备文件
+
+1. 登录 [huggingface.co](https://huggingface.co)，**New Dataset**（或 New Model），设为 **Public**（私有需 `HF_TOKEN`，见下）。
+2. 在仓库 **根目录**（或你选择的子路径，见下）上传与 GitHub Release **完全一致**的文件名，例如：
+   - `GPT_SoVITS_part01.zip` … `GPT_SoVITS_part04.zip`
+   - `assets_release.zip`
+   - （可选）`fvr_deploy_output.zip`
+3. **直链前缀**格式（默认分支 `main`、文件在根目录时）：
+   - Dataset：`https://huggingface.co/datasets/<用户名或组织>/<数据集名>/resolve/main`
+   - 若文件在子目录 `release/v1`，则前缀为：  
+     `https://huggingface.co/datasets/<用户>/<数据集>/resolve/main/release/v1`  
+     脚本会在前缀后拼接 `/文件名.zip`。
+
+国内可优先使用镜像域名（与 HF 文件结构相同），例如将主机改为 `hf-mirror.com`：  
+`https://hf-mirror.com/datasets/<用户>/<数据集>/resolve/main`
+
+#### 仅用 Hugging Face（不读 GitHub Release）
+
+PowerShell：
+
+```powershell
+$env:FVR_ASSET_BASE_URLS = "https://huggingface.co/datasets/你的用户/FVR-deploy-assets/resolve/main"
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_from_release.ps1 -Repo "yihaoluo18-cmd/FVR-famliy_voice_readalong" -Tag "v1.0.0" -TargetRoot "."
+```
+
+Bash：
+
+```bash
+export FVR_ASSET_BASE_URLS="https://huggingface.co/datasets/你的用户/FVR-deploy-assets/resolve/main"
+./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 .
+```
+
+说明：设置了 `FVR_ASSET_BASE_URLS` 后，**只从上述前缀列表拉取**（可写多个，用英文分号 `;` 分隔，按顺序依次尝试）。`-Repo`/`<repo>` 与 `<tag>` 仍可随便填占位，但 **不会**再访问 GitHub，除非你把这些 URL 自己写进 `FVR_ASSET_BASE_URLS` 里。
+
+#### GitHub 优先，失败再试 Hugging Face
+
+不设 `FVR_ASSET_BASE_URLS`，改用 **额外** 前缀列表（分号分隔）：
+
+```powershell
+$env:FVR_ASSET_EXTRA_BASE_URLS = "https://hf-mirror.com/datasets/你的用户/FVR-deploy-assets/resolve/main"
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap_from_release.ps1 -Repo "yihaoluo18-cmd/FVR-famliy_voice_readalong" -Tag "v1.0.0" -TargetRoot "."
+```
+
+```bash
+export FVR_ASSET_EXTRA_BASE_URLS="https://hf-mirror.com/datasets/你的用户/FVR-deploy-assets/resolve/main"
+./scripts/bootstrap_from_release.sh yihaoluo18-cmd/FVR-famliy_voice_readalong v1.0.0 .
+```
+
+#### 私有 Dataset / 需要登录时
+
+在运行前设置 **只读** Token（[Settings → Access Tokens](https://huggingface.co/settings/tokens)）：
+
+```powershell
+$env:HF_TOKEN = "hf_xxxxxxxx"
+```
+
+```bash
+export HF_TOKEN="hf_xxxxxxxx"
+```
+
+脚本会通过 `Authorization: Bearer` 请求（PowerShell 在带 Token 时跳过 BITS，改用 `curl`/WebRequest）。
+
 ---
 
 ## 6. 启动服务
