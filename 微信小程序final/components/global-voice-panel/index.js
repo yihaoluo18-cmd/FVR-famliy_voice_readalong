@@ -4,7 +4,8 @@ Component({
     currentVoiceId: '',
     currentVoiceName: '基础音色（默认）',
     defaultVoiceId: 'voice_001',
-    voiceList: []
+    voiceList: [],
+    isSwitchingVoice: false
   },
 
   lifetimes: {
@@ -73,13 +74,16 @@ Component({
     onChooseDefault() {
       const app = this._app || getApp();
       if (!app || !app.setDefaultVoice) return;
+      if (this.data.isSwitchingVoice) return;
+
+      this.setData({ isSwitchingVoice: true });
       app.setDefaultVoice((err) => {
         if (!err) {
           wx.showToast({ title: '已切换基础音色', icon: 'success' });
         } else {
           wx.showToast({ title: '切换失败', icon: 'none' });
         }
-        this.setData({ dropdownOpen: false });
+        this.setData({ dropdownOpen: false, isSwitchingVoice: false });
       });
     },
 
@@ -88,17 +92,23 @@ Component({
       const voiceId = String(ds.voiceId || '').trim();
       const voiceName = String(ds.voiceName || voiceId).trim();
       if (!voiceId) return;
+      if (this.data.isSwitchingVoice) return;
+      if (String(this.data.currentVoiceId || '').trim() === voiceId) {
+        this.setData({ dropdownOpen: false });
+        return;
+      }
 
       const app = this._app || getApp();
       if (!app || !app.setGlobalVoice) return;
 
+      this.setData({ isSwitchingVoice: true });
       app.setGlobalVoice(voiceId, voiceName, (err) => {
         if (!err) {
           wx.showToast({ title: `已切换: ${voiceName}`, icon: 'success' });
         } else {
           wx.showToast({ title: '切换失败', icon: 'none' });
         }
-        this.setData({ dropdownOpen: false });
+        this.setData({ dropdownOpen: false, isSwitchingVoice: false });
       });
     },
 

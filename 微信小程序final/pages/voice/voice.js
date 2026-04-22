@@ -1,14 +1,15 @@
 const app = getApp();
-const FRONTEND_HIDDEN_VOICE_IDS = new Set(['voice_003']);
 const { toMiniprogramAssetUrl } = require("../../utils/asset-url.js");
 const { isMainDone, markMainDone } = require("../../utils/guide-flow.js");
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 const SENTENCES = [
   '很久很久以前，在森林深处有一座会发光的小木屋。',
   '小熊兜兜决定去寻找传说中的魔法星星。',
   '一只会说话的彩色蝴蝶飞到了他的面前。',
   '他深吸一口气，小声说：今天一定会有好消息。',
-  '月光洒在树叶上，沙沙作响，像在为勇敢的孩子鼓掌。'
+  '月光洒在树叶上，沙沙作响，像在为勇敢的孩子鼓掌。',
+  '清晨的第一缕阳光穿过窗帘，他微笑着说：新的一天开始啦。'
 ];
 
 const MIN_TRAIN_SENTENCE_COUNT = 5;
@@ -27,7 +28,8 @@ function countRecordedSentences(list) {
   return normalizeRecordFiles(list).filter(Boolean).length;
 }
 
-const RECORD_MAX_SECONDS = 15;
+const RECORD_MIN_SECONDS = 4;
+const RECORD_MAX_SECONDS = 35;
 
 const ROLE_PRESETS = [
   { key: 'mom', label: '妈妈', emoji: '👩', quickName: '妈妈温柔讲读' },
@@ -36,6 +38,7 @@ const ROLE_PRESETS = [
 ];
 
 const VOICE_CLONE_DRAFT_KEY = 'voiceCloneDraftState.v1';
+const FIRST_TRAIN_EGG_GUIDE_KEY = 'voiceFirstTrainEggGuideShown.v1';
 const SCIENCE_SWITCH_SECONDS = 18;
 const SCIENCE_MASCOT_IMAGES = [
   '/assets/images/小狗.png',
@@ -64,27 +67,10 @@ const SCIENCE_FALLBACK_TIPS = [
   '科普小课堂：企鹅在陆地上摇摇摆摆，在水里却是游泳高手。',
 ];
 const SCIENCE_INTRO_PREFIX = '在等待声音魔法实战时，我们先来看看一些有趣的知识吧。';
+const TRAIN_UI_TARGET_MS = 2 * 60 * 1000; // 约 2 分钟进度体验
 
 function getApiBase() {
-  // 优先使用全局配置 / 本地存储的 apiBaseUrl，避免真机跑到 127.0.0.1 导致 503
-  try {
-    const norm = (v) => String(v || '').trim().replace(/\/+$/, '');
-    if (app && typeof app.getApiBaseUrl === "function") {
-      const v = app.getApiBaseUrl();
-      const n = norm(v);
-      if (n) return n;
-    }
-    if (app && app.globalData && app.globalData.apiBaseUrl) {
-      const n = norm(app.globalData.apiBaseUrl);
-      if (n) return n;
-    }
-    const stored = wx.getStorageSync("apiBaseUrl");
-    if (stored) {
-      const n = norm(stored);
-      if (n) return n;
-    }
-  } catch (e) {}
-  return 'http://127.0.0.1:9880';
+  return resolveApiBase(app);
 }
 
 Page({
@@ -146,6 +132,7 @@ Page({
     guideHighlight: '',
     guideTitle: '',
     guideDesc: '',
+    showTrainingEggGuide: false,
   },
 
   onLoad() {
@@ -153,6 +140,8 @@ Page({
     this._pollTimer = null;
     this._scienceTimer = null;
     this._restorePrompted = false;
+    this._uploadedLocalPathByIndex = {};
+    this._uploadVersionByIndex = {};
     this.recorderManager = wx.getRecorderManager();
 
     this.recorderManager.onStop((res) => {
@@ -160,9 +149,24 @@ Page({
         clearInterval(this.data.recordTimer);
         this.data.recordTimer = null;
       }
+      const durationFromRecorder = Number((res && res.duration) || 0) / 1000;
+      const durationSec = Math.max(Number(this.data.recordSeconds || 0), durationFromRecorder);
+      const tempFilePath = String((res && res.tempFilePath) || '');
+      if (!tempFilePath || durationSec < RECORD_MIN_SECONDS) {
+        this.setData({
+          isRecording: false,
+          recordSeconds: 0,
+          progress: 0,
+        });
+        wx.showToast({ title: `\u5f55\u97f3\u592a\u77ed\uff0c\u8bf7\u81f3\u5c11\u5f55 ${RECORD_MIN_SECONDS} \u79d2`, icon: 'none' });
+        this.checkCanGenerate();
+        return;
+      }
+
       const curIdx = this.data.sentenceIdx;
+
       const files = normalizeRecordFiles(this.data.recordFiles);
-      files[curIdx] = res.tempFilePath || '';
+      files[curIdx] = tempFilePath;
 
       const allDone = countRecordedSentences(files) >= MIN_TRAIN_SENTENCE_COUNT && files.every(Boolean);
       const nextIdx = Math.min(curIdx + 1, SENTENCES.length - 1);
@@ -176,6 +180,9 @@ Page({
         progress: allDone ? 100 : 0,
         step: allDone ? 2 : 1,
       });
+      // 每句录完后立刻后台上传，训练阶段只补传失败/缺失句子。
+      this._uploadedLocalPathByIndex[curIdx] = '';
+      this._uploadSentenceAfterRecord(curIdx, tempFilePath);
       this.checkCanGenerate();
     });
 
@@ -192,7 +199,7 @@ Page({
       currentSentence: SENTENCES[0],
       audioContext: wx.createInnerAudioContext(),
       scienceAudioContext: wx.createInnerAudioContext(),
-      apiBaseInput: (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : getApiBase()
+      apiBaseInput: resolveApiBase(app)
     });
 
     if (app && app.refreshVoiceList) app.refreshVoiceList();
@@ -209,6 +216,7 @@ Page({
   onHide() {
     this._pageVisible = false;
     this._stopScienceNarration();
+    this._hideTrainingEggGuide();
     this._saveCloneDraft();
   },
 
@@ -342,8 +350,31 @@ Page({
       scienceMascotImage: pickScienceMascotImage(),
       isScienceSpeaking: false,
     });
+    this._uploadedLocalPathByIndex = {};
+    this._uploadVersionByIndex = {};
     this._clearCloneDraft();
     wx.vibrateShort();
+  },
+
+  _uploadSentenceAfterRecord(sentenceIndex, filePath) {
+    const userId = this._buildCloneUserId();
+    const idx = Number(sentenceIndex);
+    if (!filePath || Number.isNaN(idx)) return;
+    const version = Number(this._uploadVersionByIndex[idx] || 0) + 1;
+    this._uploadVersionByIndex[idx] = version;
+    this._uploadSentence({
+      userId,
+      sentenceIndex: idx,
+      sentenceText: SENTENCES[idx] || '',
+      filePath
+    }).then(() => {
+      // 若期间发生重录，以最新版本为准，避免旧上传覆盖状态。
+      if (Number(this._uploadVersionByIndex[idx] || 0) !== version) return;
+      this._uploadedLocalPathByIndex[idx] = filePath;
+    }).catch(() => {
+      if (Number(this._uploadVersionByIndex[idx] || 0) !== version) return;
+      this._uploadedLocalPathByIndex[idx] = '';
+    });
   },
 
   startRecording() {
@@ -371,6 +402,10 @@ Page({
   },
 
   startRealRecord() {
+    if (this.data.recordTimer) {
+      clearInterval(this.data.recordTimer);
+      this.data.recordTimer = null;
+    }
     this.setData({ isRecording: true, recordSeconds: 0, progress: 0 });
 
     this.recorderManager.start({
@@ -393,7 +428,7 @@ Page({
 
   stopRecord() {
     if (!this.data.isRecording) return;
-    if (this.data.recordSeconds < 4) {
+    if (this.data.recordSeconds < RECORD_MIN_SECONDS) {
       wx.showToast({ title: '每段至少录 4 秒，音色会更稳定', icon: 'none' });
       return;
     }
@@ -483,6 +518,7 @@ Page({
       trainingVoiceName: initVoiceName,
       voiceNameInput: initVoiceName,
     });
+    this._maybeShowTrainingEggGuide();
     this._saveCloneDraft();
     wx.vibrateShort();
     this._runTrainPipeline({ voiceName: initVoiceName, allowOverwrite });
@@ -502,6 +538,13 @@ Page({
 
       const taskId = await this._startTrainTask(userId, { voiceName: targetVoiceName, allowOverwrite });
       this.setData({ trainingTaskId: taskId, trainingVoiceName: targetVoiceName });
+      if (app && typeof app.startGlobalTrainingWatch === 'function') {
+        app.startGlobalTrainingWatch({
+          taskId,
+          voiceName: targetVoiceName,
+          source: 'voice_page'
+        });
+      }
       this._saveCloneDraft();
 
       const doneInfo = await this._pollTrainStatus(taskId);
@@ -516,6 +559,9 @@ Page({
       this.completeTraining(voice);
     } catch (err) {
       this._stopScienceNarration();
+      if (app && typeof app.clearGlobalTrainingWatch === 'function') {
+        app.clearGlobalTrainingWatch({ silent: true });
+      }
       this.setData({ isGenerating: false, step: 2 });
       this._saveCloneDraft();
       wx.showToast({ title: (err && err.message) || '训练失败', icon: 'none', duration: 2600 });
@@ -567,9 +613,20 @@ Page({
     for (let i = 0; i < files.length; i += 1) {
       const filePath = files[i];
       if (!filePath) throw new Error(`第 ${i + 1} 句录音缺失`);
-      await this._uploadSentence({ userId, sentenceIndex: i, sentenceText: SENTENCES[i], filePath });
+      if (this._uploadedLocalPathByIndex && this._uploadedLocalPathByIndex[i] === filePath) {
+        const pSkip = 16 + Math.round(((i + 1) / files.length) * 42);
+        this._setTrainProgress(pSkip, `第 ${i + 1} 句已上传，跳过重复上传`);
+        continue;
+      }
+      this._setTrainProgress(Math.max(16, this.data.progress || 0), `第 ${i + 1} 句上传中...`);
+      const uploadResp = await this._uploadSentence({ userId, sentenceIndex: i, sentenceText: SENTENCES[i], filePath });
+      this._uploadedLocalPathByIndex[i] = filePath;
       const p = 16 + Math.round(((i + 1) / files.length) * 42);
-      this._setTrainProgress(p, `第 ${i + 1} 句上传成功`);
+      const purifyHint = uploadResp && uploadResp.purify_enqueued;
+      this._setTrainProgress(
+        p,
+        purifyHint ? `第 ${i + 1} 句上传成功，正在降噪...` : `第 ${i + 1} 句上传成功`
+      );
     }
   },
 
@@ -604,7 +661,28 @@ Page({
   _pollTrainStatus(taskId) {
     const base = getApiBase();
     let attempts = 0;
-    const maxAttempts = 240;
+    const maxAttempts = 320;
+    const startedAt = Date.now();
+    let uiProgress = Math.max(60, Number(this.data.progress || 0));
+
+    const isOomLike = (msg) => {
+      const m = String(msg || '').toLowerCase();
+      return m.includes('outofmemory') || m.includes('cuda out of memory') || m.includes('torch.outofmemoryerror') || m.includes('显存');
+    };
+
+    const nextUiProgress = (backendProgress, elapsedMs) => {
+      // 非匀速进度：前快后慢，约 2 分钟到 95~97%
+      const t = Math.max(0, elapsedMs);
+      const eased = 12 + 84 * (1 - Math.exp(-t / (TRAIN_UI_TARGET_MS * 0.42)));
+      const backendMapped = Number.isFinite(backendProgress)
+        ? (60 + Math.max(0, Math.min(36, backendProgress * 0.36)))
+        : 0;
+      const target = Math.max(eased, backendMapped, uiProgress);
+      // 每轮小步前进，避免“卡住不动”的体感
+      const step = 0.6 + ((attempts % 5) * 0.15);
+      uiProgress = Math.min(97, Math.max(uiProgress + step, target));
+      return uiProgress;
+    };
 
     return new Promise((resolve, reject) => {
       const run = () => {
@@ -621,15 +699,30 @@ Page({
             const data = (res && res.data) || {};
             const status = String(data.status || '').toLowerCase();
             const backendProgress = Number(data.progress || 0);
-            const progress = Math.max(60, Math.min(96, 60 + Math.round(backendProgress * 0.36)));
-            this._setTrainProgress(progress, data.message || '训练进行中...');
+            const elapsedMs = Date.now() - startedAt;
+            const progress = nextUiProgress(backendProgress, elapsedMs);
+            const backendMessage = String(data.message || '').trim();
+            this._setTrainProgress(progress, backendMessage || '训练进行中...');
 
             if (status === 'completed') {
               resolve(data);
               return;
             }
             if (status === 'failed') {
-              reject(new Error(data.message || '训练失败'));
+              if (isOomLike(backendMessage)) {
+                this._setTrainProgress(
+                  Math.min(97, progress + 0.8),
+                  '训练资源紧张，正在自动续训，请稍候...'
+                );
+                this._pollTimer = setTimeout(run, 3500);
+                return;
+              }
+              // 非OOM失败也先保持“训练中”显示，避免前端立刻退出。
+              this._setTrainProgress(
+                Math.min(97, progress + 0.4),
+                '训练任务正在重试中，请稍候...'
+              );
+              this._pollTimer = setTimeout(run, 3500);
               return;
             }
 
@@ -652,8 +745,7 @@ Page({
         url: `${base}/voices`,
         method: 'GET',
         success: (res) => {
-          const voicesRaw = (res && res.data && Array.isArray(res.data.voices)) ? res.data.voices : [];
-          const voices = voicesRaw.filter((v) => !FRONTEND_HIDDEN_VOICE_IDS.has(String((v && v.voice_id) || '').trim()));
+          const voices = (res && res.data && Array.isArray(res.data.voices)) ? res.data.voices : [];
           resolve(voices);
         },
         fail: (err) => reject(this._wrapNetworkError(err, '获取音色失败'))
@@ -681,12 +773,26 @@ Page({
     return candidates[0];
   },
   _setGlobalVoice(voiceId, voiceName) {
-    const directUseVoice = () => new Promise((resolve, reject) => {
-      const vid = String(voiceId || '').trim();
-      if (!vid) {
-        resolve();
+    const vid = String(voiceId || '').trim();
+    if (!vid) return Promise.resolve({ code: 0, message: 'cleared' });
+
+    const current = (app && app.getVoiceId) ? String(app.getVoiceId() || '').trim() : '';
+    if (current && current === vid) {
+      return Promise.resolve({ code: 0, message: 'already_selected', voice_id: vid, skipped: true });
+    }
+
+    return new Promise((resolve, reject) => {
+      if (app && app.setGlobalVoice) {
+        app.setGlobalVoice(vid, voiceName, (err, data) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(data || { code: 0, voice_id: vid });
+        });
         return;
       }
+
       const base = getApiBase();
       wx.request({
         url: `${base}/use_voice`,
@@ -702,22 +808,6 @@ Page({
           reject(new Error(data.message || '切换音色失败'));
         },
         fail: (err) => reject(this._wrapNetworkError(err, '切换音色失败')),
-      });
-    });
-
-    return new Promise((resolve, reject) => {
-      if (!app || !app.setGlobalVoice) {
-        directUseVoice().then(resolve).catch(reject);
-        return;
-      }
-      app.setGlobalVoice(voiceId, voiceName, (err) => {
-        if (!err) {
-          resolve();
-          return;
-        }
-        directUseVoice().then(resolve).catch((fallbackErr) => {
-          reject(fallbackErr || err);
-        });
       });
     });
   },
@@ -751,7 +841,7 @@ Page({
   _wrapNetworkError(err, fallbackTitle) {
     const raw = String((err && err.errMsg) || err || fallbackTitle || '网络请求失败');
     if (this._isDomainListError(raw)) {
-      const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880';
+      const base = resolveApiBase(app);
       const legacy = String(wx.getStorageSync('readalong.apiBaseUrl') || '').trim();
       const tip = legacy && legacy !== base
         ? `当前接口域名未加入白名单：${base}。检测到旧版地址：${legacy}，请切到该地址后重试。`
@@ -868,12 +958,12 @@ Page({
   },
 
   _setTrainProgress(progress, message) {
-    const p = Math.max(0, Math.min(100, Number(progress || 0)));
+    const p = Math.round(Math.max(0, Math.min(100, Number(progress || 0))));
     const circleOffset = 351.858 - (351.858 * p) / 100;
     this.setData({
       progress: p,
       circleOffset,
-      trainingMessage: '正在施展声音魔法'
+      trainingMessage: String(message || '正在施展声音魔法')
     });
     this._saveCloneDraft();
   },
@@ -888,6 +978,10 @@ Page({
   completeTraining(voice) {
     this._clearPoll();
     this._stopScienceNarration();
+    this._hideTrainingEggGuide();
+    if (app && typeof app.clearGlobalTrainingWatch === 'function') {
+      app.clearGlobalTrainingWatch({ silent: true });
+    }
     app.globalData.stars = (app.globalData.stars || 0) + 10;
     app.globalData.clonedVoices = (app.globalData.clonedVoices || 0) + 1;
 
@@ -1182,9 +1276,17 @@ Page({
     const taskId = String(this.data.trainingTaskId || '').trim();
     if (!taskId) return;
     this.setData({ step: 3, isGenerating: true });
+    this._maybeShowTrainingEggGuide();
     await this._prepareScienceTips();
     this._startScienceNarration();
     try {
+      if (app && typeof app.startGlobalTrainingWatch === 'function') {
+        app.startGlobalTrainingWatch({
+          taskId,
+          voiceName: this.data.trainingVoiceName || this._resolveInitialVoiceName(),
+          source: 'voice_page_resume'
+        });
+      }
       const doneInfo = await this._pollTrainStatus(taskId);
       const voice = await this._resolveTrainedVoice(doneInfo, this.data.trainingVoiceName || this._resolveInitialVoiceName());
       if (!voice || !voice.voice_id) throw new Error('训练完成但未找到音色');
@@ -1192,9 +1294,34 @@ Page({
       this.completeTraining(voice);
     } catch (err) {
       this._stopScienceNarration();
+      if (app && typeof app.clearGlobalTrainingWatch === 'function') {
+        app.clearGlobalTrainingWatch({ silent: true });
+      }
       this.setData({ isGenerating: false, step: 2 });
       wx.showToast({ title: (err && err.message) || '恢复训练失败', icon: 'none' });
     }
+  },
+
+  _isFirstTrainingGuideNeeded() {
+    let guideShown = false;
+    try { guideShown = !!wx.getStorageSync(FIRST_TRAIN_EGG_GUIDE_KEY); } catch (e) {}
+    return !guideShown;
+  },
+
+  _maybeShowTrainingEggGuide() {
+    if (!this.data.isGenerating && this.data.step !== 3) return;
+    this.setData({ showTrainingEggGuide: true });
+  },
+
+  _hideTrainingEggGuide() {
+    if (!this.data.showTrainingEggGuide) return;
+    this.setData({ showTrainingEggGuide: false });
+  },
+
+  onTapTrainingEggGuide() {
+    try { wx.setStorageSync(FIRST_TRAIN_EGG_GUIDE_KEY, 1); } catch (e) {}
+    this._hideTrainingEggGuide();
+    wx.navigateTo({ url: '/pages/pet-system/pet-system' });
   },
 
   goVoiceManager() {

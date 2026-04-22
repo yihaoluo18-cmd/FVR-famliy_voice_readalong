@@ -48,18 +48,18 @@ if errorlevel 1 exit /b 1
 
 if "%CUDA_PIP%"=="1" (
   echo [3/4] CUDA_PIP=1：预装 PyTorch CUDA 12.4 wheel ...
-  "venv\Scripts\pip.exe" install torch==2.6.0 torchaudio==2.6.0 triton==3.2.0 --index-url https://download.pytorch.org/whl/cu124
+  "venv\Scripts\pip.exe" install torch==2.6.0 torchaudio==2.6.0 triton==3.2.0 --index-url https://download.pytorch.org/whl/cu124 --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
   if errorlevel 1 exit /b 1
 ) else (
   echo [3/4] 未设置 CUDA_PIP=1，跳过 CUDA 预装。
 )
 
 echo [4/4] 安装依赖 ...
-if exist "requirements-lock.txt" (
-  "venv\Scripts\pip.exe" install -r requirements-lock.txt
-) else (
-  "venv\Scripts\pip.exe" install -r env\requirements.txt
+if not exist "env\requirements.txt" (
+  echo [错误] 未找到 env\requirements.txt（请在发布前用运行环境执行 pip freeze ^> env\requirements.txt）
+  exit /b 1
 )
+"venv\Scripts\pip.exe" install -r env\requirements.txt
 if errorlevel 1 exit /b 1
 
 echo.

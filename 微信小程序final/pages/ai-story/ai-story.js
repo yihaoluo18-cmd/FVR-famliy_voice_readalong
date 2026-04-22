@@ -1,8 +1,8 @@
 const app = getApp();
-const { buildAiStoryPrompt, PROMPT_EDIT_HINT } = require('../../utils/ai-story-prompt.js');
+const { resolveApiBase } = require('../../utils/api-base.js');
 
 function getApiBase() {
-  return (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880';
+  return resolveApiBase(app);
 }
 
 const AI_STORY_ENDPOINTS = [
@@ -31,6 +31,10 @@ Page({
     totalPages: 0,
     currentPageText: '',
     imageCaption: '',
+    ageDescription: '',
+    captionFromQwen: true,
+    degraded: false,
+    degradedHint: '',
     aiUsed: false,
   },
 
@@ -43,7 +47,6 @@ Page({
       else if (ageNum >= 6) ageIndex = 2;
     }
     this.setData({ ageIndex });
-    this._promptEditHint = PROMPT_EDIT_HINT;
   },
 
   goBack() {
@@ -85,7 +88,7 @@ Page({
   _wrapNetworkError(err, fallbackTitle) {
     const raw = String((err && err.errMsg) || err || fallbackTitle || '网络请求失败');
     if (this._isDomainListError(raw)) {
-      const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880';
+      const base = resolveApiBase(app);
       wx.showModal({
         title: '域名未在白名单',
         content: `当前接口域名未加入白名单：${base}。请在小程序后台开发设置-服务器域名添加该域名。`,
@@ -208,14 +211,20 @@ Page({
 
     const pagesRaw = payload.pages || payload.story_pages || (payload.story && payload.story.pages) || [];
     const pages = Array.isArray(pagesRaw) ? pagesRaw.filter(Boolean).map((t) => String(t)) : [];
-    if (!pages.length) {
-      throw new Error('故事内容为空，请重试');
-    }
+    const degradedReasons = Array.isArray(payload.degraded_reasons)
+      ? payload.degraded_reasons.map((x) => String(x || ''))
+      : (Array.isArray(payload.meta && payload.meta.degraded_reasons)
+        ? payload.meta.degraded_reasons.map((x) => String(x || ''))
+        : []);
 
     return {
       title: String(payload.title || (payload.story && payload.story.title) || '宝宝的魔法冒险'),
       pages,
       caption: String(payload.caption || ''),
+      age_description: String(payload.age_description || payload.ageDescription || ''),
+      caption_from_qwen: payload.caption_from_qwen !== undefined ? !!payload.caption_from_qwen : true,
+      degraded: payload.degraded === true || (payload.meta && payload.meta.degraded === true),
+      degraded_reasons: degradedReasons,
       ai_used: payload.ai_used !== undefined ? !!payload.ai_used : true,
     };
   },
@@ -369,17 +378,6 @@ Page({
     return uniq.slice(0, 10);
   },
 
-  _buildAlignmentPrompt(caption) {
-    const age = this._getSelectedAgeLabel();
-    const normalizedCaption = this._normalizeCaption(caption);
-    const keywords = this._extractCaptionKeywords(normalizedCaption);
-    return buildAiStoryPrompt({
-      age,
-      caption: normalizedCaption || '无',
-      keywords,
-    });
-  },
-
   _calcCharOverlapRatio(caption, storyText) {
     const a = String(caption || '').replace(/\s+/g, '');
     const b = String(storyText || '').replace(/\s+/g, '');
@@ -452,21 +450,56 @@ Page({
   },
 
   _buildStoryFromCaption(caption) {
-    const age = this._getSelectedAgeLabel();
-    const hero = age === '2-3岁' ? '小宝贝' : (age === '6-8岁' ? '小小探险家' : '小朋友');
-    const safeCaption = String(caption || '一张温暖的照片').replace(/[。！!？?]+$/g, '').slice(0, 80);
+    const safeCaption = String(caption || '一张主体清晰的照片').replace(/[。！!？?]+$/g, '').slice(0, 80);
     const pages = [
-      `今天，${hero}看见了${safeCaption}。`,
-      `${hero}轻轻地说：“原来这里藏着一个有趣的小故事！”`,
-      `接着，${hero}认真观察，发现每个细节都在告诉我们要勇敢和善良。`,
-      `最后，${hero}把这段经历讲给家人听，大家都露出了开心的笑容。`
+      `画面里，${safeCaption}。`,
+      '人物在这个场景中继续活动，动作和神情都和画面保持一致。',
+      '周围的光线、颜色和位置关系让故事更清晰，也更有临场感。',
+      '最后，故事停在一个温暖的瞬间，整幅画面静静落幕。'
     ];
     return {
-      title: `${hero}的照片奇遇记`,
+      title: '真实画面小故事',
       pages,
       caption: safeCaption,
       ai_used: false,
     };
+  },
+
+  _buildPagesFromAgeDescription(ageDescription, caption) {
+    const lines = String(ageDescription || '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(/[。！？!?；;]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length >= 4)
+      .slice(0, 8)
+      .map((s) => (/[。！？!?]$/.test(s) ? s : `${s}。`));
+
+    if (lines.length >= 2) return lines;
+
+    const fallback = this._buildStoryFromCaption(caption || '一张主体清晰的照片');
+    return Array.isArray(fallback.pages) ? fallback.pages : [];
+  },
+
+  _buildDegradedHint(payload) {
+    const reasons = Array.isArray(payload && payload.degraded_reasons)
+      ? payload.degraded_reasons.map((x) => String(x || ''))
+      : [];
+
+    if ((payload && payload.caption_from_qwen === false) || reasons.includes('caption_not_from_qwen')) {
+      return '当前图片描述未走Qwen识图，已启用降级模式，建议稍后重试。';
+    }
+    if (reasons.includes('provider_arrearage')) {
+      return 'AI服务账号当前不可用（可能欠费或停用），请恢复云端账号后再试。';
+    }
+    if (reasons.includes('provider_auth_error')) {
+      return 'AI服务密钥无效或权限不足，请检查后端配置。';
+    }
+    if (reasons.includes('story_llm_unavailable')) {
+      return '当前故事模型暂不可用，页面内容已使用规则生成。';
+    }
+    return '';
   },
 
   async _generateStoryFromImage(imagePath) {
@@ -482,12 +515,8 @@ Page({
       captionErr = e || null;
     }
 
-    const alignmentPrompt = this._buildAlignmentPrompt(caption);
-    const alignKeywords = this._extractCaptionKeywords(caption).join(',');
     const extraFormData = {
       image_caption: caption,
-      custom_prompt: alignmentPrompt,
-      align_keywords: alignKeywords,
       require_image_faithfulness: '1',
       alignment_mode: 'strict',
     };
@@ -499,21 +528,54 @@ Page({
         const normalized = this._normalizeStoryPayload(raw);
         const serverCaption = this._normalizeCaption(normalized.caption || '');
         const effectiveCaption = caption || (this._isWeakCaption(serverCaption) ? '' : serverCaption);
+        const pagesFromDesc = this._buildPagesFromAgeDescription(normalized.age_description, effectiveCaption || serverCaption || caption);
+        const pages = pagesFromDesc.length ? pagesFromDesc : (Array.isArray(normalized.pages) ? normalized.pages : []);
 
-        if (!effectiveCaption) {
+        if (!pages.length) {
+          throw this._makeReasonError('故事内容为空，请重试', 'ALIGNMENT_BLOCKED');
+        }
+
+        if (!effectiveCaption && !normalized.age_description) {
           throw this._makeReasonError('图片理解失败，已阻止生成无关故事，请重试', 'CAPTION_WEAK');
         }
 
-        const alignmentScore = this._scoreStoryAlignment(normalized.pages, effectiveCaption);
-        if (alignmentScore < 0.22) {
-          return this._buildStoryFromCaption(effectiveCaption);
+        const degradedReasons = Array.isArray(normalized.degraded_reasons) ? normalized.degraded_reasons.slice() : [];
+        if (normalized.caption_from_qwen === false && degradedReasons.indexOf('caption_not_from_qwen') < 0) {
+          degradedReasons.push('caption_not_from_qwen');
         }
-        if (alignmentScore < 0.45) {
-          return this._anchorStoryToCaption(normalized, effectiveCaption);
+
+        if (effectiveCaption) {
+          const alignmentScore = this._scoreStoryAlignment(pages, effectiveCaption);
+          if (alignmentScore < 0.22) {
+            const fallbackStory = this._buildStoryFromCaption(effectiveCaption);
+            return {
+              ...fallbackStory,
+              age_description: normalized.age_description,
+              caption_from_qwen: normalized.caption_from_qwen,
+              degraded: true,
+              degraded_reasons: degradedReasons.concat(['alignment_low']),
+            };
+          }
+          if (alignmentScore < 0.45) {
+            const anchored = this._anchorStoryToCaption({ ...normalized, pages }, effectiveCaption);
+            return {
+              ...anchored,
+              caption: effectiveCaption,
+              age_description: normalized.age_description,
+              caption_from_qwen: normalized.caption_from_qwen,
+              degraded: true,
+              degraded_reasons: degradedReasons.concat(['alignment_medium']),
+              ai_used: normalized.ai_used,
+            };
+          }
         }
+
         return {
           ...normalized,
-          caption: effectiveCaption,
+          pages,
+          caption: effectiveCaption || serverCaption || caption,
+          degraded: !!normalized.degraded || degradedReasons.length > 0,
+          degraded_reasons: degradedReasons,
         };
       } catch (err) {
         lastErr = err;
@@ -524,7 +586,14 @@ Page({
     if (allNotFound || (lastErr && String(lastErr.message || '').includes('接口不存在'))) {
       try {
         const fallbackCaption = caption || (await this._fetchImageCaption(imagePath));
-        return this._buildStoryFromCaption(fallbackCaption);
+        const fallbackStory = this._buildStoryFromCaption(fallbackCaption);
+        return {
+          ...fallbackStory,
+          age_description: '',
+          caption_from_qwen: false,
+          degraded: true,
+          degraded_reasons: ['story_endpoint_missing'],
+        };
       } catch (e) {
         if (captionErr && captionErr.reason === 'CAPTION_ENDPOINT_MISSING') {
           throw this._makeReasonError('识图与绘本接口均不可用，请先检查后端路由', 'CAPTION_ENDPOINT_MISSING');
@@ -562,6 +631,10 @@ Page({
       totalPages: 0,
       currentPageText: '',
       imageCaption: '',
+      ageDescription: '',
+      captionFromQwen: true,
+      degraded: false,
+      degradedHint: '',
       aiUsed: false,
     });
     wx.vibrateShort();
@@ -569,8 +642,15 @@ Page({
 
     try {
       const data = await this._generateStoryFromImage(imagePath);
-      const pages = Array.isArray(data.pages) ? data.pages.filter(Boolean).map((t) => ({ text: String(t) })) : [];
+      const pagesRaw = this._buildPagesFromAgeDescription(data.age_description, data.caption || '');
+      const effectivePages = pagesRaw.length
+        ? pagesRaw
+        : (Array.isArray(data.pages) ? data.pages.filter(Boolean).map((t) => String(t)) : []);
+      const pages = effectivePages.map((t) => ({ text: String(t) }));
       if (!pages.length) throw new Error('故事内容为空，请重试');
+
+      const degradedHint = this._buildDegradedHint(data);
+      const degraded = !!degradedHint || !!data.degraded || data.caption_from_qwen === false;
 
       this._stopProgress(100);
       this.setData({
@@ -582,8 +662,20 @@ Page({
         currentPage: 0,
         currentPageText: pages[0].text,
         imageCaption: String(data.caption || ''),
+        ageDescription: String(data.age_description || ''),
+        captionFromQwen: data.caption_from_qwen !== false,
+        degraded,
+        degradedHint,
         aiUsed: !!data.ai_used,
       });
+
+      if (degradedHint) {
+        wx.showModal({
+          title: '已启用降级模式',
+          content: degradedHint,
+          showCancel: false,
+        });
+      }
       wx.vibrateShort();
     } catch (err) {
       this._stopProgress(0);
@@ -622,6 +714,10 @@ Page({
       coverImage: this.data.uploadedImage,
       pages: this.data.storyPages,
       caption: this.data.imageCaption,
+      ageDescription: String(this.data.ageDescription || ''),
+      captionFromQwen: !!this.data.captionFromQwen,
+      degraded: !!this.data.degraded,
+      degradedHint: String(this.data.degradedHint || ''),
       age: this._getSelectedAgeLabel(),
       aiUsed: !!this.data.aiUsed,
       currentPage: Number(this.data.currentPage || 0),
@@ -671,6 +767,10 @@ Page({
       totalPages: 0,
       currentPageText: '',
       imageCaption: '',
+      ageDescription: '',
+      captionFromQwen: true,
+      degraded: false,
+      degradedHint: '',
       aiUsed: false,
     });
   },

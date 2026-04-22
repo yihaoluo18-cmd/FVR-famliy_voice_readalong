@@ -31,7 +31,8 @@
             <text class="stage-tag">{{stageText}}</text>
           </view>
 
-          <view class="tuning-entry-wrap">
+          <!-- 线上隐藏：调参仅开发联调用 -->
+          <view class="tuning-entry-wrap" wx:if="{{false}}">
             <view class="tuning-entry" bindtap="toggleTuning">{{showTuning ? '关闭调参' : '调参'}}</view>
           </view>
 
@@ -358,45 +359,51 @@
 
     <view class="section status-store">
       <text class="section-title">状态存放</text>
-      <view class="float-balls-row">
-        <view class="status-ball-item">
-          <view class="status-ball status-ball-food">
-            <view class="status-ball-liquid" style="height: {{hungerLevel}}%;"></view>
-            <view class="status-ball-liquid-wave" style="height: {{hungerLevel}}%;"></view>
-            <view class="status-ball-gloss"></view>
-            <text class="status-ball-emoji">🍎</text>
+      <view class="pet-status-panel">
+        <view class="pet-status-grid">
+          <view class="pet-status-item">
+            <view class="pet-status-circle">
+              <view class="pet-status-circle-bg"></view>
+              <view class="pet-status-circle-progress" style="--progress: {{hungerLevel > 0 ? hungerLevel : 10}}%; --color: #f59e0b;"></view>
+              <view class="pet-status-circle-content">
+                <image class="pet-mini-icon" src="../../assets/icons/status-food.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="pet-status-percent">{{hungerLevel}}%</text>
           </view>
-          <text class="status-ball-label">食物 {{hungerLevel}}分</text>
-        </view>
 
-        <view class="status-ball-item">
-          <view class="status-ball status-ball-clean">
-            <view class="status-ball-liquid" style="height: {{cleanLevel}}%;"></view>
-            <view class="status-ball-liquid-wave" style="height: {{cleanLevel}}%;"></view>
-            <view class="status-ball-gloss"></view>
-            <text class="status-ball-emoji">🧼</text>
+          <view class="pet-status-item">
+            <view class="pet-status-circle">
+              <view class="pet-status-circle-bg"></view>
+              <view class="pet-status-circle-progress" style="--progress: {{cleanLevel > 0 ? cleanLevel : 10}}%; --color: #ec4899;"></view>
+              <view class="pet-status-circle-content">
+                <image class="pet-mini-icon" src="../../assets/icons/status-clean.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="pet-status-percent">{{cleanLevel}}%</text>
           </view>
-          <text class="status-ball-label">清洁 {{cleanLevel}}分</text>
-        </view>
 
-        <view class="status-ball-item">
-          <view class="status-ball status-ball-mood">
-            <view class="status-ball-liquid" style="height: {{moodLevel}}%;"></view>
-            <view class="status-ball-liquid-wave" style="height: {{moodLevel}}%;"></view>
-            <view class="status-ball-gloss"></view>
-            <text class="status-ball-emoji">🎾</text>
+          <view class="pet-status-item">
+            <view class="pet-status-circle">
+              <view class="pet-status-circle-bg"></view>
+              <view class="pet-status-circle-progress" style="--progress: {{moodLevel > 0 ? moodLevel : 10}}%; --color: #f0a8c0;"></view>
+              <view class="pet-status-circle-content">
+                <image class="pet-mini-icon" src="../../assets/icons/status-fun.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="pet-status-percent">{{moodLevel}}%</text>
           </view>
-          <text class="status-ball-label">开心 {{moodLevel}}分</text>
-        </view>
 
-        <view class="status-ball-item">
-          <view class="status-ball status-ball-sleepy">
-            <view class="status-ball-liquid" style="height: {{sleepyLevel}}%;"></view>
-            <view class="status-ball-liquid-wave" style="height: {{sleepyLevel}}%;"></view>
-            <view class="status-ball-gloss"></view>
-            <text class="status-ball-emoji">🛏️</text>
+          <view class="pet-status-item">
+            <view class="pet-status-circle">
+              <view class="pet-status-circle-bg"></view>
+              <view class="pet-status-circle-progress" style="--progress: {{sleepyLevel > 0 ? sleepyLevel : 10}}%; --color: #fde68a;"></view>
+              <view class="pet-status-circle-content">
+                <image class="pet-mini-icon" src="../../assets/icons/status-sleep.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="pet-status-percent">{{sleepyLevel}}%</text>
           </view>
-          <text class="status-ball-label">困意 {{sleepyLevel}}分</text>
         </view>
       </view>
     </view>

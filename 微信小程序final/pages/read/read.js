@@ -1,4 +1,5 @@
 const app = getApp();
+const { resolveApiBase } = require("../../utils/api-base.js");
 const { reportEggProgress, reportCompanionReadXp } = require("../../utils/pet-growth.js");
 const { PETS_CATALOG, getPetById } = require("../../utils/pets-catalog.js");
 const { toMiniprogramAssetUrl } = require("../../utils/asset-url.js");
@@ -104,7 +105,7 @@ Page({
 
   loadLibraryBook(bookId) {
     if (!bookId) return
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     this.setData({ bookLoading: true, bookError: '' })
 
     wx.request({
@@ -414,6 +415,12 @@ Page({
   onSelectReadVoice(e) {
     const voiceId = String((e.currentTarget && e.currentTarget.dataset && e.currentTarget.dataset.voiceId) || "").trim();
     if (!voiceId) return;
+
+    const current = String((this.data && this.data.currentVoiceId) || '').trim();
+    if (current && current === voiceId) {
+      return;
+    }
+
     const row = (this.data.voiceOptions || []).find((x) => x.id === voiceId);
     const voiceName = row ? row.name : "基础音色（默认）";
     if (!app || !app.setGlobalVoice) return;
@@ -496,27 +503,6 @@ Page({
     return this._getAnyAvailableVoiceId();
   },
 
-  _sanitizeReadableVoiceId(voiceId) {
-    const raw = String(voiceId || '').trim();
-    const gd = (app && app.globalData) ? app.globalData : {};
-    const list = Array.isArray(gd.voiceList) ? gd.voiceList : [];
-    const validIds = new Set(
-      list
-        .map((v) => String((v && v.voice_id) || '').trim())
-        .filter(Boolean)
-    );
-
-    if (raw && validIds.has(raw)) return raw;
-
-    // 脏值/过期值回退到可用音色，避免请求里带异常 voice_id 导致 400。
-    const fallback = this._getAnyAvailableVoiceId();
-    if (fallback && validIds.has(fallback)) return fallback;
-
-    // voiceList 为空时，尽量回退基础音色，避免空值阻断播放流程。
-    if (raw) return raw;
-    return 'voice_001';
-  },
-
   _ensureVoiceReady() {
     return new Promise((resolve) => {
       const voiceId = this._resolveVoiceId();
@@ -553,8 +539,7 @@ Page({
       ? String(app.globalData.globalVoiceName)
       : '基础音色（默认）';
 
-    const pickedRawId = roleVoiceId || globalVoiceId || roleBase.id || this._getAnyAvailableVoiceId() || '';
-    const pickedId = this._sanitizeReadableVoiceId(pickedRawId);
+    const pickedId = roleVoiceId || globalVoiceId || roleBase.id || this._getAnyAvailableVoiceId() || '';
     const pickedMeta = this._findVoiceMetaById(pickedId);
     return {
       voiceId: pickedId,
@@ -630,6 +615,18 @@ Page({
       .replace(/[ \t]+/g, '')
       .replace(/\n+/g, '\n')
       .trim()
+  },
+
+  _buildBookPageTtsContext() {
+    const bookId = String((this.data && this.data.bookId) || '').trim()
+    const pageIndex = Math.max(0, Number((this.data && this.data.pageIndex) || 0) || 0)
+    if (!bookId) return null
+    return {
+      book_id: bookId,
+      book_title: bookId,
+      page_index: pageIndex,
+      use_book_page_text: true,
+    }
   },
 
   _splitLongByMinorPunc(part, maxLen) {
@@ -751,73 +748,18 @@ Page({
     if (!voiceId) return []
     const isBuiltin = this._isBuiltinVoice(voiceId)
     const isLongText = this._isLongReadTextForStreaming(text)
-    const chunkLen = isLongText ? (isBuiltin ? 90 : 84) : (isBuiltin ? 108 : 96)
+    const chunkLen = isLongText ? (isBuiltin ? 72 : 64) : (isBuiltin ? 92 : 80)
     const chunks = this._splitReadText(text, chunkLen)
     return chunks.map((chunk) => this._buildTtsCandidateUrls(chunk, voiceId, isLongText)).filter((x) => Array.isArray(x) && x.length)
   },
 
   _switchAudioSource(url) {
     if (!this._audio || !url) return
-    const reqId = this._nextPlayRequestId()
-    this._activePlayRequestId = reqId
-    console.log('[read-audio] switch start', { reqId, rawUrl: url })
     // 手动切换 src 时，短时间忽略 stop 引发的 ended/error 伪事件，避免跳段漏读。
     this._ignoreAudioEventsUntil = Date.now() + 500
     try { this._audio.stop() } catch (e) {}
-
-    this._resolvePlayableAudioSrc(url, reqId).then((playSrc) => {
-      if (!this.data.isPlaying) return
-      if (reqId !== this._activePlayRequestId) return
-      this._currentAudioRequestId = reqId
-      this._currentAudioSrc = playSrc
-      console.log('[read-audio] switch ready', { reqId, playSrc })
-      // stop -> set src -> play 需要错开一个 tick，避免竞态
-      setTimeout(() => {
-        if (!this.data.isPlaying) return
-        if (reqId !== this._activePlayRequestId) return
-        this._audio.src = playSrc
-        this._audio.play()
-      }, 0)
-    }).catch((err) => {
-      console.log('音频源切换失败', { reqId, url, err })
-    })
-  },
-
-  _nextPlayRequestId() {
-    const n = Number(this._playRequestSeq || 0) + 1
-    this._playRequestSeq = n
-    return `play_${Date.now()}_${n}`
-  },
-
-  _resolvePlayableAudioSrc(url, reqId) {
-    const abs = this._toAbsoluteAudioUrl(url)
-    if (!abs) return Promise.reject(new Error('empty audio url'))
-    if (!/^https?:\/\//i.test(abs)) return Promise.resolve(abs)
-
-    if (this._downloadTask && this._downloadTask.abort) {
-      try { this._downloadTask.abort() } catch (e) {}
-    }
-
-    return new Promise((resolve) => {
-      this._downloadTask = wx.downloadFile({
-        url: abs,
-        timeout: 45000,
-        success: (res) => {
-          if (reqId !== this._activePlayRequestId) return resolve(abs)
-          if (res && Number(res.statusCode) === 200 && res.tempFilePath) {
-            console.log('[read-audio] download ok', { reqId, statusCode: res.statusCode, tempFilePath: res.tempFilePath })
-            resolve(String(res.tempFilePath))
-            return
-          }
-          console.log('[read-audio] download fallback url', { reqId, statusCode: res && res.statusCode, abs })
-          resolve(abs)
-        },
-        fail: (err) => {
-          console.log('[read-audio] download fail fallback url', { reqId, abs, err })
-          resolve(abs)
-        },
-      })
-    })
+    this._audio.src = url
+    this._audio.play()
   },
 
   _isCloneVoice(voiceId) {
@@ -828,7 +770,7 @@ Page({
     const u = String(rawUrl || '').trim()
     if (!u) return ''
     if (/^https?:\/\//i.test(u)) return u
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     if (u.startsWith('/')) return `${base}${u}`
     return `${base}/${u}`
   },
@@ -836,27 +778,52 @@ Page({
   _requestOneShotAudioUrl(text, voiceId, safer = false) {
     const t = this._normalizeReadTextForTts(text)
     if (!t || !voiceId) return Promise.reject(new Error('invalid one-shot input'))
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
+    const isCloneVoice = this._isCloneVoice(voiceId)
+    const isLongText = this._isLongReadTextForStreaming(t)
+    const pageCtx = this._buildBookPageTtsContext() || {}
     const data = safer ? {
       voice_id: voiceId,
       text: t,
       text_language: 'zh',
       return_url: true,
-      top_k: 14,
-      top_p: 0.78,
-      temperature: 0.32,
-      sample_steps: 38,
-      speed: 1.0,
+          ...pageCtx,
+      max_ref_samples: isCloneVoice ? 6 : 3,
+      max_aux_refs: isCloneVoice ? 2 : 1,
+      top_k: isCloneVoice ? 14 : 14,
+      top_p: isCloneVoice ? 0.70 : 0.78,
+      temperature: isCloneVoice ? 0.22 : 0.32,
+      repetition_penalty: isCloneVoice ? 1.20 : 1.12,
+      sample_steps: isCloneVoice ? (isLongText ? 40 : 44) : 38,
+      speed: isCloneVoice ? (isLongText ? 1.0 : 0.98) : 1.0,
+      hq_user_voice_asr_rerank: isCloneVoice ? true : undefined,
+      hq_user_voice_asr_min_ratio: isCloneVoice ? 0.72 : undefined,
+      hq_user_voice_asr_timeout_sec: isCloneVoice ? 22 : undefined,
+      hq_user_voice_force_policy: isCloneVoice ? (!isLongText) : undefined,
+      hq_user_voice_long_trim: isCloneVoice ? false : undefined,
+      hq_user_voice_retry_low_energy: isCloneVoice ? true : undefined,
+      hq_user_voice_allow_cache_hint: isCloneVoice ? false : undefined,
     } : {
       voice_id: voiceId,
       text: t,
       text_language: 'zh',
       return_url: true,
-      top_k: 16,
-      top_p: 0.82,
-      temperature: 0.34,
-      sample_steps: 36,
-      speed: 1.0,
+      ...pageCtx,
+      max_ref_samples: isCloneVoice ? 6 : 3,
+      max_aux_refs: isCloneVoice ? 2 : 1,
+      top_k: isCloneVoice ? 15 : 16,
+      top_p: isCloneVoice ? 0.72 : 0.82,
+      temperature: isCloneVoice ? 0.24 : 0.34,
+      repetition_penalty: isCloneVoice ? 1.18 : 1.12,
+      sample_steps: isCloneVoice ? (isLongText ? 36 : 40) : 36,
+      speed: isCloneVoice ? (isLongText ? 1.0 : 0.99) : 1.0,
+      hq_user_voice_asr_rerank: isCloneVoice ? true : undefined,
+      hq_user_voice_asr_min_ratio: isCloneVoice ? 0.70 : undefined,
+      hq_user_voice_asr_timeout_sec: isCloneVoice ? 20 : undefined,
+      hq_user_voice_force_policy: isCloneVoice ? (!isLongText) : undefined,
+      hq_user_voice_long_trim: isCloneVoice ? false : undefined,
+      hq_user_voice_retry_low_energy: isCloneVoice ? true : undefined,
+      hq_user_voice_allow_cache_hint: isCloneVoice ? false : undefined,
     }
 
     return new Promise((resolve, reject) => {
@@ -883,6 +850,7 @@ Page({
       })
     })
   },
+
 
   _startOneShotPlayback(text, voiceId, safer = false) {
     return this._requestOneShotAudioUrl(text, voiceId, safer).then((url) => {
@@ -938,10 +906,13 @@ Page({
   _requestBufferedTask(text, voiceId) {
     const t = this._normalizeReadTextForTts(text)
     if (!t || !voiceId) return Promise.reject(new Error('invalid buffered input'))
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     const isLongText = this._isLongReadTextForStreaming(t)
     const isVeryLongText = this._isVeryLongReadText(t)
-    const bufferSegments = 1
+    const isCloneVoice = this._isCloneVoice(voiceId)
+    const bufferSegments = isVeryLongText ? 3 : (isLongText ? 2 : 1)
+    const cloneLongCutPunc = '。？！；：!?;:…'
+    const pageCtx = this._buildBookPageTtsContext() || {}
     return new Promise((resolve, reject) => {
       wx.request({
         url: `${base}/synthesize`,
@@ -952,18 +923,28 @@ Page({
           text: t,
           text_language: 'zh',
           media_type: 'wav',
+          ...pageCtx,
           buffered: true,
           buffer_segments: bufferSegments,
-          max_ref_samples: 3,
-          max_aux_refs: 1,
-          top_k: 16,
-          top_p: 0.82,
-          temperature: 0.34,
+          max_ref_samples: isCloneVoice ? 6 : 3,
+          max_aux_refs: isCloneVoice ? 2 : 1,
+          top_k: isCloneVoice ? 15 : 16,
+          top_p: isCloneVoice ? 0.72 : 0.82,
+          temperature: isCloneVoice ? 0.24 : 0.34,
+          repetition_penalty: isCloneVoice ? 1.18 : 1.12,
           long_text_stream: isLongText,
-          cut_punc: isLongText ? '，。？！；：,.!?;:、…' : undefined,
-          max_text_len: isLongText ? 120 : undefined,
-          sample_steps: 34,
-          speed: 1.0,
+          cut_punc: isLongText ? (isCloneVoice ? cloneLongCutPunc : '，。？！；：,.!?;:、…') : undefined,
+          max_text_len: isLongText ? (isCloneVoice ? 84 : 110) : undefined,
+          sample_steps: isCloneVoice ? (isLongText ? 36 : 40) : 34,
+          speed: isCloneVoice ? (isLongText ? 1.0 : 0.99) : 1.0,
+          strict_segmented: isCloneVoice ? false : undefined,
+          hq_user_voice_asr_rerank: isCloneVoice ? true : undefined,
+          hq_user_voice_asr_min_ratio: isCloneVoice ? 0.72 : undefined,
+          hq_user_voice_asr_timeout_sec: isCloneVoice ? 22 : undefined,
+          hq_user_voice_force_policy: isCloneVoice ? (!isLongText) : undefined,
+          hq_user_voice_long_trim: isCloneVoice ? false : undefined,
+          hq_user_voice_retry_low_energy: isCloneVoice ? true : undefined,
+          hq_user_voice_allow_cache_hint: isCloneVoice ? false : undefined,
         },
         success: (res) => {
           const data = (res && res.data) || {}
@@ -979,8 +960,10 @@ Page({
     })
   },
 
-  _fetchBufferedSegment(taskId, index, retry = 0, maxRetry = 40) {
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+
+
+  _fetchBufferedSegment(taskId, index, retry = 0, maxRetry = 100) {
+    const base = resolveApiBase(app)
     return new Promise((resolve, reject) => {
       wx.request({
         url: `${base}/synthesize/buffered/segment?task_id=${encodeURIComponent(taskId)}&index=${encodeURIComponent(index)}`,
@@ -992,13 +975,14 @@ Page({
             return
           }
           if (res.statusCode === 202 || Number(data.code) === 1) {
-            if (retry >= Number(maxRetry || 40)) {
+            if (retry >= Number(maxRetry || 100)) {
               reject(new Error('buffered 分片等待超时'))
               return
             }
+            const waitMs = retry < 16 ? 220 : 320
             setTimeout(() => {
               this._fetchBufferedSegment(taskId, index, retry + 1, maxRetry).then(resolve).catch(reject)
-            }, 220)
+            }, waitMs)
             return
           }
           reject(new Error(data.message || 'buffered 分片获取失败'))
@@ -1008,8 +992,9 @@ Page({
     })
   },
 
+
   _fetchBufferedStatus(taskId) {
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     return new Promise((resolve, reject) => {
       wx.request({
         url: `${base}/synthesize/buffered/status?task_id=${encodeURIComponent(taskId)}`,
@@ -1062,7 +1047,7 @@ Page({
   },
 
   _fetchBufferedMerged(taskId, retry = 0) {
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     return new Promise((resolve, reject) => {
       wx.request({
         url: `${base}/synthesize/buffered/merged?task_id=${encodeURIComponent(taskId)}`,
@@ -1309,9 +1294,9 @@ Page({
       const total = Number(task.total || 0)
       const isLongText = this._isLongReadTextForStreaming(text)
       const isVeryLongText = this._isVeryLongReadText(text)
-      const preloadAhead = isVeryLongText ? 6 : (isLongText ? 5 : 2)
-      const minReadyToStart = isVeryLongText ? Math.min(total, 3) : (isLongText ? Math.min(total, 2) : 1)
-      const warmupTimeoutMs = isVeryLongText ? 12000 : (isLongText ? 8000 : 2200)
+      const preloadAhead = isVeryLongText ? 8 : (isLongText ? 6 : 3)
+      const minReadyToStart = isVeryLongText ? Math.min(total, 4) : (isLongText ? Math.min(total, 3) : 1)
+      const warmupTimeoutMs = isVeryLongText ? 22000 : (isLongText ? 15000 : 4000)
 
       this._bufferedPlayback = {
         taskId: task.taskId,
@@ -1320,8 +1305,8 @@ Page({
         currentIndex: 0,
         errorRetries: 0,
         stallRetry: 0,
-        maxStallRetry: isVeryLongText ? 30 : (isLongText ? 22 : 10),
-          segmentFetchMaxRetry: isVeryLongText ? 72 : (isLongText ? 72 : 40),
+        maxStallRetry: isVeryLongText ? 60 : (isLongText ? 45 : 18),
+        segmentFetchMaxRetry: isVeryLongText ? 240 : (isLongText ? 200 : 100),
         preloadAhead,
         minReadyToStart,
         warmupTimeoutMs,
@@ -1335,6 +1320,7 @@ Page({
       return this._waitBufferedWarmup(minReadyToStart, warmupTimeoutMs).catch(() => null).then(() => this._playBufferedIndex(0))
     })
   },
+
 
   _playCurrentPlanNode() {
     const plan = Array.isArray(this._ttsPlayPlan) ? this._ttsPlayPlan : []
@@ -1406,40 +1392,60 @@ Page({
     const t = this._normalizeReadTextForTts(text)
     if (!t) return []
 
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     const voiceId = String(resolvedVoiceId || this._resolveVoiceId() || this._getAnyAvailableVoiceId() || '').trim()
     if (!voiceId) return []
     const builtin = this._isBuiltinVoice(voiceId)
     const isLongText = !!forceStrictLong || this._isLongReadTextForStreaming(t)
+    const isCloneVoice = this._isCloneVoice(voiceId)
+    const cloneLongCutPunc = encodeURIComponent('。？！；：!?;:…')
+
+    const pageCtx = this._buildBookPageTtsContext()
+    const pageQuery = pageCtx ? [
+      `book_id=${encodeURIComponent(pageCtx.book_id || '')}`,
+      `book_title=${encodeURIComponent(pageCtx.book_title || '')}`,
+      `page_index=${encodeURIComponent(String(pageCtx.page_index || 0))}`,
+      `use_book_page_text=1`,
+    ] : []
 
     const build = (vid, params) => {
       const q = [
-        `voice_id=${encodeURIComponent(vid)}` ,
-        `text=${encodeURIComponent(t)}` ,
+        `voice_id=${encodeURIComponent(vid)}`,
+        `text=${encodeURIComponent(t)}`,
         `text_language=zh`,
         `media_type=wav`,
         `stream_mode=close`,
-        `max_ref_samples=3`,
-        `max_aux_refs=1`,
+        ...pageQuery,
+        isCloneVoice ? `max_ref_samples=6` : `max_ref_samples=3`,
+        isCloneVoice ? `max_aux_refs=2` : `max_aux_refs=1`,
+        isCloneVoice ? `hq_user_voice_asr_rerank=1` : '',
+        isCloneVoice ? `hq_user_voice_asr_min_ratio=0.72` : '',
+        isCloneVoice ? `hq_user_voice_force_policy=${isLongText ? 0 : 1}` : '',
+        isCloneVoice ? `hq_user_voice_long_trim=0` : '',
+        isCloneVoice ? `hq_user_voice_retry_low_energy=1` : '',
+        isCloneVoice ? `hq_user_voice_allow_cache_hint=0` : '',
+        isCloneVoice && isLongText ? `cut_punc=${cloneLongCutPunc}` : '',
+        isCloneVoice && isLongText ? `max_text_len=84` : '',
         ...params,
-        `ts=${Date.now()}` ,
-      ].filter(Boolean).join("&")
+        `ts=${Date.now()}`,
+      ].filter(Boolean).join('&')
       return `${base}/synthesize/stream?${q}`
     }
 
     if (builtin) {
       return [
-        build(voiceId, ['top_k=18', 'top_p=0.82', 'temperature=0.34', 'sample_steps=36', 'speed=1.0']),
-        build(voiceId, ['top_k=16', 'top_p=0.78', 'temperature=0.30', 'sample_steps=30', 'speed=1.0']),
+        build(voiceId, ['top_k=16', 'top_p=0.80', 'temperature=0.32', 'repetition_penalty=1.12', 'sample_steps=34', 'speed=1.0']),
+        build(voiceId, ['top_k=14', 'top_p=0.76', 'temperature=0.30', 'repetition_penalty=1.10', 'sample_steps=30', 'speed=1.0']),
       ]
     }
 
-    // 克隆音色优先保真：首选更高采样步数，次选兼顾速度
+    // 克隆音色优先稳态：降低速率并抬高采样步数，次选保留可接受速度。
     return [
-      build(voiceId, ['top_k=16', 'top_p=0.82', 'temperature=0.34', 'sample_steps=38', 'speed=0.99']),
-      build(voiceId, ['top_k=14', 'top_p=0.78', 'temperature=0.30', 'sample_steps=32', 'speed=1.0']),
+      build(voiceId, [`top_k=15`, `top_p=0.72`, `temperature=0.24`, `repetition_penalty=1.18`, `sample_steps=${isLongText ? 36 : 40}`, `speed=${isLongText ? 1.0 : 0.99}`]),
+      build(voiceId, [`top_k=14`, `top_p=0.70`, `temperature=0.22`, `repetition_penalty=1.20`, `sample_steps=${isLongText ? 34 : 38}`, `speed=${isLongText ? 1.02 : 0.98}`]),
     ]
   },
+
 
   _playTtsCandidates(urls) {
     const list = Array.isArray(urls) ? urls.filter(Boolean) : []
@@ -1480,30 +1486,17 @@ Page({
     const isLongText = this._isLongReadTextForStreaming(rawText)
 
     if (this._isBuiltinVoice(selected.voiceId)) {
-      // 基础音色优先走 stream 实时播放，避免 one-shot 长时间采样导致“看似一直推理没声音”。
-      const fastPlan = this._buildReadPlayPlan(rawText, selected.voiceId)
-      if (Array.isArray(fastPlan) && fastPlan.length) {
-        this._playMode = 'plan'
-        this._ttsPlayPlan = fastPlan
-        this._ttsChunkIndex = 0
-        this._ttsCandidateIndex = 0
-        this._ttsPlayedChunkMap = {}
-        this._planFinalizeRetry = 0
-        this._currentPlanChunk = 0
-        this._playCurrentPlanNode()
+      try {
+        await this._startOneShotPlayback(rawText, selected.voiceId, false)
         return
+      } catch (eBaseOneShot) {
+        console.log('基础音色 one-shot 失败，回退 buffered', eBaseOneShot)
       }
       try {
         await this._startBufferedPlayback(rawText, selected.voiceId)
         return
       } catch (eBaseBuffered) {
-        console.log('基础音色 buffered 失败，回退 one-shot', eBaseBuffered)
-      }
-      try {
-        await this._startOneShotPlayback(rawText, selected.voiceId, false)
-        return
-      } catch (eBaseOneShot) {
-        console.log('基础音色 one-shot 失败', eBaseOneShot)
+        console.log('基础音色 buffered 失败，回退 plan', eBaseBuffered)
       }
     }
 
@@ -1612,17 +1605,8 @@ Page({
     if (this._audio) return
     this._audio = wx.createInnerAudioContext()
     this._audio.autoplay = false
-    this._audio.obeyMuteSwitch = false
-    this._audio.volume = 1
-    this._audio.onCanplay(() => {
-      console.log('[read-audio] canplay', { requestId: this._currentAudioRequestId || '', src: this._currentAudioSrc || '' })
-    })
-    this._audio.onPlay(() => {
-      console.log('[read-audio] play', { requestId: this._currentAudioRequestId || '', src: this._currentAudioSrc || '' })
-    })
     this._audio.onEnded(() => {
       if (Date.now() < Number(this._ignoreAudioEventsUntil || 0)) return
-      console.log('[read-audio] ended', { requestId: this._currentAudioRequestId || '', src: this._currentAudioSrc || '' })
       if (!this.data.isPlaying) return
 
       if (this._playMode === 'single') {
@@ -1655,12 +1639,7 @@ Page({
     })
     this._audio.onError((err) => {
       if (Date.now() < Number(this._ignoreAudioEventsUntil || 0)) return
-      console.log('音频错误', {
-        errCode: err && err.errCode,
-        errMsg: err && err.errMsg,
-        requestId: this._currentAudioRequestId || '',
-        src: this._currentAudioSrc || '',
-      })
+      console.log('音频错误', err)
 
       if (this._playMode === 'single') {
         this._handleSingleAudioError(err)
@@ -1702,9 +1681,20 @@ Page({
     const t = String(text || '').trim()
     if (!t) return ''
 
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     const voiceId = String(resolvedVoiceId || this._resolveVoiceId() || this._getAnyAvailableVoiceId() || '').trim()
     if (!voiceId) return ''
+    const isCloneVoice = this._isCloneVoice(voiceId)
+    const isLongText = this._isLongReadTextForStreaming(t)
+    const cloneLongCutPunc = encodeURIComponent('。？！；：!?;:…')
+
+    const pageCtx = this._buildBookPageTtsContext()
+    const pageQuery = pageCtx ? [
+      `book_id=${encodeURIComponent(pageCtx.book_id || '')}`,
+      `book_title=${encodeURIComponent(pageCtx.book_title || '')}`,
+      `page_index=${encodeURIComponent(String(pageCtx.page_index || 0))}`,
+      `use_book_page_text=1`,
+    ] : []
 
     const q = [
       `voice_id=${encodeURIComponent(voiceId)}`,
@@ -1712,18 +1702,30 @@ Page({
       `text_language=zh`,
       `media_type=wav`,
       `stream_mode=close`,
-          `max_ref_samples=3`,
-          `max_aux_refs=1`,
-      `top_k=20`,
-      `top_p=0.85`,
-      `temperature=0.45`,
-      `sample_steps=38`,
-      `speed=1.0`,
-      `ts=${Date.now()}`,
-    ].join('&')
+      ...pageQuery,
+      isCloneVoice ? `max_ref_samples=6` : `max_ref_samples=3`,
+      isCloneVoice ? `max_aux_refs=2` : `max_aux_refs=1`,
+      `top_k=${isCloneVoice ? 15 : 18}`,
+      `top_p=${isCloneVoice ? 0.72 : 0.82}`,
+      `temperature=${isCloneVoice ? 0.24 : 0.34}`,
+      `repetition_penalty=${isCloneVoice ? 1.18 : 1.12}`,
+      `sample_steps=${isCloneVoice ? (isLongText ? 36 : 40) : 36}`,
+      `speed=${isCloneVoice ? (isLongText ? 1.0 : 0.99) : 1.0}`,
+      isCloneVoice ? `hq_user_voice_asr_rerank=1` : '',
+      isCloneVoice ? `hq_user_voice_asr_min_ratio=0.72` : '',
+      isCloneVoice ? `hq_user_voice_force_policy=${isLongText ? 0 : 1}` : '',
+      isCloneVoice ? `hq_user_voice_long_trim=0` : '',
+      isCloneVoice ? `hq_user_voice_retry_low_energy=1` : '',
+      isCloneVoice ? `hq_user_voice_allow_cache_hint=0` : '',
+      isCloneVoice && isLongText ? `cut_punc=${cloneLongCutPunc}` : '',
+      isCloneVoice && isLongText ? `max_text_len=84` : '',
+    ].filter(Boolean).join('&')
 
     return `${base}/synthesize/stream?${q}`
   },
+
+
+  // 切换收藏
 
   // 切换收藏
   toggleFavorite() {

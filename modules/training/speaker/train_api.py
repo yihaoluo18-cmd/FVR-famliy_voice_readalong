@@ -84,6 +84,7 @@ MAX_DATASET_SENTENCES = 14
 
 # 企业级训练优化默认开启，可通过环境变量按需关闭
 ENTERPRISE_OPT_DEFAULT_ON = True
+MAX_SPEED_DEFAULT_ON = True
 TINY_DATASET_THRESHOLD = 16
 SMALL_DATASET_THRESHOLD = 48
 TRAIN_PREP_CACHE_VERSION = "v1"
@@ -139,6 +140,10 @@ TRAIN_LOG_DIR = "train_logs"  # 训练日志
 os.makedirs(DATASET_DIR, exist_ok=True)
 os.makedirs(TRAIN_OUTPUT_DIR, exist_ok=True)
 os.makedirs(TRAIN_LOG_DIR, exist_ok=True)
+MANAGED_MODELS_DIR = Path(TRAIN_OUTPUT_DIR) / "_managed_models"
+os.makedirs(MANAGED_MODELS_DIR, exist_ok=True)
+UNLOGGED_MODELS_DIR = Path(TRAIN_OUTPUT_DIR) / "unlogged"
+os.makedirs(UNLOGGED_MODELS_DIR, exist_ok=True)
 
 # Python执行路径
 PYTHON_EXEC = getattr(global_config, "python_exec", sys.executable or "python") if global_config else (sys.executable or "python")
@@ -213,6 +218,175 @@ def preprocess_audio(file_path: str, target_sr: int = 16000) -> torch.Tensor:
     if max_val > 1:
         audio /= max_val
     return audio.squeeze(0)
+
+
+def _sanitize_fs_name(value: str, default: str = "unknown") -> str:
+    name = re.sub(r"[^\w\-]+", "_", str(value or "").strip(), flags=re.UNICODE).strip("._")
+    return name or default
+
+
+def _resolve_user_folder_name(user_id: str) -> Tuple[str, bool]:
+    """解析用于统一模型目录的用户文件夹名（优先注册昵称），并返回是否已注册。"""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return "unknown_user", False
+    try:
+        try:
+            from modules.user_mgmt_backend import db as user_mgmt_db
+        except Exception:
+            from user_mgmt_backend import db as user_mgmt_db
+        user = user_mgmt_db.get_user_by_id(uid) or {}
+        if isinstance(user, dict):
+            for k in ("nickname", "parent_name", "baby_name"):
+                v = str(user.get(k) or "").strip()
+                if v:
+                    return _sanitize_fs_name(v, default=_sanitize_fs_name(uid, "unknown_user")), True
+    except Exception as e:
+        logger.debug(f"[统一模型目录] 读取用户昵称失败，回退 user_id: {e}")
+    return _sanitize_fs_name(uid, default="unknown_user"), False
+
+
+def _materialize_minimal_infer_bundle(
+    user_id: str,
+    task_id: str,
+    model_name: str,
+    gpt_path: Path,
+    sovits_path: Path,
+    ref_audio_path: Optional[str],
+    ref_text: Optional[str],
+    ref_language: Optional[str],
+    version: str,
+) -> Dict[str, str]:
+    """
+    生成统一管理的最小推理资源包：
+    - gpt_model.ckpt
+    - sovits_model.pth
+    - ref_audio.*
+    - ref_text.txt
+    - manifest.json
+    """
+    user_dir_name, is_registered_user = _resolve_user_folder_name(user_id)
+    model_dir_name = _sanitize_fs_name(model_name or f"voice_{task_id[:8]}", default=f"voice_{task_id[:8]}")
+    if is_registered_user:
+        bundle_root = MANAGED_MODELS_DIR / user_dir_name
+    else:
+        # 未注册用户统一放到 user_models/unlogged 下
+        bundle_root = UNLOGGED_MODELS_DIR / user_dir_name
+    bundle_dir = bundle_root / f"{model_dir_name}_{task_id[:8]}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    if not gpt_path.exists():
+        raise FileNotFoundError(f"GPT模型不存在: {gpt_path}")
+    if not sovits_path.exists():
+        raise FileNotFoundError(f"SoVITS模型不存在: {sovits_path}")
+
+    out_gpt = bundle_dir / "gpt_model.ckpt"
+    out_sovits = bundle_dir / "sovits_model.pth"
+    shutil.copy2(str(gpt_path), str(out_gpt))
+    shutil.copy2(str(sovits_path), str(out_sovits))
+
+    out_ref_audio = ""
+    ref_audio_purified = False
+    src_ref = Path(str(ref_audio_path or "")).resolve() if ref_audio_path else None
+    if src_ref and src_ref.exists():
+        suffix = src_ref.suffix or ".wav"
+        ref_target = bundle_dir / f"ref_audio{suffix}"
+        shutil.copy2(str(src_ref), str(ref_target))
+        out_ref_audio = str(ref_target)
+
+        # 统一模型包内参考音频默认执行一次净化（deepfilternet2+wpe），
+        # 保证后续推理读取到的是降噪后的稳定参考。
+        bundle_ref_purify = str(os.environ.get("TRAIN_BUNDLE_REF_AUDIO_PURIFY", "1")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if bundle_ref_purify and AUDIO_PURIFICATION_AVAILABLE:
+            try:
+                strategy = str(os.environ.get("TRAIN_BUNDLE_REF_AUDIO_PURIFY_STRATEGY", "deepfilternet2_wpe")).strip() or "deepfilternet2_wpe"
+                tmp_ref = ref_target.with_suffix(ref_target.suffix + ".purify_tmp.wav")
+                old_strategy = os.environ.get("TRAIN_AUDIO_PURIFY_STRATEGY")
+                try:
+                    os.environ["TRAIN_AUDIO_PURIFY_STRATEGY"] = strategy
+                    purify_audio_file(
+                        input_path=str(ref_target),
+                        output_path=str(tmp_ref),
+                        enable_vocal_separation=False,
+                        enable_denoise=True,
+                        enable_dereverb=True,
+                        enable_deecho=False,
+                        verbose=False,
+                    )
+                finally:
+                    if old_strategy is None:
+                        os.environ.pop("TRAIN_AUDIO_PURIFY_STRATEGY", None)
+                    else:
+                        os.environ["TRAIN_AUDIO_PURIFY_STRATEGY"] = old_strategy
+                if tmp_ref.exists() and tmp_ref.stat().st_size > 0:
+                    shutil.move(str(tmp_ref), str(ref_target))
+                    ref_audio_purified = True
+                else:
+                    try:
+                        tmp_ref.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"[统一模型管理] 参考音频提纯失败，回退原文件: {e}")
+
+    out_ref_text = bundle_dir / "ref_text.txt"
+    out_ref_text.write_text(str(ref_text or "").strip() + "\n", encoding="utf-8")
+
+    manifest = {
+        "task_id": str(task_id),
+        "user_id": str(user_id),
+        "user_dir_name": str(user_dir_name),
+        "model_name": str(model_name),
+        "version": str(version),
+        "created_at": datetime.now().isoformat(),
+        "gpt_path": str(out_gpt),
+        "sovits_path": str(out_sovits),
+        "ref_audio_path": out_ref_audio,
+        "ref_text_path": str(out_ref_text),
+        "ref_language": str(ref_language or ""),
+        "ref_audio_purified": bool(ref_audio_purified),
+    }
+    (bundle_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "bundle_dir": str(bundle_dir),
+        "gpt_path": str(out_gpt),
+        "sovits_path": str(out_sovits),
+        "ref_audio_path": out_ref_audio,
+        "ref_text_path": str(out_ref_text),
+    }
+
+
+def _prune_processed_infer_unused_files(exp_dir: Path, log_path: Optional[str] = None) -> None:
+    """清理推理不会用到的中间文件，减少模型产物体积。"""
+    if not exp_dir or not exp_dir.exists():
+        return
+    patterns = [
+        "2-name2text*.txt",
+        "6-name2semantic*.tsv",
+        "train.log",
+    ]
+
+    removed = 0
+    for pat in patterns:
+        for p in exp_dir.glob(pat):
+            try:
+                if p.is_file():
+                    p.unlink(missing_ok=True)
+                    removed += 1
+            except Exception as e:
+                logger.warning(f"[推理最小化] 删除中间文件失败: {p}, err={e}")
+    if log_path and removed:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[推理最小化] 已清理 processed 中间文件 {removed} 个\n")
+        except Exception:
+            pass
 
 
 def split_text(text: str, language: str, max_length: int = 120) -> List[str]:
@@ -369,6 +543,135 @@ def _find_free_gpus(min_free_memory_mb: int = 4096, num_gpus: int = 4) -> List[i
         return list(range(min(num_gpus, total_gpus)))
 
 
+def _parse_gpu_spec_to_list(spec: str) -> List[int]:
+    """解析 GPU spec（支持 0,1 或 0-1）为整型列表。"""
+    s = str(spec or "").strip().replace("-", ",")
+    out: List[int] = []
+    for p in s.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            out.append(int(p))
+        except Exception:
+            continue
+    return out
+
+
+def _pick_alternative_gpus(
+    exclude_gpus: List[int],
+    need_count: int,
+    min_free_memory_mb: int = 8192,
+) -> List[int]:
+    """
+    运行时重选空闲卡（优先排除当前卡）。
+    - 先选非排除且空闲显存 >= min_free_memory_mb 的卡
+    - 不足时退化为“非排除中最空闲的卡”
+    """
+    if not torch.cuda.is_available():
+        return []
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+
+        rows: List[Tuple[int, int]] = []  # (idx, free_mb)
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) < 3:
+                continue
+            try:
+                idx = int(parts[0])
+                used = int(parts[1])
+                total = int(parts[2])
+            except Exception:
+                continue
+            rows.append((idx, max(0, total - used)))
+
+        if not rows:
+            return []
+
+        ex = set(int(x) for x in (exclude_gpus or []))
+        candidates = [(idx, free_mb) for idx, free_mb in rows if idx not in ex]
+        if not candidates:
+            return []
+
+        enough = [(idx, free_mb) for idx, free_mb in candidates if free_mb >= int(min_free_memory_mb)]
+        enough.sort(key=lambda x: x[1], reverse=True)
+        if len(enough) >= max(1, int(need_count)):
+            return [idx for idx, _ in enough[: max(1, int(need_count))]]
+
+        # 回退：选非排除中最空闲的 need_count 张
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in candidates[: max(1, int(need_count))]]
+    except Exception:
+        return []
+
+
+def _wait_gpus_memory_ready(
+    gpu_spec: str,
+    min_free_memory_mb: int,
+    timeout_sec: int = 120,
+    poll_sec: float = 2.0,
+) -> Tuple[bool, Dict[int, int]]:
+    """
+    等待指定GPU集合达到最小空闲显存阈值。
+    返回 (是否就绪, {gpu_idx: free_mb}).
+    """
+    gpu_list = _parse_gpu_spec_to_list(gpu_spec)
+    if not gpu_list or (not torch.cuda.is_available()):
+        return True, {}
+
+    deadline = time.time() + max(1, int(timeout_sec))
+    latest_free: Dict[int, int] = {}
+    while True:
+        all_ready = True
+        latest_free = {}
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                all_ready = False
+            else:
+                rows: Dict[int, int] = {}
+                for line in result.stdout.strip().split("\n"):
+                    parts = [x.strip() for x in line.split(",")]
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        idx = int(parts[0])
+                        used = int(parts[1])
+                        total = int(parts[2])
+                    except Exception:
+                        continue
+                    rows[idx] = max(0, total - used)
+                for g in gpu_list:
+                    free_mb = int(rows.get(int(g), -1))
+                    latest_free[int(g)] = free_mb
+                    if free_mb < int(min_free_memory_mb):
+                        all_ready = False
+        except Exception:
+            all_ready = False
+
+        if all_ready:
+            return True, latest_free
+        if time.time() >= deadline:
+            return False, latest_free
+        time.sleep(max(0.2, float(poll_sec)))
+
+
 def _run_command(
     task_id: str,
     description: str,
@@ -480,6 +783,7 @@ def _run_command(
         max_no_progress = 600  # 10分钟没有进度更新则认为可能卡住（HuBERT处理较慢）
         last_progress_time = time.time()
         process_start_time = time.time()
+        logger.info(f"[训练耗时] 开始阶段: {description}")
         max_process_time = 3600  # 1小时超时（单个步骤最多1小时）
         
         while True:
@@ -588,6 +892,10 @@ def _run_command(
         
         return_code = process.returncode
         cmd_wall_s = time.time() - process_start_time
+        if return_code == 0:
+            logger.info(f"[训练耗时] 阶段完成: {description}, 用时 {cmd_wall_s:.2f}s ({cmd_wall_s/60:.2f} 分钟)")
+        else:
+            logger.warning(f"[训练耗时] 阶段失败: {description}, 用时 {cmd_wall_s:.2f}s ({cmd_wall_s/60:.2f} 分钟), rc={return_code}")
         try:
             cuda_vis = env.get("CUDA_VISIBLE_DEVICES", "")
             oom_fb = "CPU回退" in description
@@ -714,27 +1022,100 @@ def _decide_training_gpu_counts(sample_count: int, has_gpu: bool, max_visible_gp
 
     visible = max(1, int(max_visible_gpus or 1))
     if sample_count <= TINY_DATASET_THRESHOLD:
-        return 1, 1, "tiny_dataset"
+        # 在 GPU 资源允许时默认启用双卡，尽量对齐原项目训练吞吐体验。
+        return min(visible, 2), min(visible, 2), "tiny_dataset_dual_pref"
 
     if sample_count <= SMALL_DATASET_THRESHOLD:
-        # 小数据集主要避免 DDP 固定成本；S2 适度并行。
-        return 1, min(visible, 2), "small_dataset"
+        return min(visible, 2), min(visible, 2), "small_dataset_dual_pref"
 
     # 正常数据集：优先吃满可见 GPU，提升总体吞吐。
     return visible, visible, "normal_dataset"
 
 
-def _build_prepare_cache_root(dataset_list_path: Path, version: str) -> Path:
-    """基于数据集内容+版本构建稳定预处理缓存目录。"""
+def _build_prepare_cache_fingerprint_payload(dataset_list_path: Path, version: str) -> bytes:
+    """
+    构建预处理缓存指纹（跨账号可复用）。
+    关键点：
+    - 不直接使用 dataset.list 原文（含绝对路径，换用户目录会失效）
+    - 使用音频内容哈希 + 文本 + 语言 + 版本，确保“同内容同指纹”
+    """
     try:
-        payload = dataset_list_path.read_bytes()
+        lines = dataset_list_path.read_text(encoding="utf-8").splitlines()
     except Exception:
-        payload = str(dataset_list_path).encode("utf-8", errors="ignore")
+        return str(dataset_list_path).encode("utf-8", errors="ignore")
+
+    canonical_rows: List[str] = []
+    for ln in lines:
+        t = str(ln or "").strip()
+        if not t or "|" not in t:
+            continue
+        parts = t.split("|", 3)
+        if len(parts) < 4:
+            continue
+        wav_path_raw, spk_name, lang_code, text_content = parts
+        wav_path = Path(wav_path_raw)
+        wav_name = wav_path.name
+        wav_sig = "missing"
+        try:
+            if wav_path.exists() and wav_path.is_file():
+                # 音频数据较小（最多十几句），直接全量哈希保证一致性。
+                wav_sig = hashlib.sha1(wav_path.read_bytes()).hexdigest()
+        except Exception:
+            wav_sig = "read_error"
+        canonical_rows.append(
+            f"{wav_name}|{spk_name}|{lang_code}|{text_content}|wav_sha1={wav_sig}"
+        )
+
+    canonical_rows.sort()
+    payload_text = "\n".join(canonical_rows)
+    if not payload_text:
+        try:
+            payload_text = dataset_list_path.read_text(encoding="utf-8")
+        except Exception:
+            payload_text = str(dataset_list_path)
+    return (payload_text + f"\n|{version}|{TRAIN_PREP_CACHE_VERSION}").encode("utf-8", errors="ignore")
+
+
+def _build_prepare_cache_root(dataset_list_path: Path, version: str) -> Path:
+    """基于稳定指纹+版本构建预处理缓存目录。"""
+    payload = _build_prepare_cache_fingerprint_payload(dataset_list_path, version)
     h = hashlib.sha1()
     h.update(payload)
-    h.update(f"|{version}|{TRAIN_PREP_CACHE_VERSION}".encode("utf-8"))
     digest = h.hexdigest()[:24]
     return BASE_DIR / "runtime" / "cache" / "tts_preprocess" / f"{version}_{digest}"
+
+
+def _build_prepare_step_cache_root(dataset_list_path: Path, version: str, step_name: str) -> Path:
+    """
+    为不同预处理步骤生成更精细的缓存键：
+    - step1(文本/BERT) 仅依赖文本与语言，跨账号可复用
+    - 其他步骤依赖音频内容，按音频+文本指纹缓存
+    """
+    if str(step_name) == "step1":
+        try:
+            lines = dataset_list_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            lines = []
+        canonical_rows: List[str] = []
+        for ln in lines:
+            t = str(ln or "").strip()
+            if not t or "|" not in t:
+                continue
+            parts = t.split("|", 3)
+            if len(parts) < 4:
+                continue
+            wav_path_raw, spk_name, lang_code, text_content = parts
+            wav_name = Path(wav_path_raw).name
+            canonical_rows.append(f"{wav_name}|{spk_name}|{lang_code}|{text_content}")
+        canonical_rows.sort()
+        payload = ("\n".join(canonical_rows) + f"\n|{version}|{TRAIN_PREP_CACHE_VERSION}|step1_text_only").encode(
+            "utf-8", errors="ignore"
+        )
+        h = hashlib.sha1()
+        h.update(payload)
+        digest = h.hexdigest()[:24]
+        return BASE_DIR / "runtime" / "cache" / "tts_preprocess" / f"{version}_{digest}"
+    return _build_prepare_cache_root(dataset_list_path, version)
 
 
 def _copy_file_if_exists(src: Path, dst: Path):
@@ -760,6 +1141,159 @@ def _prepare_step_specs(version: str) -> Dict[str, List[Tuple[str, str]]]:
     }
     specs["step2b"] = [("dir", "7-sv_cn")] if "Pro" in str(version or "") else []
     return specs
+
+
+def _split_gpu_spec(spec: str) -> List[str]:
+    """将 GPU spec 解析为单卡列表。支持 '0-1-2' / '0,1,2' / '0 1 2'。"""
+    s = str(spec or "").strip()
+    if not s:
+        return []
+    s = s.replace(" ", "-").replace(",", "-")
+    return [x for x in s.split("-") if x.strip() != ""]
+
+
+def _merge_prepare_shards(exp_dir: Path, step_name: str) -> None:
+    """
+    将 prepare_datasets 分片输出合并为 webui 兼容的 canonical 文件。
+    - step1: 合并 2-name2text-*.txt -> 2-name2text.txt
+    - step3: 合并 6-name2semantic-*.tsv -> 6-name2semantic.tsv（补 header）
+    """
+    if step_name == "step1":
+        shards = sorted(exp_dir.glob("2-name2text-*.txt"), key=lambda p: p.name)
+        if not shards:
+            return
+        out = exp_dir / "2-name2text.txt"
+        lines: List[str] = []
+        header: Optional[str] = None
+        for p in shards:
+            try:
+                part_lines = p.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            part_lines = [ln for ln in part_lines if ln.strip()]
+            if not part_lines:
+                continue
+            if header is None:
+                header = part_lines[0]
+                lines.append(header)
+                body = part_lines[1:]
+            else:
+                body = part_lines[1:] if part_lines[0] == header else part_lines
+            lines.extend(body)
+        if lines:
+            out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    if step_name == "step3":
+        shards = sorted(exp_dir.glob("6-name2semantic-*.tsv"), key=lambda p: p.name)
+        if not shards:
+            return
+        out = exp_dir / "6-name2semantic.tsv"
+        merged: List[str] = ["item_name\tsemantic_audio"]
+        for p in shards:
+            try:
+                part_lines = p.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                continue
+            part_lines = [ln for ln in part_lines if ln.strip()]
+            if not part_lines:
+                continue
+            if part_lines and part_lines[0].startswith("item_name"):
+                part_lines = part_lines[1:]
+            merged.extend(part_lines)
+        out.write_text("\n".join(merged) + "\n", encoding="utf-8")
+        return
+
+
+def _run_prepare_parts(
+    task_id: str,
+    description: str,
+    command: List[str],
+    log_file: str,
+    base_extra_env: Dict[str, str],
+    gpu_spec: str,
+) -> None:
+    """按 parts 并行跑 prepare 脚本（每个 part 一个子进程）。"""
+    gpus = _split_gpu_spec(gpu_spec)
+    if not gpus:
+        _run_command(task_id, description, command, log_file, base_extra_env)
+        return
+
+    procs: List[subprocess.Popen] = []
+    t0 = time.perf_counter()
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"\n[预处理并行] {description}: parts={len(gpus)} gpus={gpus}\n")
+        logf.flush()
+        for i_part, gpu in enumerate(gpus):
+            env = os.environ.copy()
+            env.update({k: str(v) for k, v in (base_extra_env or {}).items()})
+            env["i_part"] = str(i_part)
+            env["all_parts"] = str(len(gpus))
+            env["_CUDA_VISIBLE_DEVICES"] = str(gpu)
+            procs.append(
+                subprocess.Popen(
+                    command,
+                    stdout=logf,
+                    stderr=logf,
+                    text=True,
+                    env=env,
+                )
+            )
+        rcs = [p.wait() for p in procs]
+    dt = time.perf_counter() - t0
+    if any(int(rc) != 0 for rc in rcs):
+        raise RuntimeError(f"{description} 并行执行失败: return_codes={rcs}")
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"[预处理并行] {description} 完成: {dt:.2f}s\n")
+        logf.flush()
+
+
+def _run_prepare_parts_pipeline(
+    task_id: str,
+    description: str,
+    scripts: List[Path],
+    log_file: str,
+    base_extra_env: Dict[str, str],
+    gpu_spec: str,
+) -> None:
+    """按 part 并行执行多脚本流水线（单子进程内连续执行多个 prepare 脚本）。"""
+    gpus = _split_gpu_spec(gpu_spec)
+    if (not gpus) or (not scripts):
+        return
+
+    runner = BASE_DIR / "tools" / "prepare_pipeline_part.py"
+    if not runner.exists():
+        raise FileNotFoundError(f"缺少流水线执行器: {runner}")
+
+    script_list = ";".join(str(p) for p in scripts)
+    procs: List[subprocess.Popen] = []
+    t0 = time.perf_counter()
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"\n[预处理并行流水线] {description}: parts={len(gpus)} gpus={gpus}\n")
+        logf.flush()
+        for i_part, gpu in enumerate(gpus):
+            env = os.environ.copy()
+            env.update({k: str(v) for k, v in (base_extra_env or {}).items()})
+            env["i_part"] = str(i_part)
+            env["all_parts"] = str(len(gpus))
+            env["_CUDA_VISIBLE_DEVICES"] = str(gpu)
+            env["PREP_PIPELINE_SCRIPTS"] = script_list
+            procs.append(
+                subprocess.Popen(
+                    [PYTHON_EXEC, "-s", str(runner)],
+                    stdout=logf,
+                    stderr=logf,
+                    text=True,
+                    env=env,
+                )
+            )
+        rcs = [p.wait() for p in procs]
+    dt = time.perf_counter() - t0
+    if any(int(rc) != 0 for rc in rcs):
+        raise RuntimeError(f"{description} 并行流水线执行失败: return_codes={rcs}")
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"[预处理并行流水线] {description} 完成: {dt:.2f}s\n")
+        logf.flush()
 
 
 def _is_prepare_step_ready(root: Path, specs: List[Tuple[str, str]]) -> bool:
@@ -1080,6 +1614,7 @@ def _run_prepare_steps(
 ):
     """执行数据预处理步骤"""
     is_half = getattr(global_config, "is_half", True) if global_config else True
+    max_speed_mode = _env_flag("TRAIN_MAX_SPEED_MODE", MAX_SPEED_DEFAULT_ON)
     bert_dir = _resolve_path(getattr(global_config, "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large") if global_config else "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large")
     ssl_dir = _resolve_path(getattr(global_config, "cnhubert_path", "GPT_SoVITS/pretrained_models/chinese-hubert-base") if global_config else "GPT_SoVITS/pretrained_models/chinese-hubert-base")
     # SV模型路径：优先使用配置中的路径，否则尝试多个可能的位置
@@ -1128,14 +1663,68 @@ def _run_prepare_steps(
         "version": version,
     }
 
-    prepare_cache_enabled = _env_flag("TRAIN_PREP_CACHE", ENTERPRISE_OPT_DEFAULT_ON)
+    # 默认关闭预处理缓存：每次训练按当前用户数据重提特征。
+    # 如需复用缓存，仅在显式设置 TRAIN_PREP_CACHE=1 时启用。
+    prepare_cache_enabled = _env_flag("TRAIN_PREP_CACHE", False)
     prepare_cache_root = _build_prepare_cache_root(dataset_list_path, version) if prepare_cache_enabled else None
+    step1_cache_root = (
+        _build_prepare_step_cache_root(dataset_list_path, version, "step1") if prepare_cache_enabled else None
+    )
     prepare_specs = _prepare_step_specs(version)
+    prep_parallel = _env_flag("TRAIN_PREP_PARALLEL", ENTERPRISE_OPT_DEFAULT_ON)
+    prep_parallel_step1 = prep_parallel
+    prep_parallel_step2 = prep_parallel
+    prep_parallel_step2b = prep_parallel
+    prep_parallel_step3 = prep_parallel
+    prep_gpu_spec = os.environ.get("TRAIN_PREP_CUDA_VISIBLE_DEVICES", "").strip()
+    auto_select_gpus = _env_flag("TRAIN_AUTO_SELECT_GPUS", True)
+    # step1 冷启动优化：默认强制单卡跑（避免自动挑多卡导致 CUDA/驱动初始化成本上升）
+    step1_force_single_gpu = _env_flag("TRAIN_PREP_STEP1_FORCE_SINGLE_GPU", True)
+    step1_gpu_spec = os.environ.get("TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES", "").strip()
+    if (not step1_gpu_spec) and prep_gpu_spec:
+        step1_gpu_spec = _split_gpu_spec(prep_gpu_spec)[0] if _split_gpu_spec(prep_gpu_spec) else prep_gpu_spec
+    prep_parallel_force = _env_flag("TRAIN_PREP_PARALLEL_FORCE", False)
+    try:
+        prep_dataset_samples = _count_dataset_samples(dataset_list_path)
+    except Exception:
+        prep_dataset_samples = 0
+    # tiny 数据集：按步骤控制并行策略，避免“一刀切”关闭并行导致总耗时偏高。
+    # 默认策略：step1 串行，step2/step2b/step3 并行（可通过环境变量覆盖）。
+    if (not prep_parallel_force) and (prep_dataset_samples > 0) and (prep_dataset_samples <= TINY_DATASET_THRESHOLD):
+        tiny_steps_raw = os.environ.get("TRAIN_PREP_TINY_PARALLEL_STEPS", "step2,step2b,step3")
+        tiny_steps = {x.strip().lower() for x in str(tiny_steps_raw).split(",") if x.strip()}
+        prep_parallel_step1 = prep_parallel and ("step1" in tiny_steps)
+        prep_parallel_step2 = prep_parallel and ("step2" in tiny_steps)
+        prep_parallel_step2b = prep_parallel and ("step2b" in tiny_steps)
+        prep_parallel_step3 = prep_parallel and ("step3" in tiny_steps)
+
+        if not any((prep_parallel_step1, prep_parallel_step2, prep_parallel_step2b, prep_parallel_step3)) and prep_gpu_spec:
+            # 若 tiny 策略下所有步骤都不并行，保留单卡，降低进程调度开销。
+            prep_gpu_spec = _split_gpu_spec(prep_gpu_spec)[0] if _split_gpu_spec(prep_gpu_spec) else prep_gpu_spec
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write(
+                f"[预处理策略] tiny_dataset(sample_count={prep_dataset_samples})，"
+                f"step1_parallel={int(prep_parallel_step1)}, step2_parallel={int(prep_parallel_step2)}, "
+                f"step2b_parallel={int(prep_parallel_step2b)}, step3_parallel={int(prep_parallel_step3)}；"
+                f"可通过 TRAIN_PREP_TINY_PARALLEL_STEPS 覆盖\n"
+            )
+
+    # 自动选卡：默认开启。显式指定 TRAIN_PREP_CUDA_VISIBLE_DEVICES 时仍可覆盖。
+    if auto_select_gpus and (not prep_gpu_spec) and torch.cuda.is_available():
+        prep_need = 2 if any((prep_parallel_step2, prep_parallel_step2b, prep_parallel_step3)) else 1
+        prep_pick = _pick_alternative_gpus(exclude_gpus=[], need_count=prep_need, min_free_memory_mb=8192)
+        if prep_pick:
+            prep_gpu_spec = ",".join(str(x) for x in prep_pick)
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write(f"[自动选卡] 预处理阶段自动选择GPU: {prep_gpu_spec}\n")
 
     if prepare_cache_root is not None:
         prepare_cache_root.mkdir(parents=True, exist_ok=True)
         with open(log_file, "a", encoding="utf-8") as logf:
             logf.write(f"[预处理缓存] 已启用，cache_root={prepare_cache_root}\n")
+            if step1_cache_root is not None and str(step1_cache_root) != str(prepare_cache_root):
+                step1_cache_root.mkdir(parents=True, exist_ok=True)
+                logf.write(f"[预处理缓存] step1_text_only_cache_root={step1_cache_root}\n")
 
 
     def _run_prepare_command_with_fallback(description: str, command: List[str], extra_env: Dict[str, str]):
@@ -1176,22 +1765,72 @@ def _run_prepare_steps(
 
     # Step 1: 生成 2-name2text（支持缓存命中）
     step1_hit = False
-    if prepare_cache_root is not None:
-        step1_hit = _restore_prepare_step_cache(prepare_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
+    if _is_prepare_step_ready(exp_dir, prepare_specs.get("step1", [])):
+        step1_hit = True
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write("[预处理复用] 检测到已有 step1 产物，跳过重算。\n")
+    if (not step1_hit) and step1_cache_root is not None:
+        step1_hit = _restore_prepare_step_cache(step1_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
     if step1_hit:
         with open(log_file, "a", encoding="utf-8") as logf:
             logf.write("[预处理缓存] step1 命中，跳过重算。\n")
     else:
-        _run_prepare_command_with_fallback(
-            "step1: 生成 2-name2text",
-            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "1-get-text.py")],
-            {**env_common, "bert_pretrained_dir": str(bert_dir)},
-        )
-        if prepare_cache_root is not None:
-            _save_prepare_step_cache(prepare_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
+        step1_env = {**env_common, "bert_pretrained_dir": str(bert_dir)}
+        if prep_parallel_step1 and prep_gpu_spec:
+            _run_prepare_parts(
+                task_id,
+                "step1: 生成 2-name2text (并行分片)",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "1-get-text.py")],
+                log_file,
+                step1_env,
+                prep_gpu_spec,
+            )
+        else:
+            if step1_force_single_gpu and step1_gpu_spec:
+                # 明确指定单卡，避免 _run_command 自动挑多卡
+                step1_env = {
+                    **step1_env,
+                    "CUDA_VISIBLE_DEVICES": str(step1_gpu_spec),
+                    "_CUDA_VISIBLE_DEVICES": str(step1_gpu_spec),
+                }
+            _run_prepare_command_with_fallback(
+                "step1: 生成 2-name2text",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "1-get-text.py")],
+                step1_env,
+            )
+        _merge_prepare_shards(exp_dir, "step1")
+        if step1_cache_root is not None:
+            _save_prepare_step_cache(step1_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
 
     train_tasks[task_id]["progress"] = 25
     train_tasks[task_id]["message"] = "BERT特征提取完成，开始提取HuBERT特征..."
+
+    combine_223_enabled = _env_flag("TRAIN_PREP_COMBINE_2_2B_3", True)
+    combine_223_executed = False
+    step2b_hit = False
+    step3_hit = False
+    # step3 依赖参数先准备好，便于与 step2/2b 合并执行
+    if version in {"v2Pro", "v2ProPlus"}:
+        s2_config_file = "s2v2Pro.json"
+    else:
+        s2_config_file = "s2.json"
+    s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / s2_config_file
+    if not s2_config_path.exists() and version in {"v2Pro", "v2ProPlus"}:
+        s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / "s2.json"
+    pretrained_s2g = _get_versioned_path(
+        "pretrained_sovits_name",
+        version,
+        getattr(global_config, "pretrained_sovits_path", _default_pretrained_s2g_path(version)) if global_config else _default_pretrained_s2g_path(version),
+    )
+
+    can_run_combine_223 = (
+        combine_223_enabled
+        and ("Pro" in version)
+        and prep_parallel_step2
+        and prep_parallel_step2b
+        and prep_parallel_step3
+        and bool(prep_gpu_spec)
+    )
 
     # Step 2: 生成 HuBERT 与 32k wav
     step2_hit = False
@@ -1200,6 +1839,9 @@ def _run_prepare_steps(
     if step2_hit:
         with open(log_file, "a", encoding="utf-8") as logf:
             logf.write("[预处理缓存] step2 命中，跳过重算。\n")
+    elif can_run_combine_223:
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write("[预处理编排优化] 启用 step2+step2b+step3 合并流水线，跳过独立 step2 执行。\n")
     else:
         # 检查是否有其他任务正在处理相同的数据集，避免重复处理
         dataset_list_content = dataset_list_path.read_text(encoding="utf-8") if dataset_list_path.exists() else ""
@@ -1237,11 +1879,22 @@ def _run_prepare_steps(
             pass
 
         try:
-            _run_prepare_command_with_fallback(
-                "step2: 生成 HuBERT 与 32k wav",
-                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-hubert-wav32k.py")],
-                {**env_common, "cnhubert_base_dir": str(ssl_dir)},
-            )
+            step2_env = {**env_common, "cnhubert_base_dir": str(ssl_dir)}
+            if prep_parallel_step2 and prep_gpu_spec:
+                _run_prepare_parts(
+                    task_id,
+                    "step2: 生成 HuBERT 与 32k wav (并行分片)",
+                    [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-hubert-wav32k.py")],
+                    log_file,
+                    step2_env,
+                    prep_gpu_spec,
+                )
+            else:
+                _run_prepare_command_with_fallback(
+                    "step2: 生成 HuBERT 与 32k wav",
+                    [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-hubert-wav32k.py")],
+                    step2_env,
+                )
             if prepare_cache_root is not None:
                 _save_prepare_step_cache(prepare_cache_root, "step2", exp_dir, prepare_specs.get("step2", []))
         finally:
@@ -1251,6 +1904,40 @@ def _run_prepare_steps(
                     lock_file.unlink()
             except Exception:
                 pass
+
+    # 可选：将 step2/step2b/step3 合并到同一子进程流水线，减少重复初始化。
+    if can_run_combine_223 and (not step2_hit):
+        if prepare_cache_root is not None:
+            step2b_hit = _restore_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
+            step3_hit = _restore_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
+        if (not step2b_hit) and (not step3_hit):
+            pipeline_env = {
+                **env_common,
+                "cnhubert_base_dir": str(ssl_dir),
+                "sv_path": str(sv_path),
+                "pretrained_s2G": str(pretrained_s2g),
+                "s2config_path": str(s2_config_path),
+            }
+            _run_prepare_parts_pipeline(
+                task_id=task_id,
+                description="step2+step2b+step3 合并流水线",
+                scripts=[
+                    BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-hubert-wav32k.py",
+                    BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-sv.py",
+                    BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "3-get-semantic.py",
+                ],
+                log_file=log_file,
+                base_extra_env=pipeline_env,
+                gpu_spec=prep_gpu_spec,
+            )
+            _merge_prepare_shards(exp_dir, "step3")
+            if prepare_cache_root is not None:
+                _save_prepare_step_cache(prepare_cache_root, "step2", exp_dir, prepare_specs.get("step2", []))
+                _save_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
+                _save_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
+            combine_223_executed = True
+            step2b_hit = True
+            step3_hit = True
 
     train_tasks[task_id]["progress"] = 40
     train_tasks[task_id]["message"] = "HuBERT 特征提取完成，准备生成语义 token..."
@@ -1283,51 +1970,67 @@ def _run_prepare_steps(
             logf.write(f"{'='*60}\n")
         
         # 执行SV特征提取（支持缓存命中）
-        step2b_hit = False
-        if prepare_cache_root is not None:
+        if (not step2b_hit) and prepare_cache_root is not None:
             step2b_hit = _restore_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
         if step2b_hit:
             with open(log_file, "a", encoding="utf-8") as logf:
                 logf.write("[预处理缓存] step2b 命中，跳过重算。\n")
-        else:
-            _run_prepare_command_with_fallback(
-                "step2b: 生成 SV 说话人特征",
-                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-sv.py")],
-                {**env_common, "sv_path": str(sv_path)},
-            )
+        elif (not combine_223_executed):
+            step2b_env = {**env_common, "sv_path": str(sv_path)}
+            if prep_parallel_step2b and prep_gpu_spec:
+                _run_prepare_parts(
+                    task_id,
+                    "step2b: 生成 SV 说话人特征 (并行分片)",
+                    [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-sv.py")],
+                    log_file,
+                    step2b_env,
+                    prep_gpu_spec,
+                )
+            else:
+                _run_prepare_command_with_fallback(
+                    "step2b: 生成 SV 说话人特征",
+                    [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-sv.py")],
+                    step2b_env,
+                )
             if prepare_cache_root is not None:
                 _save_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
         train_tasks[task_id]["progress"] = 45
         
-        # 详细验证SV特征是否成功生成
+        # 详细验证SV特征是否成功生成（极速模式下降级为轻量检查）
         sv_dir = exp_dir / "7-sv_cn"
+        if max_speed_mode:
+            sv_files = list(sv_dir.glob("*.pt")) if sv_dir.exists() else []
+            if len(sv_files) == 0:
+                raise ValueError(f"SV特征提取失败：目录为空或无pt文件: {sv_dir}")
+            train_tasks[task_id]["message"] = f"说话人特征提取完成：已生成 {len(sv_files)} 个SV特征文件"
+        else:
         
-        # 先检查日志文件中是否有SV提取的错误信息
-        sv_extraction_errors = []
-        try:
-            with open(log_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                # 查找SV提取相关的错误（从后往前查找，找到最近的错误）
-                sv_section_start = -1
-                for i in range(len(lines) - 1, -1, -1):
-                    if "step2b" in lines[i].lower() or "sv" in lines[i].lower() or "说话人特征" in lines[i]:
-                        sv_section_start = i
-                        break
-                
-                if sv_section_start >= 0:
-                    # 读取SV提取部分的日志
-                    sv_section = lines[sv_section_start:]
-                    for line in sv_section:
-                        line_lower = line.lower()
-                        if any(keyword in line_lower for keyword in ["error", "traceback", "failed", "exception", "无法", "失败"]):
-                            sv_extraction_errors.append(line.strip())
-        except Exception as e:
-            pass
-        
-        with open(log_file, "a", encoding="utf-8") as logf:
-            logf.write(f"\n{'='*60}\n")
-            logf.write(f"[SV特征提取后验证] 检查提取结果...\n")
-            logf.write(f"{'='*60}\n")
+            # 先检查日志文件中是否有SV提取的错误信息
+            sv_extraction_errors = []
+            try:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                    # 查找SV提取相关的错误（从后往前查找，找到最近的错误）
+                    sv_section_start = -1
+                    for i in range(len(lines) - 1, -1, -1):
+                        if "step2b" in lines[i].lower() or "sv" in lines[i].lower() or "说话人特征" in lines[i]:
+                            sv_section_start = i
+                            break
+
+                    if sv_section_start >= 0:
+                        # 读取SV提取部分的日志
+                        sv_section = lines[sv_section_start:]
+                        for line in sv_section:
+                            line_lower = line.lower()
+                            if any(keyword in line_lower for keyword in ["error", "traceback", "failed", "exception", "无法", "失败"]):
+                                sv_extraction_errors.append(line.strip())
+            except Exception:
+                pass
+
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write(f"\n{'='*60}\n")
+                logf.write(f"[SV特征提取后验证] 检查提取结果...\n")
+                logf.write(f"{'='*60}\n")
             
             if not sv_dir.exists():
                 error_msg = (
@@ -1542,39 +2245,41 @@ def _run_prepare_steps(
             logf.write(f"{'='*60}\n")
     
     # Step 3: 生成 6-name2semantic
-    if version in {"v2Pro", "v2ProPlus"}:
-        s2_config_file = "s2v2Pro.json"
-    else:
-        s2_config_file = "s2.json"
-    s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / s2_config_file
-    if not s2_config_path.exists() and version in {"v2Pro", "v2ProPlus"}:
-        s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / "s2.json"
-    
-    pretrained_s2g = _get_versioned_path("pretrained_sovits_name", version, getattr(global_config, "pretrained_sovits_path", _default_pretrained_s2g_path(version)) if global_config else _default_pretrained_s2g_path(version))
-    
-    step3_hit = False
-    if prepare_cache_root is not None:
+    if (not step3_hit) and prepare_cache_root is not None:
         step3_hit = _restore_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
     if step3_hit:
         with open(log_file, "a", encoding="utf-8") as logf:
             logf.write("[预处理缓存] step3 命中，跳过重算。\n")
-    else:
-        _run_prepare_command_with_fallback(
-            "step3: 生成 6-name2semantic",
-            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "3-get-semantic.py")],
-            {
-                **env_common,
-                "pretrained_s2G": str(pretrained_s2g),
-                "s2config_path": str(s2_config_path),
-            },
-        )
+    elif (not combine_223_executed):
+        step3_env = {
+            **env_common,
+            "pretrained_s2G": str(pretrained_s2g),
+            "s2config_path": str(s2_config_path),
+        }
+        if prep_parallel_step3 and prep_gpu_spec:
+            _run_prepare_parts(
+                task_id,
+                "step3: 生成 6-name2semantic (并行分片)",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "3-get-semantic.py")],
+                log_file,
+                step3_env,
+                prep_gpu_spec,
+            )
+        else:
+            _run_prepare_command_with_fallback(
+                "step3: 生成 6-name2semantic",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "3-get-semantic.py")],
+                step3_env,
+            )
+        _merge_prepare_shards(exp_dir, "step3")
         if prepare_cache_root is not None:
             _save_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
     train_tasks[task_id]["progress"] = 50
     train_tasks[task_id]["message"] = "语义 token 生成完成"
     
     # 预处理完成后，进行综合验证和音频特征完整性检查
-    _verify_audio_features_completeness(exp_dir, version, log_file, task_id)
+    if not max_speed_mode:
+        _verify_audio_features_completeness(exp_dir, version, log_file, task_id)
     
     # 预处理完成后，进行综合验证
     with open(log_file, "a", encoding="utf-8") as logf:
@@ -1597,6 +2302,18 @@ def _run_prepare_steps(
             check_items.append(("7-sv_cn", exp_dir / "7-sv_cn", "目录"))
         
         all_valid = True
+        if max_speed_mode:
+            # 极速模式：只做最小存在性检查，避免目录全量扫描
+            fast_required = [located_phoneme, located_semantic, exp_dir / "4-cnhubert", exp_dir / "5-wav32k"]
+            if "Pro" in version:
+                fast_required.append(exp_dir / "7-sv_cn")
+            miss = [str(p) for p in fast_required if (not p.exists())]
+            if miss:
+                logf.write(f"❌ 极速模式最小检查失败，缺失: {miss}\n")
+                raise FileNotFoundError(f"预处理产物缺失: {miss}")
+            logf.write("✅ 极速模式最小检查通过（跳过详细统计）\n")
+            logf.write(f"{'='*60}\n")
+            return
         for name, path, path_type in check_items:
             if not path.exists():
                 logf.write(f"❌ {name} ({path_type}): 不存在\n")
@@ -1653,50 +2370,39 @@ def _build_s1_config(
     # 检测是否有GPU可用
     has_gpu = torch.cuda.is_available()
     
-    # 强制使用官方参数：S1使用15轮，每5轮保存一次，batch_size=8，precision="16-mixed"
-    # 不进行任何动态调整，确保与官方参数完全一致
+    # S1 参数：默认 8/15，可通过调用方传入自定义值（用于网格调优）
+    target_batch_size = max(1, int(batch_size or 8))
+    target_epochs = max(1, int(epochs or 15))
     if fast_mode:
-        if has_gpu:
-            # GPU快速模式：更少的epochs，但保持官方batch_size=8
-            effective_epochs = max(3, min(epochs, 5))  # 快速模式最多5轮
-            effective_batch_size = 8  # 强制使用官方值8
-        else:
-            # CPU快速模式：最少epochs，但保持官方batch_size=8（如果OOM则报错）
-            effective_epochs = max(3, min(epochs, 5))
-            effective_batch_size = 8  # 强制使用官方值8
-        # 快速模式：如果epochs>=5，每5轮保存；否则只在最后保存
-        train_block["save_every_n_epoch"] = 5 if effective_epochs >= 5 else effective_epochs
+        effective_epochs = max(3, min(target_epochs, 5))
+        effective_batch_size = target_batch_size
+        # 极速模式：仅在最终轮次保存
+        train_block["save_every_n_epoch"] = max(1, effective_epochs)
         train_block["if_save_every_weights"] = True
     else:
-        # 正常训练模式：强制使用官方参数
-        if has_gpu:
-            # GPU训练：强制使用官方参数
-            effective_epochs = 15  # 官方值：15轮
-            effective_batch_size = 8  # 官方值：batch_size=8（不根据数据集大小调整）
-        else:
-            # CPU训练：也使用官方参数（如果OOM则报错，不自动降级）
-            effective_epochs = 15  # 官方值：15轮
-            effective_batch_size = 8  # 官方值：batch_size=8
-        # 正常模式：每5轮保存一次（官方值）
-        train_block["save_every_n_epoch"] = 5  # 官方值：每5轮保存一次
+        # 正常训练模式：使用目标参数
+        effective_epochs = target_epochs
+        effective_batch_size = target_batch_size
+        # 正常模式也改为仅保留最终权重，减少中间写盘
+        train_block["save_every_n_epoch"] = max(1, effective_epochs)
         train_block["if_save_every_weights"] = True
-    
-    # 强制使用官方参数，忽略传入的参数（确保与官网完全一致）
-    train_block["batch_size"] = 8  # 官方值：强制使用8
-    train_block["epochs"] = 15 if not fast_mode else max(3, min(epochs, 5))  # 官方值：正常模式15轮，快速模式3-5轮
 
-    tiny_dataset = int(dataset_sample_count or 0) > 0 and int(dataset_sample_count or 0) <= TINY_DATASET_THRESHOLD
-    if tiny_dataset and _env_flag("TRAIN_TINY_SAVE_LAST_ONLY", ENTERPRISE_OPT_DEFAULT_ON):
-        # 小数据集训练时仅保留最终checkpoint，减少保存开销。
-        train_block["save_every_n_epoch"] = max(1, int(train_block["epochs"]))
-        train_block["if_save_latest"] = True
-        logger.info(
-            f"[S1配置] tiny_dataset保存优化已启用: sample_count={dataset_sample_count}, "
-            f"save_every_n_epoch={train_block['save_every_n_epoch']}"
-        )
+    train_block["batch_size"] = effective_batch_size
+    train_block["epochs"] = effective_epochs
+
+    # 无论数据规模，统一仅保留最终checkpoint，减少保存开销。
+    train_block["save_every_n_epoch"] = max(1, int(train_block["epochs"]))
+    train_block["if_save_latest"] = True
+    logger.info(
+        f"[S1配置] 最终权重模式已启用: sample_count={dataset_sample_count}, "
+        f"save_every_n_epoch={train_block['save_every_n_epoch']}"
+    )
     
     # 记录实际使用的参数（用于调试）
-    logger.info(f"[S1配置] 强制使用官方参数: batch_size=8, epochs={train_block['epochs']} (传入参数: batch_size={batch_size}, epochs={epochs}, fast_mode={fast_mode})")
+    logger.info(
+        f"[S1配置] batch_size={train_block['batch_size']}, epochs={train_block['epochs']} "
+        f"(传入参数: batch_size={batch_size}, epochs={epochs}, fast_mode={fast_mode})"
+    )
     
     # 设置学习率：始终覆盖模板中的默认值，确保实际使用的是传入的learning_rate
     # 官方推荐 S1 学习率为 1e-5，这里默认也是 1e-5，如需调整可通过 TrainParams 传入
@@ -1782,44 +2488,32 @@ def _build_s2_config(
     # 写入 gpu_numbers，保持与官方 webui/auto_train_infer 的配置一致
     # 供 s2_train.py 中 hps.train.gpu_numbers 使用
     train_block["gpu_numbers"] = str(gpu_numbers)
-    # 强制使用官方参数：batch_size=8，不进行任何动态调整
-    train_block["batch_size"] = 8  # 官方值：强制使用8
-    logger.info(f"[S2配置] 强制使用官方参数: batch_size=8 (传入参数: target_batch_size={target_batch_size}, max_epochs={max_epochs}, fast_mode={fast_mode})")
+    # batch_size：由调用方传入（v2Pro 生产默认 16，可用 TRAIN_S2_BATCH_SIZE 覆盖）；非 v2 系列仍建议 8
+    train_block["batch_size"] = max(1, int(target_batch_size or 8))
+    logger.info(
+        f"[S2配置] batch_size={train_block['batch_size']} (传入 target_batch_size={target_batch_size}, "
+        f"max_epochs={max_epochs}, fast_mode={fast_mode})"
+    )
     
-    # 强制使用官方参数：S2使用8轮，每4轮保存一次，batch_size=8，fp16_run=True
-    # 不进行任何动态调整，确保与官方参数完全一致
+    # S2 轮数：默认官方值 8，可由调用方/环境变量传入用于实验
     if fast_mode:
         # 快速模式：S2训练3-5轮
         adjusted_max_epochs = min(max_epochs, 5)
     else:
-        # 正常模式：强制使用官方值8轮
-        adjusted_max_epochs = 8  # 官方值：强制使用8轮
+        adjusted_max_epochs = max(1, int(max_epochs or 8))
     
     train_block["epochs"] = adjusted_max_epochs
     total_epochs = int(train_block["epochs"])
-    logger.info(f"[S2配置] 强制使用官方参数: epochs={total_epochs} (传入参数: max_epochs={max_epochs}, fast_mode={fast_mode})")
+    logger.info(f"[S2配置] epochs={total_epochs} (传入参数: max_epochs={max_epochs}, fast_mode={fast_mode})")
     
-    # 添加/覆盖保存相关配置字段（s2_train.py需要这些字段）
-    # 官方值：每4轮保存一次
-    if fast_mode:
-        # 快速模式：如果epochs>=4，每4轮保存；否则只在最后保存
-        train_block["save_every_epoch"] = 4 if total_epochs >= 4 else total_epochs
-        train_block["if_save_latest"] = 1  # 保存最新模型（覆盖式）
-        train_block["if_save_every_weights"] = True  # 必须为True，才能保存精简格式（weight + config + info）
-    else:
-        # 正常模式：每4轮保存一次（官方值）
-        train_block["save_every_epoch"] = 4  # 官方值：每4轮保存一次
-        train_block["if_save_latest"] = 1  # 保存最新模型（覆盖式）
-        train_block["if_save_every_weights"] = True  # 必须为True，才能保存精简格式（weight + config + info）
-    
-    tiny_dataset = int(dataset_sample_count or 0) > 0 and int(dataset_sample_count or 0) <= TINY_DATASET_THRESHOLD
-    if tiny_dataset and _env_flag("TRAIN_TINY_SAVE_LAST_ONLY", ENTERPRISE_OPT_DEFAULT_ON):
-        train_block["save_every_epoch"] = max(1, total_epochs)
-        train_block["if_save_latest"] = 1
-        logger.info(
-            f"[S2配置] tiny_dataset保存优化已启用: sample_count={dataset_sample_count}, "
-            f"save_every_epoch={train_block['save_every_epoch']}"
-        )
+    # 极速策略：仅保留最终权重（不存中间epoch）
+    train_block["save_every_epoch"] = max(1, total_epochs)
+    train_block["if_save_latest"] = 1
+    train_block["if_save_every_weights"] = True
+    logger.info(
+        f"[S2配置] 最终权重模式已启用: sample_count={dataset_sample_count}, "
+        f"save_every_epoch={train_block['save_every_epoch']}"
+    )
 
     data_block = data.setdefault("data", {})
     # 确保exp_dir指向processed目录（包含2-name2text.txt等文件）
@@ -1832,11 +2526,7 @@ def _build_s2_config(
         # 如果训练脚本支持DataLoader，这些参数会生效
         pass  # S2的数据加载在训练脚本中控制，通过环境变量优化
     hop_length = int(data_block.get("hop_length", 640) or 640)
-    # 官方值：segment_size=20480
-    official_segment_size = 20480  # 官方值
-    segment_size = int(train_block.get("segment_size", official_segment_size) or official_segment_size)
-    # 使用官方值，但确保是hop_length的倍数
-    segment_size = official_segment_size
+    segment_size = int(max_segment_size or 20480)
     if segment_size % hop_length != 0:
         segment_size = segment_size - (segment_size % hop_length)
     segment_size = max(hop_length, segment_size)
@@ -1888,7 +2578,7 @@ def _validate_gpt_model_file(model_path: Path) -> tuple[bool, str]:
         if size_mb < 1.0:
             return False, f"GPTæ¨¡åæä»¶è¿å°({size_mb:.2f}MB): {model_path}"
 
-        checkpoint = torch.load(str(model_path), map_location="cpu")
+        checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict):
             return False, f"GPTæ¨¡åç»æå¼å¸¸(type={type(checkpoint)}): {model_path}"
 
@@ -1945,7 +2635,7 @@ def _validate_sovits_model_file(model_path: Path, version: str = "v2Pro") -> tup
         except Exception:
             pass
 
-        checkpoint = torch.load(str(model_path), map_location="cpu")
+        checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict):
             weight_obj = checkpoint.get("weight") or checkpoint.get("model")
             ok, msg = _inspect_sovits_weight_dict(weight_obj)
@@ -1963,7 +2653,7 @@ def _collect_registered_sovits_paths_for_user(user_id: str) -> set[str]:
     if not user_key:
         return set()
 
-    library_path = BASE_DIR / "modules" / "tts_backend" / "data" / "voice_library.json"
+    library_path = BASE_DIR / "voice_library.json"
     if not library_path.exists():
         return set()
 
@@ -2066,6 +2756,7 @@ def _cleanup_user_stale_sovits_weights(
 def run_training(task_id: str, dataset_path: str, output_path: str, log_path: str, params: TrainParams):
     """后台执行真实训练流程"""
     set_high_priority()
+    run_start_ts = time.time()
     
     # 初始化损失监控器
     loss_monitor = None
@@ -2091,6 +2782,8 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 model_version=str(params.model_version),
                 phases_jsonl=str(_tp_path),
             )
+        max_speed_mode = _env_flag("TRAIN_MAX_SPEED_MODE", MAX_SPEED_DEFAULT_ON)
+        auto_select_gpus = _env_flag("TRAIN_AUTO_SELECT_GPUS", True)
         with open(log_path, "w", encoding="utf-8") as f:
             f.write(f"开始训练：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             # 兼容Pydantic v1和v2
@@ -2134,7 +2827,28 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
         
         # 音频降噪除杂预处理（在创建数据集列表之前）
         _t_pur_all = time.perf_counter()
-        if AUDIO_PURIFICATION_AVAILABLE:
+        purify_enabled = AUDIO_PURIFICATION_AVAILABLE and _env_flag("TRAIN_ENABLE_AUDIO_PURIFY", True)
+        # 统一策略：上传阶段负责提纯；训练阶段默认不再重复提纯（避免重复耗时）。
+        # 如需恢复训练阶段提纯，可显式设置 TRAIN_REPEAT_AUDIO_PURIFY=1。
+        repeat_purify_in_training = _env_flag("TRAIN_REPEAT_AUDIO_PURIFY", False)
+        if not repeat_purify_in_training:
+            purify_enabled = False
+            try:
+                ds_dir = Path(dataset_path)
+                ok_flags = list(ds_dir.glob(".purified_sentence_*.ok"))
+                pending_flags = list(ds_dir.glob(".purify_pending_sentence_*.flag"))
+                fail_flags = list(ds_dir.glob(".purify_failed_sentence_*.txt"))
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(
+                        "\n[音频降噪除杂] 已按策略关闭训练阶段重复提纯"
+                        "（上传阶段提纯优先，TRAIN_REPEAT_AUDIO_PURIFY=0）。\n"
+                    )
+                    logf.write(
+                        f"[音频降噪除杂] 上传提纯标记统计: ok={len(ok_flags)}, pending={len(pending_flags)}, failed={len(fail_flags)}\n"
+                    )
+            except Exception:
+                pass
+        if purify_enabled:
             train_tasks[task_id]["message"] = "正在进行音频降噪除杂..."
             train_tasks[task_id]["progress"] = 3
             try:
@@ -2176,7 +2890,7 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                     success_count = 0
                     failed_count = 0
                     
-                    purify_strategy = os.environ.get("TRAIN_AUDIO_PURIFY_STRATEGY", "deepfilternet3_wpe")
+                    purify_strategy = os.environ.get("TRAIN_AUDIO_PURIFY_STRATEGY", "deepfilternet2_wpe")
                     with open(log_path, "a", encoding="utf-8") as logf:
                         logf.write(f"音频清洗策略: {purify_strategy} (去噪+去混响默认开启)\n")
                     for idx, audio_file in enumerate(audio_files):
@@ -2212,13 +2926,14 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                             shutil.move(str(purified_file), str(audio_file))
                             success_count += 1
                             with open(log_path, "a", encoding="utf-8") as logf:
-                                logf.write(
-                                    f"  - {audio_file.name}: denoise={purify_meta.get('denoise_engine', 'unknown')}, "
-                                    f"dereverb={purify_meta.get('dereverb_engine', 'unknown')}, "
-                                    f"spectral={purify_meta.get('spectral_gate_engine', 'none')}, "
-                                    f"trim={purify_meta.get('silence_trim', 'none')}, "
-                                    f"trim_sec={purify_meta.get('silence_trim_src_sec', 'na')}->{purify_meta.get('silence_trim_dst_sec', 'na')}\n"
-                                )
+                                if not max_speed_mode:
+                                    logf.write(
+                                        f"  - {audio_file.name}: denoise={purify_meta.get('denoise_engine', 'unknown')}, "
+                                        f"dereverb={purify_meta.get('dereverb_engine', 'unknown')}, "
+                                        f"spectral={purify_meta.get('spectral_gate_engine', 'none')}, "
+                                        f"trim={purify_meta.get('silence_trim', 'none')}, "
+                                        f"trim_sec={purify_meta.get('silence_trim_src_sec', 'na')}->{purify_meta.get('silence_trim_dst_sec', 'na')}\n"
+                                    )
                             
                         except Exception as e:
                             failed_count += 1
@@ -2250,13 +2965,17 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 logger.warning(f"音频降噪除杂失败: {e}，将继续使用原始音频")
         else:
             with open(log_path, "a", encoding="utf-8") as logf:
-                logf.write("\n[音频降噪除杂] 模块不可用，跳过\n")
+                if AUDIO_PURIFICATION_AVAILABLE:
+                    logf.write("\n[音频降噪除杂] 已被显式关闭（TRAIN_ENABLE_AUDIO_PURIFY=0），跳过并保留原始音频。\n")
+                else:
+                    logf.write("\n[音频降噪除杂] 模块不可用，跳过\n")
         _rec_pu = _train_phase_get()
         if _rec_pu is not None:
             _rec_pu.emit(
                 "audio_purification_section_total",
                 time.perf_counter() - _t_pur_all,
                 purification_module_available=bool(AUDIO_PURIFICATION_AVAILABLE),
+                purification_enabled=bool(purify_enabled),
             )
         
         train_tasks[task_id]["progress"] = 5
@@ -2271,13 +2990,26 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
 
         dataset_sample_count = _count_dataset_samples(dataset_list_path)
         visible_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        # wx_api 进程常驻时可能只绑定单卡；训练阶段优先按 TRAIN_S1/S2_* 的可见卡范围决策并行度。
+        s1_env_gpu_count = len(_parse_gpu_spec_to_list(os.environ.get("TRAIN_S1_CUDA_VISIBLE_DEVICES", "")))
+        s2_env_gpu_count = len(_parse_gpu_spec_to_list(os.environ.get("TRAIN_S2_CUDA_VISIBLE_DEVICES", "")))
+        visible_gpu_count = max(visible_gpu_count, s1_env_gpu_count, s2_env_gpu_count)
         s1_target_gpu_count, s2_target_gpu_count, gpu_policy_tag = _decide_training_gpu_counts(
             dataset_sample_count,
             torch.cuda.is_available(),
             max_visible_gpus=visible_gpu_count,
         )
+        force_serial_same_dual = (
+            (not _env_flag("TRAIN_PARALLEL_S1_S2", True))
+            and _env_flag("TRAIN_FORCE_SERIAL_SAME_GPU_PAIR", True)
+            and torch.cuda.is_available()
+        )
+        if force_serial_same_dual and visible_gpu_count >= 2:
+            s1_target_gpu_count = 2
+            s2_target_gpu_count = 2
+            gpu_policy_tag = f"{gpu_policy_tag}+forced_dual_serial_same_pair"
 
-        if _env_flag("TRAIN_USE_ALL_IDLE_GPU", ENTERPRISE_OPT_DEFAULT_ON) and visible_gpu_count > 0 and dataset_sample_count > TINY_DATASET_THRESHOLD:
+        if _env_flag("TRAIN_USE_ALL_IDLE_GPU", ENTERPRISE_OPT_DEFAULT_ON) and visible_gpu_count > 0 and dataset_sample_count >= TINY_DATASET_THRESHOLD:
             # 企业模式默认允许使用全部空闲卡（由 _find_free_gpus 实际筛出），以追求训练吞吐。
             s1_target_gpu_count = max(1, visible_gpu_count)
             s2_target_gpu_count = max(1, visible_gpu_count)
@@ -2302,9 +3034,12 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
             version=params.model_version,
             log_file=log_path,
         )
+        prep_wall_s = time.perf_counter() - _t_prep
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[耗时统计] 预处理总耗时: {prep_wall_s:.2f}s ({prep_wall_s/60:.2f} 分钟)\n")
         _rec_pr = _train_phase_get()
         if _rec_pr is not None:
-            _rec_pr.emit("prepare_steps_total_wall", time.perf_counter() - _t_prep)
+            _rec_pr.emit("prepare_steps_total_wall", prep_wall_s)
         
         # 查找预处理输出文件
         _t_post0 = time.perf_counter()
@@ -2390,13 +3125,20 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
         has_gpu = torch.cuda.is_available()
         gpu_info = f"GPU: {torch.cuda.get_device_name(0)}" if has_gpu else "CPU"
         
-        # 强制使用官方参数，不进行任何显存优化
-        # S1官方参数：batch_size=8, epochs=15
+        # S1 参数：默认沿用 32/15，可由 TRAIN_S1_BATCH_SIZE / TRAIN_S1_MAX_EPOCHS 覆盖（用于调优实验）
+        try:
+            s1_target_bs = int(os.environ.get("TRAIN_S1_BATCH_SIZE", "32"))
+        except Exception:
+            s1_target_bs = 32
+        try:
+            s1_target_epochs = int(os.environ.get("TRAIN_S1_MAX_EPOCHS", "15"))
+        except Exception:
+            s1_target_epochs = 15
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n训练模式: {mode_text}\n")
             f.write(f"硬件: {gpu_info}\n")
-            f.write(f"使用官方参数: batch_size=8, epochs=15 (S1)\n")
-            f.write(f"注意: 已禁用显存优化，强制使用官方参数以确保与官网一致\n")
+            f.write(f"使用当前配置: batch_size={s1_target_bs}, epochs={s1_target_epochs} (S1)\n")
+            f.write(f"说明: 可通过 TRAIN_S1_BATCH_SIZE / TRAIN_S1_MAX_EPOCHS 覆盖\n")
         
         s1_config_path = _build_s1_config(
             task_id=task_id,
@@ -2406,48 +3148,59 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
             job_dir=job_dir,
             semantic_path=semantic_path,
             phoneme_path=phoneme_path,
-            batch_size=8,  # 强制使用官方值
-            epochs=15,  # 强制使用官方值
+            batch_size=s1_target_bs,
+            epochs=s1_target_epochs,
             learning_rate=params.learning_rate,
             fast_mode=params.fast_mode,
             dataset_sample_count=dataset_sample_count,
         )
         
-        # 验证配置文件（确保使用官方参数）
+        # 验证配置文件（与当前目标参数一致）
         config_check = yaml.safe_load(Path(s1_config_path).read_text(encoding="utf-8"))
         actual_batch_size = config_check['train']['batch_size']
         actual_epochs = config_check['train']['epochs']
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"[S1配置验证] 实际使用的训练参数:\n")
-            f.write(f"  batch_size: {actual_batch_size} (官方值: 8)\n")
-            f.write(f"  epochs: {actual_epochs} (官方值: 15)\n")
-            f.write(f"  save_every_n_epoch: {config_check['train'].get('save_every_n_epoch', 'N/A')} (官方值: 5)\n")
-            f.write(f"  precision: {config_check['train'].get('precision', 'N/A')} (官方值: 16-mixed)\n")
-            if actual_batch_size != 8:
-                f.write(f"  ⚠️ 警告: batch_size不是官方值8！\n")
-            if actual_epochs != 15 and not params.fast_mode:
-                f.write(f"  ⚠️ 警告: epochs不是官方值15！\n")
+            f.write(f"  batch_size: {actual_batch_size} (目标: {s1_target_bs})\n")
+            f.write(f"  epochs: {actual_epochs} (目标: {s1_target_epochs})\n")
+            f.write(f"  save_every_n_epoch: {config_check['train'].get('save_every_n_epoch', 'N/A')}\n")
+            f.write(f"  precision: {config_check['train'].get('precision', 'N/A')}\n")
+            if actual_batch_size != s1_target_bs:
+                f.write(f"  ⚠️ 警告: batch_size 与目标 {s1_target_bs} 不一致\n")
+            if actual_epochs != s1_target_epochs and not params.fast_mode:
+                f.write(f"  ⚠️ 警告: epochs 与目标 {s1_target_epochs} 不一致\n")
             f.write(f"{'='*60}\n")
         
         # 记录S1训练开始时间
         s1_start_time = time.time()
-        
+
+        shared_gpu_pair_env: Optional[str] = None
         # 确定用于S1训练的GPU编号（多卡训练：使用2张卡）
         # 如果环境变量中已设置，则使用；否则自动选择空闲GPU
-        s1_gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+        s1_gpu_env = os.environ.get("TRAIN_S1_CUDA_VISIBLE_DEVICES")
+        if auto_select_gpus and torch.cuda.is_available():
+            s1_pick = _pick_alternative_gpus(
+                exclude_gpus=[],
+                need_count=max(1, int(s1_target_gpu_count)),
+                min_free_memory_mb=8192,
+            )
+            if s1_pick:
+                s1_gpu_env = ",".join(map(str, s1_pick))
+        if not s1_gpu_env:
+            s1_gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
         if s1_gpu_env is None:
-            # 自动选择空闲GPU（至少需要2张GPU，每张至少8GB空闲显存用于GPT训练）
-            if torch.cuda.is_available():
-                free_gpus = _find_free_gpus(min_free_memory_mb=8192, num_gpus=s1_target_gpu_count)
-                if free_gpus:
-                    # 转换为逗号分隔的格式（用于CUDA_VISIBLE_DEVICES）
-                    s1_gpu_env = ",".join(map(str, free_gpus))
-                else:
-                    s1_gpu_env = "0"  # 默认使用GPU 0
-            else:
-                s1_gpu_env = "0"
-        
+            s1_gpu_env = "0"
+        if force_serial_same_dual:
+            s1_gpus = _parse_gpu_spec_to_list(str(s1_gpu_env))
+            if len(s1_gpus) < 2:
+                retry_gpus = _find_free_gpus(min_free_memory_mb=8192, num_gpus=2)
+                if len(retry_gpus) >= 2:
+                    s1_gpus = retry_gpus[:2]
+            if len(s1_gpus) >= 2:
+                s1_gpu_env = ",".join(map(str, s1_gpus[:2]))
+                shared_gpu_pair_env = s1_gpu_env
+
         s1_env = {
             "CUDA_VISIBLE_DEVICES": s1_gpu_env,
         }
@@ -2456,59 +3209,111 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
             gpu_count = len(s1_gpu_env.split(",")) if s1_gpu_env else 1
             f.write(f"\n[S1训练] 使用 {gpu_count} 张GPU: {s1_gpu_env}\n")
         
-        _run_command(
-            task_id,
-            "GPT (s1) 训练",
-            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "s1_train.py"), "--config_file", str(s1_config_path)],
-            log_path,
-            s1_env,
-        )
-        train_tasks[task_id]["progress"] = 75
-        train_tasks[task_id]["message"] = "GPT 训练完成，准备 SoVITS 训练..."
-        
-        # 记录S1训练完成时间
-        s1_duration = time.time() - s1_start_time
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n[S1训练] GPT模型训练完成，耗时: {s1_duration/60:.2f} 分钟\n")
+        s1_cmd = [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "s1_train.py"), "--config_file", str(s1_config_path)]
+        run_s1_s2_parallel = _env_flag("TRAIN_PARALLEL_S1_S2", True)
+        s1_proc = None
+        s1_log_fp = None
+        if run_s1_s2_parallel:
+            # 与 S2 并行执行：S1 改为后台子进程，S2 走原有逻辑（含重试/换卡）。
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n[并行训练] 已启用 TRAIN_PARALLEL_S1_S2=1，S1/S2 将并行执行\n")
+                f.write(f"[并行训练][S1] 命令: {' '.join(s1_cmd)}\n")
+                f.write(f"[并行训练][S1] CUDA_VISIBLE_DEVICES={s1_env.get('CUDA_VISIBLE_DEVICES', '')}\n")
+            s1_env_os = os.environ.copy()
+            s1_env_os.update({k: str(v) for k, v in s1_env.items()})
+            # S1 与 S2 会同时向同一训练日志追加输出；这是预期行为。
+            s1_log_fp = open(log_path, "a", encoding="utf-8")
+            s1_proc = subprocess.Popen(
+                s1_cmd,
+                stdout=s1_log_fp,
+                stderr=s1_log_fp,
+                text=True,
+                env=s1_env_os,
+            )
+            train_tasks[task_id]["progress"] = 72
+            train_tasks[task_id]["message"] = "S1/S2 并行训练中..."
+        else:
+            _run_command(
+                task_id,
+                "GPT (s1) 训练",
+                s1_cmd,
+                log_path,
+                s1_env,
+            )
+            train_tasks[task_id]["progress"] = 75
+            train_tasks[task_id]["message"] = "GPT 训练完成，准备 SoVITS 训练..."
+            # 记录S1训练完成时间（串行模式）
+            s1_duration = time.time() - s1_start_time
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[S1训练] GPT模型训练完成，耗时: {s1_duration/60:.2f} 分钟\n")
         
         # S2 SoVITS 训练
         # 强制使用官方参数，不进行任何显存优化
         # S2官方参数：batch_size=8, epochs=8
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n使用官方参数: batch_size=8, epochs=8 (S2)\n")
-            f.write(f"注意: 已禁用显存优化，强制使用官方参数以确保与官网一致\n")
+            f.write(f"\n[S2] 使用 train_api 写入的 batch/segment（v2Pro 默认与离线验证一致，可用 TRAIN_S2_* 覆盖）\n")
         
-        # 确定用于S2训练的GPU编号（多卡训练：使用4张卡）
-        # 如果环境变量中已设置，则使用；否则自动选择空闲GPU
-        gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+        # 确定用于S2训练的 GPU：串行同卡策略优先，其次 TRAIN_S2_CUDA_VISIBLE_DEVICES。
+        if force_serial_same_dual and shared_gpu_pair_env:
+            gpu_env = shared_gpu_pair_env
+        else:
+            gpu_env = os.environ.get("TRAIN_S2_CUDA_VISIBLE_DEVICES")
+        if auto_select_gpus and torch.cuda.is_available():
+            s2_pick = _pick_alternative_gpus(
+                exclude_gpus=[],
+                need_count=max(1, int(s2_target_gpu_count)),
+                min_free_memory_mb=8192,
+            )
+            if s2_pick:
+                gpu_env = ",".join(map(str, s2_pick))
+        if not gpu_env:
+            gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
         if gpu_env is None:
-            # 自动选择空闲GPU（至少需要4张GPU，每张至少4GB空闲显存用于SoVITS训练）
-            if torch.cuda.is_available():
-                free_gpus = _find_free_gpus(min_free_memory_mb=4096, num_gpus=s2_target_gpu_count)
-                if free_gpus:
-                    # 转换为逗号分隔的格式（用于CUDA_VISIBLE_DEVICES）
-                    gpu_env = ",".join(map(str, free_gpus))
-                else:
-                    gpu_env = "0"  # 默认使用GPU 0
-            else:
-                gpu_env = "0"
+            gpu_env = "0"
+        if force_serial_same_dual:
+            s2_gpus = _parse_gpu_spec_to_list(str(gpu_env))
+            if len(s2_gpus) < 2:
+                s2_fallback = _find_free_gpus(min_free_memory_mb=8192, num_gpus=2)
+                if len(s2_fallback) >= 2:
+                    s2_gpus = s2_fallback[:2]
+            if len(s2_gpus) >= 2:
+                gpu_env = ",".join(map(str, s2_gpus[:2]))
+
         # 将逗号分隔的格式转换为配置文件需要的格式（用"-"连接，如"0-1-2-3"）
         s2_gpu_numbers = str(gpu_env).replace(",", "-")
         
+        if params.model_version in {"v2Pro", "v2ProPlus"}:
+            try:
+                s2_bs = int(os.environ.get("TRAIN_S2_BATCH_SIZE", "16"))
+            except Exception:
+                s2_bs = 16
+            try:
+                s2_seg = int(os.environ.get("TRAIN_S2_SEGMENT_SIZE", "20480"))
+            except Exception:
+                s2_seg = 20480
+            try:
+                s2_epochs = int(os.environ.get("TRAIN_S2_MAX_EPOCHS", "6"))
+            except Exception:
+                s2_epochs = 5
+        else:
+            s2_bs = 8
+            s2_seg = 20480
+            s2_epochs = 8
+
         s2_config_path = _build_s2_config(
             exp_name=exp_name,
             exp_dir=exp_dir,
             version=params.model_version,
             job_dir=job_dir,
-            target_batch_size=8,  # 强制使用官方值
-            max_segment_size=20480,  # 官方值：20480
-            max_epochs=8,  # 强制使用官方值8轮
+            target_batch_size=s2_bs,
+            max_segment_size=s2_seg,
+            max_epochs=s2_epochs,
             fast_mode=params.fast_mode,
             gpu_numbers=s2_gpu_numbers,
             dataset_sample_count=dataset_sample_count,
         )
         train_tasks[task_id]["progress"] = 80
-        train_tasks[task_id]["message"] = f"开始 SoVITS 模型训练... (batch_size=8, epochs=8)"
+        train_tasks[task_id]["message"] = f"开始 SoVITS 模型训练... (batch_size={s2_bs}, segment={s2_seg}, epochs={s2_epochs})"
         
         # 记录S2训练开始时间
         s2_start_time = time.time()
@@ -2731,22 +3536,22 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 raise  # 重新抛出数据验证错误
             logger.warning(f"验证SoVITS训练数据时出错（继续训练）: {e}")
         
-        # 验证S2配置文件（确保使用官方参数）
+        # 验证S2配置文件（与本次写入的目标 batch/epochs 一致）
         s2_config_check = json.loads(s2_config_path.read_text(encoding="utf-8"))
         s2_actual_batch_size = s2_config_check['train']['batch_size']
         s2_actual_epochs = s2_config_check['train']['epochs']
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n{'='*60}\n")
             f.write(f"[S2配置验证] 实际使用的训练参数:\n")
-            f.write(f"  batch_size: {s2_actual_batch_size} (官方值: 8)\n")
-            f.write(f"  epochs: {s2_actual_epochs} (官方值: 8)\n")
-            f.write(f"  save_every_epoch: {s2_config_check['train'].get('save_every_epoch', 'N/A')} (官方值: 4)\n")
-            f.write(f"  fp16_run: {s2_config_check['train'].get('fp16_run', 'N/A')} (官方值: True)\n")
-            f.write(f"  segment_size: {s2_config_check['train'].get('segment_size', 'N/A')} (官方值: 20480)\n")
-            if s2_actual_batch_size != 8:
-                f.write(f"  ⚠️ 警告: batch_size不是官方值8！\n")
-            if s2_actual_epochs != 8 and not params.fast_mode:
-                f.write(f"  ⚠️ 警告: epochs不是官方值8！\n")
+            f.write(f"  batch_size: {s2_actual_batch_size} (目标: {s2_bs})\n")
+            f.write(f"  epochs: {s2_actual_epochs} (目标: {s2_epochs})\n")
+            f.write(f"  save_every_epoch: {s2_config_check['train'].get('save_every_epoch', 'N/A')}\n")
+            f.write(f"  fp16_run: {s2_config_check['train'].get('fp16_run', 'N/A')}\n")
+            f.write(f"  segment_size: {s2_config_check['train'].get('segment_size', 'N/A')}\n")
+            if s2_actual_batch_size != s2_bs:
+                f.write(f"  ⚠️ 警告: batch_size 与目标 {s2_bs} 不一致\n")
+            if s2_actual_epochs != s2_epochs and not params.fast_mode:
+                f.write(f"  ⚠️ 警告: epochs 与目标 {s2_epochs} 不一致\n")
             f.write(f"{'='*60}\n")
         
         s2_script = BASE_DIR / "GPT_SoVITS" / "s2_train.py"
@@ -2759,7 +3564,6 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
         # 优化配置：利用RTX 4090的24GB显存，提升训练速度
         # 检查GPU显存是否充足（至少16GB空闲才使用优化配置）
         try:
-            import subprocess
             result = subprocess.run(
                 ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
                 capture_output=True, text=True, timeout=5
@@ -2781,17 +3585,19 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
         except:
             use_optimized = False
         
-        # 强制使用官方参数：batch_size=8，不进行任何动态调整
-        # 确保日志显示的参数与实际训练参数完全一致
-        official_batch_size = 8  # 官方值：batch_size=8
-        actual_batch_size = official_batch_size  # 强制使用官方值，不根据显存调整
+        # batch_size 以已写入的 tmp_s2.json 为准（避免此处再强制改回 8）
+        try:
+            s2_pre = json.loads(s2_config_path.read_text(encoding="utf-8"))
+            official_batch_size = int(s2_pre.get("train", {}).get("batch_size", 8))
+        except Exception:
+            official_batch_size = 8
+        actual_batch_size = official_batch_size
         
         # 训练开始前检查GPU显存（仅用于日志记录，不用于调整参数）
         actual_gpu_mem_free = 0
         actual_gpu_mem_total = 0
         actual_gpu_mem_used = 0
         try:
-            import subprocess
             result = subprocess.run(
                 ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
                 capture_output=True, text=True, timeout=5
@@ -2819,35 +3625,58 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                        f"已用={actual_gpu_mem_used/1024:.2f}GB, 空闲={actual_gpu_mem_free/1024:.2f}GB\n")
             else:
                 f.write(f"\n[训练前显存检查] GPU {gpu_index}: 无法获取显存信息\n")
-            f.write(f"[训练参数] 强制使用官方参数: batch_size={actual_batch_size}（不根据显存调整）\n")
+            f.write(f"[训练参数] SoVITS batch_size={actual_batch_size}（来自 tmp_s2.json）\n")
         
-        # 验证配置文件中的batch_size是否为官方值8
         try:
             s2_config = json.loads(s2_config_path.read_text(encoding="utf-8"))
             config_batch_size = s2_config.get("train", {}).get("batch_size", official_batch_size)
-            if config_batch_size != official_batch_size:
-                # 如果配置文件中的batch_size不是官方值，强制更新为官方值
-                s2_config["train"]["batch_size"] = official_batch_size
-                s2_config_path.write_text(json.dumps(s2_config, ensure_ascii=False, indent=2), encoding="utf-8")
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"✅ 已强制更新配置文件batch_size: {config_batch_size} -> {official_batch_size}（官方值）\n")
-            else:
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"✅ 配置文件batch_size={official_batch_size}（官方值，无需更新）\n")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"✅ 配置文件 batch_size={config_batch_size}\n")
         except Exception as e:
             with open(log_path, "a", encoding="utf-8") as f:
-                f.write(f"⚠️ 读取配置文件失败: {e}，将使用官方值batch_size={official_batch_size}\n")
+                f.write(f"⚠️ 读取配置文件失败: {e}\n")
         
-        # 使用官方参数：batch_size=8，不根据显存调整
-        # 环境变量仅用于兼容性，实际batch_size由配置文件决定
         # 使用多卡格式（逗号分隔，如"0,1,2,3"）
         gpu_env_str = str(cuda_device).replace("-", ",")  # 确保是逗号分隔格式
+        if force_serial_same_dual:
+            ready, free_map = _wait_gpus_memory_ready(
+                gpu_spec=gpu_env_str,
+                min_free_memory_mb=int(os.environ.get("TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB", "8192") or "8192"),
+                timeout_sec=int(os.environ.get("TRAIN_SERIAL_GPU_GUARD_TIMEOUT_SEC", "120") or "120"),
+                poll_sec=2.0,
+            )
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    f"[串行同卡保护] S1->S2 复用GPU对={gpu_env_str}, "
+                    f"显存门槛={os.environ.get('TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB', '8192')}MB, "
+                    f"检测结果={'通过' if ready else '超时'}\n"
+                )
+                if free_map:
+                    f.write(f"[串行同卡保护] 当前空闲显存(MB): {free_map}\n")
+            if not ready:
+                raise RuntimeError(
+                    f"串行同卡保护失败：GPU {gpu_env_str} 在限定时间内未达到最小空闲显存要求，已中止以避免OOM。"
+                )
+
+        def _s2_os_env(name: str, default: str) -> str:
+            v = os.environ.get(name, "").strip()
+            return v if v != "" else default
+
         conservative_env = {
             "CUDA_VISIBLE_DEVICES": gpu_env_str,
             "S2_SINGLE_PROCESS": "1",
             "S2_DATA_WORKERS": "4" if use_optimized else "0",  # 显存充足时使用多线程
             "S2_PREFETCH": "4" if use_optimized else "1",
-            "S2_BATCH": str(official_batch_size),  # 强制使用官方值8
+            "S2_BATCH": str(official_batch_size),
+            "S2_NUM_WORKERS": _s2_os_env("S2_NUM_WORKERS", "4"),
+            "S2_PREFETCH_FACTOR": _s2_os_env("S2_PREFETCH_FACTOR", "8"),
+            "S2_PIN_MEMORY": _s2_os_env("S2_PIN_MEMORY", "1"),
+            "S2_PERSISTENT_WORKERS": _s2_os_env("S2_PERSISTENT_WORKERS", "1"),
+            "S2_FIND_UNUSED_PARAMETERS": _s2_os_env("S2_FIND_UNUSED_PARAMETERS", "1"),
+            "S2_DISABLE_TQDM": _s2_os_env("S2_DISABLE_TQDM", "1"),
+            "S2_DISABLE_PLOT_LOG": _s2_os_env("S2_DISABLE_PLOT_LOG", "1"),
+            "S2_ZERO_GRAD_SET_TO_NONE": _s2_os_env("S2_ZERO_GRAD_SET_TO_NONE", "1"),
+            "S2_CUDNN_BENCHMARK": _s2_os_env("S2_CUDNN_BENCHMARK", "1"),
             "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:32,expandable_segments:True",
             "S2_MIN_SAMPLES": "10",
             "S2_SAMPLE_LIMIT": "15",
@@ -2875,9 +3704,9 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"⚠️ GPU缓存清理失败: {e}，将继续训练\n")
         
-        # S2训练：使用官方参数，如果OOM则直接失败（不降低batch_size）
+        # S2训练：使用当前写入配置（batch/epochs），如果OOM则按既有策略处理
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"\n[开始训练] 使用官方参数: batch_size={official_batch_size}, epochs=8\n")
+            f.write(f"\n[开始训练] 使用当前配置: batch_size={official_batch_size}, epochs={s2_epochs}\n")
             f.write("注意: 如果出现OOM错误，请检查GPU显存是否充足（至少需要4GB空闲显存）\n")
                 
         # 确保配置文件中的batch_size为官方值
@@ -2894,28 +3723,194 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 f.write(f"⚠️ 更新配置失败: {e}\n")
                 
         # 直接执行训练，不进行重试（保持官方参数）
-        _run_command(
-            task_id,
-            "SoVITS (s2) 训练",
-            [PYTHON_EXEC, "-s", str(s2_script), "--config", str(s2_config_path)],
-            log_path,
-            {
-                **conservative_env,
-                "S2_OUTDIR": str(exp_dir / f"logs_s2_{params.model_version}"),
-                "S2_SAVE_WEIGHT_DIR": str(
-                    _get_versioned_path(
-                        "SoVITS_weight_version2root",
-                        params.model_version,
-                        "SoVITS_weights_v2Pro",
+        s2_base_cmd = [PYTHON_EXEC, "-s", str(s2_script), "--config", str(s2_config_path)]
+        s2_base_env = {
+            **conservative_env,
+            "S2_OUTDIR": str(exp_dir / f"logs_s2_{params.model_version}"),
+            "S2_SAVE_WEIGHT_DIR": str(
+                _get_versioned_path(
+                    "SoVITS_weight_version2root",
+                    params.model_version,
+                    "SoVITS_weights_v2Pro",
+                )
+            ),
+            "S2_NAME": exp_name,
+            # 默认走更快模式；若命中特定DDP未使用参数错误再自动兼容重试。
+            "S2_DDP_FIND_UNUSED_PARAMETERS": "0",
+        }
+
+        try:
+            _run_command(
+                task_id,
+                "SoVITS (s2) 训练",
+                s2_base_cmd,
+                log_path,
+                s2_base_env,
+            )
+        except RuntimeError as s2_err:
+            s2_err_text = str(s2_err)
+            lower_s2_err = s2_err_text.lower()
+            is_oom_error = ("out of memory" in lower_s2_err) and ("cuda" in lower_s2_err)
+
+            # 运行时显存变化会导致“启动时选到的卡”在开训前被占满；命中OOM时自动换卡重试一次。
+            if is_oom_error:
+                current_gpu_list = _parse_gpu_spec_to_list(gpu_env_str)
+                alt_gpu_list = _pick_alternative_gpus(
+                    exclude_gpus=current_gpu_list,
+                    need_count=max(1, len(current_gpu_list) or gpu_count),
+                    min_free_memory_mb=8192,
+                )
+                alt_gpu_env_str = ",".join(str(x) for x in alt_gpu_list)
+                if alt_gpu_env_str and alt_gpu_env_str != gpu_env_str:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(
+                            "\n[S2回退] 命中CUDA OOM，自动改用更空闲GPU重试一次: "
+                            f"{gpu_env_str} -> {alt_gpu_env_str}\n"
+                        )
+                    if task_id in train_tasks:
+                        train_tasks[task_id]["status"] = "running"
+                        train_tasks[task_id]["message"] = (
+                            f"SoVITS训练显存不足，自动换卡重试中（{gpu_env_str} -> {alt_gpu_env_str}）..."
+                        )
+                    s2_retry_env_oom = {**s2_base_env, "CUDA_VISIBLE_DEVICES": alt_gpu_env_str}
+                    try:
+                        _run_command(
+                            task_id,
+                            "SoVITS (s2) 训练(换卡重试)",
+                            s2_base_cmd,
+                            log_path,
+                            s2_retry_env_oom,
+                        )
+                        # 换卡重试成功后直接结束异常处理
+                        s2_err_text = ""
+                    except RuntimeError as s2_retry_err:
+                        s2_retry_err_text = str(s2_retry_err)
+                        s2_retry_is_oom = ("out of memory" in s2_retry_err_text.lower()) and ("cuda" in s2_retry_err_text.lower())
+                        if not s2_retry_is_oom:
+                            raise
+
+                        # 多卡依然OOM：自动退到单卡（选最空闲卡）再重试一次
+                        single_gpu_pick = _pick_alternative_gpus(
+                            exclude_gpus=[],
+                            need_count=1,
+                            min_free_memory_mb=8192,
+                        )
+                        single_gpu = None
+                        if single_gpu_pick:
+                            single_gpu = int(single_gpu_pick[0])
+                        elif alt_gpu_list:
+                            single_gpu = int(alt_gpu_list[0])
+                        elif current_gpu_list:
+                            single_gpu = int(current_gpu_list[0])
+
+                        if single_gpu is None:
+                            raise
+
+                        single_gpu_env_str = str(single_gpu)
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(
+                                "\n[S2回退] 多卡训练OOM，自动降级到单卡重试: "
+                                f"{alt_gpu_env_str} -> {single_gpu_env_str}\n"
+                            )
+                        if task_id in train_tasks:
+                            train_tasks[task_id]["status"] = "running"
+                            train_tasks[task_id]["message"] = (
+                                f"SoVITS多卡显存不足，自动降级单卡重试中（{single_gpu_env_str}）..."
+                            )
+
+                        s2_retry_env_single = {**s2_base_env, "CUDA_VISIBLE_DEVICES": single_gpu_env_str}
+                        _run_command(
+                            task_id,
+                            "SoVITS (s2) 训练(单卡回退重试)",
+                            s2_base_cmd,
+                            log_path,
+                            s2_retry_env_single,
+                        )
+                        s2_err_text = ""
+                else:
+                    # 无可用换卡目标时，直接尝试单卡回退（选最空闲卡）
+                    single_gpu_pick = _pick_alternative_gpus(
+                        exclude_gpus=[],
+                        need_count=1,
+                        min_free_memory_mb=8192,
                     )
-                ),
-                "S2_NAME": exp_name,
-            },
-        )
+                    single_gpu = None
+                    if single_gpu_pick:
+                        single_gpu = int(single_gpu_pick[0])
+                    elif current_gpu_list:
+                        single_gpu = int(current_gpu_list[0])
+                    if single_gpu is None:
+                        raise
+
+                    single_gpu_env_str = str(single_gpu)
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(
+                            "\n[S2回退] 命中CUDA OOM且无可用多卡切换，自动降级到单卡重试: "
+                            f"{gpu_env_str} -> {single_gpu_env_str}\n"
+                        )
+                    if task_id in train_tasks:
+                        train_tasks[task_id]["status"] = "running"
+                        train_tasks[task_id]["message"] = (
+                            f"SoVITS显存不足，自动降级单卡重试中（{single_gpu_env_str}）..."
+                        )
+                    s2_retry_env_single = {**s2_base_env, "CUDA_VISIBLE_DEVICES": single_gpu_env_str}
+                    _run_command(
+                        task_id,
+                        "SoVITS (s2) 训练(单卡回退重试)",
+                        s2_base_cmd,
+                        log_path,
+                        s2_retry_env_single,
+                    )
+                    s2_err_text = ""
+
+            if s2_err_text == "":
+                pass
+            else:
+                retryable_unused_param_error = (
+                    "Expected to have finished reduction in the prior iteration" in s2_err_text
+                    or "find_unused_parameters=True" in s2_err_text
+                )
+                if not retryable_unused_param_error:
+                    raise
+
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write("\n[S2回退] 命中DDP未使用参数冲突，自动切换 find_unused_parameters=True 重试一次\n")
+
+                if task_id in train_tasks:
+                    train_tasks[task_id]["status"] = "running"
+                    train_tasks[task_id]["message"] = "SoVITS训练检测到DDP参数冲突，正在启用兼容模式重试..."
+
+                s2_retry_env = {
+                    **s2_base_env,
+                    # 兼容不同训练脚本读取的环境变量命名
+                    "S2_DDP_FIND_UNUSED_PARAMETERS": "1",
+                    "S2_FIND_UNUSED_PARAMETERS": "1",
+                }
+                _run_command(
+                    task_id,
+                    "SoVITS (s2) 训练(兼容重试)",
+                    s2_base_cmd,
+                    log_path,
+                    s2_retry_env,
+                )
         # 记录S2训练完成时间
         s2_duration = time.time() - s2_start_time
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n[S2训练] SoVITS模型训练完成，耗时: {s2_duration/60:.2f} 分钟\n")
+
+        # 并行模式下在此等待 S1 结束并校验返回码
+        if s1_proc is not None:
+            s1_rc = s1_proc.wait()
+            try:
+                if s1_log_fp is not None:
+                    s1_log_fp.close()
+            except Exception:
+                pass
+            s1_duration = time.time() - s1_start_time
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[S1训练] GPT模型训练完成，耗时: {s1_duration/60:.2f} 分钟, rc={s1_rc}\n")
+            if int(s1_rc) != 0:
+                raise RuntimeError(f"S1 并行训练失败，退出码 {s1_rc}")
 
         train_tasks[task_id]["progress"] = 95
         train_tasks[task_id]["message"] = "训练完成，提取参考音频和文本..."
@@ -3156,8 +4151,10 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                         converted_sovits["weight"][key] = value
                 
                 # 提取config（需要从训练配置中获取）
-                # 尝试从s2_config_path读取配置
-                s2_config_path = exp_dir / "tmp_s2.json"
+                # tmp_s2.json 由 _build_s2_config 写在 job_dir（output 根），不在 processed 下
+                s2_config_path = job_dir / "tmp_s2.json"
+                if not s2_config_path.exists():
+                    s2_config_path = exp_dir / "tmp_s2.json"
                 if s2_config_path.exists():
                     with open(s2_config_path, "r", encoding="utf-8") as f:
                         s2_config = json.load(f)
@@ -3204,52 +4201,60 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 f.write(f"✅ GPT模型文件存在: {gpt_path}\n")
                 f.write(f"   文件大小: {gpt_size / 1024 / 1024:.2f} MB\n")
                 
-                # 尝试加载模型验证
-                try:
-                    checkpoint = torch.load(str(gpt_path), map_location="cpu", weights_only=False)
-                    if isinstance(checkpoint, dict) and "weight" in checkpoint and "config" in checkpoint:
-                        f.write(f"   ✅ 模型结构验证通过（包含weight和config）\n")
-                        gpt_valid = True
-                    else:
-                        f.write(f"   ⚠️ 警告: 模型文件结构不完整（缺少weight或config）\n")
-                        if isinstance(checkpoint, dict):
-                            f.write(f"   检查点键: {list(checkpoint.keys())[:10]}\n")
+                # 极速模式仅做轻量文件检查，避免重复torch.load拖慢收尾
+                if max_speed_mode:
+                    gpt_valid = gpt_size > (1 * 1024 * 1024)
+                    f.write(f"   {'✅' if gpt_valid else '⚠️'} 极速模式: 跳过深度加载校验\n")
+                else:
+                    try:
+                        checkpoint = torch.load(str(gpt_path), map_location="cpu", weights_only=False)
+                        if isinstance(checkpoint, dict) and "weight" in checkpoint and "config" in checkpoint:
+                            f.write(f"   ✅ 模型结构验证通过（包含weight和config）\n")
+                            gpt_valid = True
                         else:
-                            f.write(f"   检查点类型: {type(checkpoint)}\n")
-                except Exception as e:
-                    f.write(f"   ❌ 模型加载失败: {str(e)}\n")
-                    import traceback
-                    f.write(f"   错误详情: {traceback.format_exc()}\n")
+                            f.write(f"   ⚠️ 警告: 模型文件结构不完整（缺少weight或config）\n")
+                            if isinstance(checkpoint, dict):
+                                f.write(f"   检查点键: {list(checkpoint.keys())[:10]}\n")
+                            else:
+                                f.write(f"   检查点类型: {type(checkpoint)}\n")
+                    except Exception as e:
+                        f.write(f"   ❌ 模型加载失败: {str(e)}\n")
+                        import traceback
+                        f.write(f"   错误详情: {traceback.format_exc()}\n")
             else:
                 f.write(f"❌ GPT模型文件不存在: {gpt_path}\n")
             
             # 验证SoVITS模型
             sovits_valid = False
             if sovits_path.exists():
-                # 使用正确的加载方式验证SoVITS模型（v2Pro使用特殊格式）
-                sovits_checkpoint = None
-                try:
-                    from GPT_SoVITS.process_ckpt import load_sovits_new
-                    sovits_checkpoint = load_sovits_new(str(sovits_path))
-                    if not isinstance(sovits_checkpoint, dict) or "weight" not in sovits_checkpoint:
-                        raise ValueError("SoVITS模型结构不正确：缺少weight键")
+                if max_speed_mode:
                     sovits_size = sovits_path.stat().st_size
                     f.write(f"✅ SoVITS模型文件存在: {sovits_path}\n")
                     f.write(f"   文件大小: {sovits_size / 1024 / 1024:.2f} MB\n")
-                    
-                    # 验证模型结构
-                    weight_count = len(sovits_checkpoint["weight"])
-                    f.write(f"   ✅ 模型结构验证通过（包含{weight_count}个权重参数）\n")
-                    if "config" in sovits_checkpoint:
-                        f.write(f"   ✅ 模型配置存在\n")
-                    if "info" in sovits_checkpoint:
-                        f.write(f"   ✅ 训练信息: {sovits_checkpoint.get('info', 'N/A')}\n")
-                    sovits_valid = True
-                except Exception as e:
-                    f.write(f"   ❌ 模型加载失败: {str(e)}\n")
-                    import traceback
-                    f.write(f"   错误详情: {traceback.format_exc()}\n")
-                    sovits_valid = False
+                    sovits_valid = sovits_size > (1 * 1024 * 1024)
+                    f.write(f"   {'✅' if sovits_valid else '⚠️'} 极速模式: 跳过深度加载校验\n")
+                else:
+                    sovits_checkpoint = None
+                    try:
+                        from GPT_SoVITS.process_ckpt import load_sovits_new
+                        sovits_checkpoint = load_sovits_new(str(sovits_path))
+                        if not isinstance(sovits_checkpoint, dict) or "weight" not in sovits_checkpoint:
+                            raise ValueError("SoVITS模型结构不正确：缺少weight键")
+                        sovits_size = sovits_path.stat().st_size
+                        f.write(f"✅ SoVITS模型文件存在: {sovits_path}\n")
+                        f.write(f"   文件大小: {sovits_size / 1024 / 1024:.2f} MB\n")
+                        weight_count = len(sovits_checkpoint["weight"])
+                        f.write(f"   ✅ 模型结构验证通过（包含{weight_count}个权重参数）\n")
+                        if "config" in sovits_checkpoint:
+                            f.write(f"   ✅ 模型配置存在\n")
+                        if "info" in sovits_checkpoint:
+                            f.write(f"   ✅ 训练信息: {sovits_checkpoint.get('info', 'N/A')}\n")
+                        sovits_valid = True
+                    except Exception as e:
+                        f.write(f"   ❌ 模型加载失败: {str(e)}\n")
+                        import traceback
+                        f.write(f"   错误详情: {traceback.format_exc()}\n")
+                        sovits_valid = False
             else:
                 f.write(f"❌ SoVITS模型文件不存在: {sovits_path}\n")
             
@@ -3306,8 +4311,14 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
             except Exception as e:
                 logger.warning(f"[损失监控] 生成损失分析报告失败: {e}")
         # 训练后强制自检：不通过则判定失败，并且不注册到声音库。
-        gpt_self_ok, gpt_self_msg = _validate_gpt_model_file(gpt_path)
-        sovits_self_ok, sovits_self_msg = _validate_sovits_model_file(sovits_path, version=params.model_version)
+        if max_speed_mode:
+            gpt_self_ok = bool(gpt_path.exists() and gpt_path.stat().st_size > (1 * 1024 * 1024))
+            sovits_self_ok = bool(sovits_path.exists() and sovits_path.stat().st_size > (1 * 1024 * 1024))
+            gpt_self_msg = "极速模式: 仅文件存在+大小校验"
+            sovits_self_msg = "极速模式: 仅文件存在+大小校验"
+        else:
+            gpt_self_ok, gpt_self_msg = _validate_gpt_model_file(gpt_path)
+            sovits_self_ok, sovits_self_msg = _validate_sovits_model_file(sovits_path, version=params.model_version)
         ref_self_ok = bool(ref_audio_path and os.path.exists(str(ref_audio_path)) and str(ref_text or "").strip())
         ref_self_msg = "参考信息通过"
         if not ref_self_ok:
@@ -3369,10 +4380,47 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                     wx_api_module = importlib.import_module('wx_api')
                 register_voice_model = wx_api_module.register_voice_model
                 generate_voice_id = wx_api_module.generate_voice_id
+                load_voice_library_from_file = getattr(wx_api_module, "load_voice_library_from_file", None)
+                delete_voice_model = getattr(wx_api_module, "delete_voice_model", None)
 
-                # 生成 voice_id
-                model_name = train_tasks[task_id].get("model_name", f"voice_{task_id[:8]}")
+                # 生成 voice_id（妈妈/爸爸固定单槽位，其它保持多槽位）
+                raw_model_name = str(train_tasks[task_id].get("model_name", f"voice_{task_id[:8]}"))
+                role_key = str(train_tasks[task_id].get("role_key") or "").strip().lower()
+                owner_user_id = str(params.user_id or "").strip()
+
+                def _normalize_role_name(name: str, role: str) -> str:
+                    n = str(name or "").strip()
+                    nl = n.lower()
+                    if role in {"mom", "mother"} or nl in {"mom", "mother", "妈妈"}:
+                        return "mother"
+                    if role in {"dad", "father"} or nl in {"dad", "father", "爸爸"}:
+                        return "father"
+                    return n
+
+                model_name = _normalize_role_name(raw_model_name, role_key)
+                if callable(load_voice_library_from_file):
+                    load_voice_library_from_file()
+                voice_library = getattr(wx_api_module, "VOICE_LIBRARY", {}) or {}
+
                 voice_id = generate_voice_id()
+                stale_role_voice_ids = []
+                if model_name in {"mother", "father"}:
+                    same_role = []
+                    for vid, info in voice_library.items():
+                        info_name = str((info or {}).get("name") or "").strip().lower()
+                        if info_name != model_name:
+                            continue
+                        info_type = str((info or {}).get("model_type") or "").strip().lower()
+                        if info_type != "user_trained":
+                            continue
+                        info_owner = str((info or {}).get("owner_user_id") or "").strip()
+                        if info_owner and owner_user_id and info_owner != owner_user_id:
+                            continue
+                        same_role.append((str((info or {}).get("trained_at") or ""), vid))
+                    if same_role:
+                        same_role.sort(key=lambda x: x[0], reverse=True)
+                        voice_id = same_role[0][1]
+                        stale_role_voice_ids = [vid for _ts, vid in same_role[1:]]
 
                 # 获取场景和情感信息
                 scene = train_tasks[task_id].get("scene", "")
@@ -3383,17 +4431,52 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 ref_text = train_tasks[task_id].get("ref_text")
                 ref_language = train_tasks[task_id].get("ref_language", params.language)
 
+                # 统一化管理：为每个用户构建最小推理资源包（两个权重 + 参考音频 + 参考文本）
+                register_gpt_path = str(gpt_path)
+                register_sovits_path = str(sovits_path)
+                register_ref_audio_path = ref_audio_path
+                register_ref_text = ref_text
+                try:
+                    bundle_info = _materialize_minimal_infer_bundle(
+                        user_id=params.user_id,
+                        task_id=task_id,
+                        model_name=model_name,
+                        gpt_path=Path(str(gpt_path)),
+                        sovits_path=Path(str(sovits_path)),
+                        ref_audio_path=ref_audio_path,
+                        ref_text=ref_text,
+                        ref_language=ref_language,
+                        version=params.model_version,
+                    )
+                    register_gpt_path = bundle_info.get("gpt_path") or register_gpt_path
+                    register_sovits_path = bundle_info.get("sovits_path") or register_sovits_path
+                    register_ref_audio_path = bundle_info.get("ref_audio_path") or register_ref_audio_path
+                    if not str(register_ref_text or "").strip():
+                        try:
+                            register_ref_text = Path(bundle_info.get("ref_text_path", "")).read_text(encoding="utf-8").strip()
+                        except Exception:
+                            pass
+                    train_tasks[task_id]["gpt_path"] = register_gpt_path
+                    train_tasks[task_id]["sovits_path"] = register_sovits_path
+                    train_tasks[task_id]["ref_audio_path"] = register_ref_audio_path
+                    train_tasks[task_id]["ref_text"] = register_ref_text
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"[统一模型管理] 已生成最小推理包: {bundle_info.get('bundle_dir', '')}\n")
+                except Exception as bundle_err:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"[统一模型管理] 生成最小推理包失败，回退原始路径: {bundle_err}\n")
+
                 # 注册模型（包含参考音频和文本）
                 registered = register_voice_model(
                     voice_id=voice_id,
                     model_name=model_name,
-                    gpt_path=str(gpt_path),
-                    sovits_path=str(sovits_path),
+                    gpt_path=str(register_gpt_path),
+                    sovits_path=str(register_sovits_path),
                     scene=scene,
                     emotion=emotion,
                     trained_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
-                    ref_audio_path=ref_audio_path,
-                    ref_text=ref_text,
+                    ref_audio_path=register_ref_audio_path,
+                    ref_text=register_ref_text,
                     ref_language=ref_language,
                     model_type="user_trained",
                     owner_user_id=params.user_id,
@@ -3405,9 +4488,17 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write(f"\n模型已注册：voice_id={voice_id}, name={model_name}\n")
 
+                    # 妈妈/爸爸只保留一个最新音色，清理同角色旧条目
+                    if stale_role_voice_ids and callable(delete_voice_model):
+                        for stale_vid in stale_role_voice_ids:
+                            try:
+                                delete_voice_model(stale_vid)
+                            except Exception as stale_err:
+                                logger.warning(f"[音色注册] 清理旧角色音色失败 {stale_vid}: {stale_err}")
+
                     # 只保留本次有效训练产物，清理该用户历史 SoVITS 权重。
                     try:
-                        keep_paths = {str(sovits_path)} | _collect_registered_sovits_paths_for_user(params.user_id)
+                        keep_paths = {str(register_sovits_path)} | _collect_registered_sovits_paths_for_user(params.user_id)
                         _cleanup_user_stale_sovits_weights(
                             user_id=params.user_id,
                             version=params.model_version,
@@ -3418,6 +4509,13 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                         )
                     except Exception as cleanup_keep_err:
                         logger.warning(f"[SoVITS清理] 保留本次产物时清理旧文件失败: {cleanup_keep_err}")
+
+                    # 推理最小化：清理 processed 下不会被推理使用的中间文件
+                    if _env_flag("TRAIN_KEEP_MINIMAL_RESOURCES_ONLY", True):
+                        try:
+                            _prune_processed_infer_unused_files(exp_dir=exp_dir, log_path=log_path)
+                        except Exception as prune_err:
+                            logger.warning(f"[推理最小化] 清理中间文件失败: {prune_err}")
                 else:
                     registration_error = "模型注册失败"
                     with open(log_path, "a", encoding="utf-8") as f:
@@ -3442,8 +4540,12 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
 
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n训练完成：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"GPT模型：{gpt_path}\n")
-            f.write(f"SoVITS模型：{sovits_path}\n")
+            f.write(f"GPT模型：{train_tasks.get(task_id, {}).get('gpt_path', gpt_path)}\n")
+            f.write(f"SoVITS模型：{train_tasks.get(task_id, {}).get('sovits_path', sovits_path)}\n")
+        total_wall = time.time() - run_start_ts
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[耗时统计] 训练总耗时: {total_wall:.2f}s ({total_wall/60:.2f} 分钟)\n")
+        logger.info(f"[训练耗时] 任务完成: task_id={task_id}, 总用时 {total_wall:.2f}s ({total_wall/60:.2f} 分钟)")
         
     except Exception as e:
         error_msg = str(e)
@@ -3494,6 +4596,8 @@ def run_training(task_id: str, dataset_path: str, output_path: str, log_path: st
                 f.write(f"清理缓存失败: {cleanup_err}\n")
         
         print(f"[ERROR] 训练任务 {task_id} 失败: {error_msg}")
+        total_wall = time.time() - run_start_ts
+        logger.warning(f"[训练耗时] 任务失败: task_id={task_id}, 总用时 {total_wall:.2f}s ({total_wall/60:.2f} 分钟)")
     finally:
         _r_fin = _train_phase_get()
         if _r_fin is not None:

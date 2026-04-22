@@ -8,19 +8,17 @@
 
 /** 与后端 CompanionEngine persona 默认 model_url 对齐；未配置 formAssetsRoot 时三档共用此路径 */
 const MODEL_BY_PERSONA = {
-  // animal/shiba 下为 glb；与默认高阶形态对齐
+  // 当前仓库实际可用 3D 资源仅有 shiba / fox 两套 glb，其他 persona 先映射到可用资源避免 404。
   default: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  // 与 shiba 一致：三档形态最高级 glb（无 formTiers 时的 persona 兜底）
   cute_fox: "/ar_companion/assets/fox/fox%20level%203.glb",
-  // 资源包当前仅包含 shiba/fox 的 glb，其他物种先复用可用模型避免 404
-  cute_dino: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  cute_cat: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  cute_bunny: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  cute_squirrel: "/ar_companion/assets/shiba/shiba%20level%203.glb",
+  cute_dino: "/ar_companion/assets/shiba/shiba%20level%202.glb",
+  cute_cat: "/ar_companion/assets/shiba/shiba%20level%201.glb",
+  cute_bunny: "/ar_companion/assets/shiba/shiba%20level%201.glb",
+  cute_squirrel: "/ar_companion/assets/fox/fox%20level%202.glb",
   cute_chick: "/ar_companion/assets/shiba/shiba%20level%203.glb",
   cute_panda: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  cute_koala: "/ar_companion/assets/shiba/shiba%20level%203.glb",
-  cute_penguin: "/ar_companion/assets/shiba/shiba%20level%203.glb",
+  cute_koala: "/ar_companion/assets/shiba/shiba%20level%202.glb",
+  cute_penguin: "/ar_companion/assets/fox/fox%20level%201.glb",
 };
 
 const PETS_CATALOG = [
@@ -29,7 +27,7 @@ const PETS_CATALOG = [
     personaId: "default",
     name: "柴柴小星",
     emoji: "🐶",
-    posterUrl: "/assets/animal/shiba/cover.png",
+    posterUrl: "/assets/images/小狗.png",
     // 未孵化闭壳蛋（2D 海报）
     staticEggPosterUrl: "/ar_companion/assets/shiba/static%20egg.png",
     tagline: "耳朵超灵的故事小忠臣",
@@ -77,7 +75,7 @@ const PETS_CATALOG = [
     personaId: "cute_fox",
     name: "狐狸小橙",
     emoji: "🦊",
-    posterUrl: "/assets/animal/fox/cover.png",
+    posterUrl: "/assets/images/狐狸.png",
     tagline: "爱动脑筋的小机灵",
     blurb: "我的眼睛会转呀转，最爱猜故事接下来会发生什么。你愿意和我一起当小侦探吗？",
     skills: [
@@ -116,19 +114,19 @@ const PETS_CATALOG = [
   {
     id: "cute-dino",
     personaId: "cute_dino",
-    name: "小羊咩咩",
-    emoji: "🐑",
-    posterUrl: "/assets/animal/sheep/cover.png",
-    tagline: "软绵绵的勇气朋友",
-    blurb: "我像一团小棉花，最会陪你把紧张变成小小的勇气。读到有点难的句子，我们一起慢慢来～",
+    name: "恐龙小绿",
+    emoji: "🦕",
+    posterUrl: "/assets/images/恐龙.png",
+    tagline: "大大的勇气朋友",
+    blurb: "我看起来个子大，其实心里很温柔。读到有一点点紧张的情节，我会陪你一起深呼吸～",
     skills: [
-      { icon: "🫧", title: "勇气泡泡", desc: "紧张时一起数「1、2、3」，像吹泡泡一样把害怕吹走。" },
-      { icon: "🐾", title: "轻轻踏步", desc: "鼓励你把难字读得又慢又清楚，像小羊轻轻踏草地。" },
+      { icon: "💪", title: "勇气泡泡", desc: "紧张时一起数「1、2、3」，像吹泡泡一样把害怕吹走。" },
+      { icon: "🦕", title: "脚步重重", desc: "鼓励你把难字读得又慢又清楚，像恐龙踏踏脚。" },
     ],
     actions: [
       { key: "idle", label: "待着", emoji: "😊" },
-      { key: "wave", label: "摇摇耳朵", emoji: "👂" },
-      { key: "happy", label: "蹦蹦加油", emoji: "✨" },
+      { key: "wave", label: "甩尾巴", emoji: "🦖" },
+      { key: "happy", label: "跺脚加油", emoji: "⚡" },
       { key: "listen", label: "乖乖听", emoji: "🎧" },
     ],
   },
@@ -137,7 +135,7 @@ const PETS_CATALOG = [
     personaId: "cute_cat",
     name: "小猫咪咪",
     emoji: "🐱",
-    posterUrl: "/assets/animal/cat/cover.png",
+    posterUrl: "/assets/images/小猫.png",
     tagline: "轻手轻脚的小提醒员",
     blurb: "我会喵喵提醒你翻页，也会在你读累的时候，建议你歇一小会儿喝水～",
     skills: [
@@ -156,7 +154,7 @@ const PETS_CATALOG = [
     personaId: "cute_bunny",
     name: "兔兔小白",
     emoji: "🐰",
-    posterUrl: "/assets/animal/rabbit/cover.png",
+    posterUrl: "/assets/images/小兔.png",
     tagline: "软软的总结小能手",
     blurb: "我喜欢把故事变成两颗棉花糖那么短，让你一下记住今天读到了什么～",
     skills: [
@@ -175,7 +173,7 @@ const PETS_CATALOG = [
     personaId: "cute_squirrel",
     name: "松鼠栗栗",
     emoji: "🐿️",
-    posterUrl: "/assets/animal/squrriel/cover.png",
+    posterUrl: "/assets/images/松鼠.png",
     tagline: "收藏金句的小管家",
     blurb: "我会帮你把最喜欢的一句话藏进小口袋，像屯坚果一样，读过也不会忘～",
     skills: [
@@ -194,7 +192,7 @@ const PETS_CATALOG = [
     personaId: "cute_chick",
     name: "嘎嘎小黄",
     emoji: "🐥",
-    posterUrl: "/assets/animal/duck/cover.png",
+    posterUrl: "/assets/images/小狗.png",
     tagline: "跟着拍子嘎嘎念",
     blurb: "我喜欢「嘎嘎、嘎嘎」给你打拍子，让跟读像唱歌一样好玩！",
     skills: [
@@ -213,7 +211,7 @@ const PETS_CATALOG = [
     personaId: "cute_panda",
     name: "熊猫萌萌",
     emoji: "🐼",
-    posterUrl: "/assets/animal/pandas/cover.png",
+    posterUrl: "/assets/images/小狗.png",
     tagline: "团团软的睡前搭档",
     blurb: "我圆滚滚，最不着急。夜晚陪你慢慢读，读完还会夸你「今天也很棒」～",
     skills: [
@@ -230,20 +228,20 @@ const PETS_CATALOG = [
   {
     id: "cute-koala",
     personaId: "cute_koala",
-    name: "仓鼠团团",
-    emoji: "🐹",
-    posterUrl: "/assets/animal/muose/cover.png",
-    tagline: "把好词收进口袋的小仓鼠",
-    blurb: "我最爱把你读过的好句子悄悄收藏起来。读慢一点也没关系，我们把每个字都抱一抱～",
+    name: "考拉困困",
+    emoji: "🐨",
+    posterUrl: "/assets/images/小狗.png",
+    tagline: "让你慢下来的抱抱熊",
+    blurb: "我一天有好多想睡觉的时间，所以我最懂「慢慢读」的快乐～",
     skills: [
-      { icon: "🌰", title: "口袋收藏", desc: "把最喜欢的一句话装进小口袋，下次再读也不忘。" },
+      { icon: "🐌", title: "慢慢读", desc: "把语速放慢一点点，咬字会更甜。" },
       { icon: "🤗", title: "抱抱停顿", desc: "遇到生字不慌，我们先抱抱这个词，再读一次。" },
     ],
     actions: [
       { key: "idle", label: "待着", emoji: "😊" },
-      { key: "wave", label: "挥挥爪", emoji: "👋" },
-      { key: "happy", label: "抱坚果", emoji: "🌰" },
-      { key: "listen", label: "竖耳听", emoji: "🎧" },
+      { key: "wave", label: "抬爪", emoji: "👋" },
+      { key: "happy", label: "打哈欠", emoji: "😴" },
+      { key: "listen", label: "贴树听", emoji: "🎧" },
     ],
   },
   {
@@ -251,7 +249,7 @@ const PETS_CATALOG = [
     personaId: "cute_penguin",
     name: "企鹅摇摇",
     emoji: "🐧",
-    posterUrl: "/assets/animal/pinkus/cover.png",
+    posterUrl: "/assets/images/小狗.png",
     tagline: "爱冒险的小船长",
     blurb: "我会带着想象中的小冰船，和你一起在故事海里摇啊摇～每一小段都是新发现！",
     skills: [
@@ -266,92 +264,6 @@ const PETS_CATALOG = [
     ],
   },
 ];
-
-const PET_ANIMAL_IMAGE_MAP = {
-  "cute-dog": {
-    coverUrl: "/assets/animal/shiba/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/shiba/shiba level 1.png",
-      "/assets/animal/shiba/shiba level 2.png",
-      "/assets/animal/shiba/shiba level 3.png",
-    ],
-  },
-  "cute-fox": {
-    coverUrl: "/assets/animal/fox/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/fox/fox level 1.png",
-      "/assets/animal/fox/fox level 2.png",
-      "/assets/animal/fox/fox level 3.png",
-    ],
-  },
-  // 语义映射：统一约定“封面=cover.png；三档形态=2/3/4 图”。
-  // 注：绵羊/仓鼠（原 cute-dino / cute-koala 槽位）专属目录与文件名见下。
-  "cute-dino": {
-    coverUrl: "/assets/animal/sheep/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/sheep/小羊2.png",
-      "/assets/animal/sheep/小羊3.png",
-      "/assets/animal/sheep/小羊4.png",
-    ],
-  },
-  "cute-cat": {
-    coverUrl: "/assets/animal/cat/cover.png",
-    // 用户要求：小猫形态图使用 小猫2/3/4
-    tierPosterUrls: [
-      "/assets/animal/cat/小猫2.png",
-      "/assets/animal/cat/小猫3.png",
-      "/assets/animal/cat/小猫4.png",
-    ],
-  },
-  "cute-bunny": {
-    coverUrl: "/assets/animal/rabbit/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/rabbit/兔子2.png",
-      "/assets/animal/rabbit/兔子3.png",
-      "/assets/animal/rabbit/兔子4.png",
-    ],
-  },
-  "cute-squirrel": {
-    coverUrl: "/assets/animal/squrriel/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/squrriel/松鼠2.png",
-      "/assets/animal/squrriel/松鼠3.png",
-      "/assets/animal/squrriel/松鼠4.png",
-    ],
-  },
-  "cute-chick": {
-    coverUrl: "/assets/animal/duck/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/duck/小鸭2.png",
-      "/assets/animal/duck/小鸭3.png",
-      "/assets/animal/duck/小鸭4.png",
-    ],
-  },
-  "cute-panda": {
-    coverUrl: "/assets/animal/pandas/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/pandas/熊猫2.png",
-      "/assets/animal/pandas/熊猫3.png",
-      "/assets/animal/pandas/熊猫4.png",
-    ],
-  },
-  "cute-koala": {
-    coverUrl: "/assets/animal/muose/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/muose/仓鼠2.png",
-      "/assets/animal/muose/仓鼠3.png",
-      "/assets/animal/muose/仓鼠4.png",
-    ],
-  },
-  "cute-penguin": {
-    coverUrl: "/assets/animal/pinkus/cover.png",
-    tierPosterUrls: [
-      "/assets/animal/pinkus/企鹅2.png",
-      "/assets/animal/pinkus/企鹅3.png",
-      "/assets/animal/pinkus/企鹅4.png",
-    ],
-  },
-};
 
 function normalizeFormAssetsRoot(root) {
   const s = String(root || "").trim();
@@ -373,11 +285,6 @@ function tierModelUrlFromPet(pet, tier) {
 /** formTierPosters 且 formAssetsRoot：按档海报；否则用 posterUrl */
 function tierPosterUrlFromPet(pet, tier) {
   const t = Math.max(1, Math.min(3, Number(tier) || 1));
-  const pid = pet && pet.id ? String(pet.id) : "";
-  const animal = PET_ANIMAL_IMAGE_MAP[pid];
-  if (animal && Array.isArray(animal.tierPosterUrls) && animal.tierPosterUrls[t - 1]) {
-    return animal.tierPosterUrls[t - 1];
-  }
   const root = normalizeFormAssetsRoot(pet && pet.formAssetsRoot);
   if (root && pet.formTierPosters) {
     return `/ar_companion/assets/${root}/poster_tier${t}.png`;
@@ -410,14 +317,6 @@ function getFormTierModelUrl(pet, tier) {
 
 function getFormTierPosterUrl(pet, tier) {
   const t = Math.max(1, Math.min(3, Number(tier) || 1));
-  // 优先使用 animal 映射（避免 formTiers 里旧的 /ar_companion/assets/*.png 作为相对路径被小程序当作“本地资源”加载失败）
-  try {
-    const pid = pet && pet.id ? String(pet.id) : "";
-    const animal = PET_ANIMAL_IMAGE_MAP[pid];
-    if (animal && Array.isArray(animal.tierPosterUrls) && animal.tierPosterUrls[t - 1]) {
-      return animal.tierPosterUrls[t - 1];
-    }
-  } catch (e) {}
   const list = pet && pet.formTiers ? pet.formTiers : [];
   const row = list.find((x) => x.tier === t);
   if (row && row.posterUrl) return row.posterUrl;
@@ -453,28 +352,9 @@ function getHatchFinalEggModelUrl(pet) {
   return p.hatchFinalEggModelUrl ? p.hatchFinalEggModelUrl : getEggModelUrl(pet);
 }
 
-function getPetCoverUrl(petOrId) {
-  const pid = typeof petOrId === "string"
-    ? String(petOrId).trim()
-    : String((petOrId && petOrId.id) || "").trim();
-  const animal = PET_ANIMAL_IMAGE_MAP[pid];
-  if (animal && animal.coverUrl) return animal.coverUrl;
-  const pet = typeof petOrId === "string" ? getPetById(pid) : petOrId;
-  return (pet && pet.posterUrl) ? pet.posterUrl : "";
-}
-
-function getPetFormPosterUrls(petOrId) {
-  const pet = typeof petOrId === "string" ? getPetById(petOrId) : petOrId;
-  if (!pet) return [];
-  return [1, 2, 3].map((tier) => getFormTierPosterUrl(pet, tier)).filter(Boolean);
-}
-
 module.exports = {
   PETS_CATALOG,
-  PET_ANIMAL_IMAGE_MAP,
   getPetById,
-  getPetCoverUrl,
-  getPetFormPosterUrls,
   getFormTierModelUrl,
   getFormTierPosterUrl,
   getStaticEggPosterUrl,

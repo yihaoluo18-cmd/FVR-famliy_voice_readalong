@@ -1,18 +1,44 @@
-# Local env (secrets)
+# ===== Secrets / local env =====
 wx_api.env
-*.env
+env/wx_api.env
+*.env.local
 
-# Python
+# ===== Python cache =====
 __pycache__/
 *.pyc
+*.pyo
 
-# Temp/outputs
+# ===== Never upload (large / external runtime deps) =====
+GPT_SoVITS/
+assets/
+venv/
+
+# ===== Keep these directories but upload as empty =====
+GPT_weights_v2Pro/*
+!GPT_weights_v2Pro/.gitkeep
+
+SoVITS_weights_v2Pro/*
+!SoVITS_weights_v2Pro/.gitkeep
+
+user_datasets/*
+!user_datasets/.gitkeep
+
+user_models/*
+!user_models/.gitkeep
+
+train_logs/*
+!train_logs/.gitkeep
+
+temp_wav_audio/*
+!temp_wav_audio/.gitkeep
+
+temp_raw_audio/*
+!temp_raw_audio/.gitkeep
+
+runtime/*
+!runtime/.gitkeep
+
+# ===== Common temp/output =====
 TEMP/
 output/
 logs/
-train/runtime/
-train/train_logs/
-train/temp_raw_audio/
-train/temp_wav_audio/
-train/user_datasets/
-train/user_models/

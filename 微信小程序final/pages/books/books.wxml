@@ -1,7 +1,7 @@
 <view class="container">
   <!-- 头部信息 -->
   <view class="header">
-    <text class="book-icon">📚</text>
+    <image class="book-icon-img" src="../../assets/icons/library.png" mode="aspectFit" />
     <text class="header-text">共 {{totalBooks}} 本绘本 · 为你精选</text>
     <text class="star-icon">⭐</text>
   </view>
@@ -100,7 +100,7 @@
 
     <view class="featured-recent-section {{showGuide && guideHighlight === 'recent' ? 'guide-pulse' : ''}}">
       <view class="bookshelf-header featured-section-header">
-        <text class="sparkle-icon">📚</text>
+        <image class="section-icon-img" src="../../assets/icons/recent.png" mode="aspectFit" />
         <text class="bookshelf-title">最近阅读</text>
         <text class="bookshelf-count">（{{featuredRecentItems.length}}条）</text>
       </view>

@@ -1564,6 +1564,80 @@
   margin-bottom: 8rpx;
 }
 
+.pet-status-panel {
+  width: 100%;
+  border-radius: 30rpx;
+  border: 2rpx solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.3);
+  backdrop-filter: blur(8rpx);
+  padding: 18rpx 8rpx 10rpx;
+}
+
+.pet-status-grid {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10rpx;
+}
+
+.pet-status-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.pet-status-circle {
+  position: relative;
+  width: 112rpx;
+  height: 112rpx;
+  border-radius: 50%;
+}
+
+.pet-status-circle-bg {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+  border: 2rpx solid rgba(255, 255, 255, 0.58);
+}
+
+.pet-status-circle-progress {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(var(--color) var(--progress), transparent 0deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 10rpx), #000 calc(100% - 10rpx));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 10rpx), #000 calc(100% - 10rpx));
+}
+
+.pet-status-circle-content {
+  position: absolute;
+  inset: 14rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.58);
+  border: 2rpx solid rgba(255, 255, 255, 0.52);
+  box-shadow: inset 0 3rpx 12rpx rgba(255, 255, 255, 0.26);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pet-mini-icon {
+  width: 44rpx;
+  height: 44rpx;
+  filter: brightness(0.35) contrast(1.25);
+  opacity: 0.98;
+}
+
+.pet-status-percent {
+  margin-top: 6rpx;
+  font-size: 26rpx;
+  font-weight: 900;
+  color: rgba(120, 68, 32, 0.92);
+}
+
+
 /* ================= 状态存放：四个黄色漂浮球（液体内部） ================= */
 .float-balls-row {
   display: flex;
@@ -1659,6 +1733,17 @@
   transform: translate(-50%, -50%);
   font-size: 38rpx;
   text-shadow: 0 0 18rpx rgba(255, 255, 255, 0.22);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.status-ball-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 42rpx;
+  height: 42rpx;
+  transform: translate(-50%, -50%);
   z-index: 3;
   pointer-events: none;
 }

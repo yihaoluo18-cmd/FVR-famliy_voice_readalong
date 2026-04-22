@@ -113,6 +113,7 @@
         <view class="circle-center"><text class="circle-percent">{{progress}}%</text></view>
       </view>
       <text class="training-title">正在施展声音魔法...</text>
+      <text class="training-hint">{{trainingMessage}}</text>
       <view class="science-card" wx:if="{{scienceTipText}}">
         <view class="science-mascot-wrap {{isScienceSpeaking ? 'speaking' : ''}}">
           <image class="science-mascot-img" src="{{scienceMascotImage}}" mode="aspectFit" />
@@ -120,6 +121,17 @@
         <view class="science-bubble">
           <text class="science-tag">趣味科普进行中</text>
           <text class="science-text">{{scienceTipText}}</text>
+        </view>
+      </view>
+      <view class="training-egg-guide" wx:if="{{showTrainingEggGuide}}" bindtap="onTapTrainingEggGuide">
+        <view class="egg-arrow-wrap">
+          <text class="egg-arrow">👆</text>
+          <text class="egg-arrow-label">点我去孵蛋玩吧</text>
+        </view>
+        <view class="egg-card floating">
+          <text class="egg-icon">🥚</text>
+          <text class="egg-title">伴宠蛋·小柴</text>
+          <text class="egg-desc">训练在后台继续，先去游乐园看看！</text>
         </view>
       </view>
     </view>
@@ -142,6 +154,11 @@
         <view class="finish-button" bindtap="goToBooks"><text class="finish-text">去听绘本故事 →</text></view>
       </view>
     </view>
+  </view>
+
+  <view class="training-egg-fab" wx:if="{{step === 3 && isGenerating}}" bindtap="onTapTrainingEggGuide">
+    <text class="training-egg-fab-icon">🥚</text>
+    <text class="training-egg-fab-text">去伴宠蛋</text>
   </view>
 
   <view wx:if="{{showGuide}}" class="guide-dim" catchtouchmove="noop"></view>

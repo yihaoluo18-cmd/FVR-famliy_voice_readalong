@@ -22,12 +22,31 @@ router = APIRouter(prefix="/coloring", tags=["coloring"])
 # 涂色数据存储路径
 # 计算项目根目录（从 modules/coloring_artist/backend/coloring_api.py 往上 3 层）
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-COLORING_DATA_DIR = PROJECT_ROOT / "assets" / "practice" / "coloring"
+
+
+def _pick_existing_dir(*candidates: Path) -> Path:
+    for c in candidates:
+        if c.exists() and c.is_dir():
+            return c
+    return candidates[0]
+
+
+COLORING_DATA_DIR = _pick_existing_dir(
+    PROJECT_ROOT / "practice" / "coloring",
+    PROJECT_ROOT / "assets" / "practice" / "coloring",
+)
 COLORING_INDEX_FILE = COLORING_DATA_DIR / "index.json"
 COLORING_WORKS_DIR = PROJECT_ROOT / "output" / "coloring_works"
 COLORING_WORKS_IMAGES_DIR = COLORING_WORKS_DIR / "images"
-PAINT_BASEMENT_DIR = PROJECT_ROOT / "assets" / "paint_basement"
-PAINT_BASEMENT_MASK_DIR = PROJECT_ROOT / "assets" / "paint_basement_masks"  # 手工区域掩码（可选）
+PAINT_BASEMENT_DIR = _pick_existing_dir(
+    PROJECT_ROOT / "paint_basement",
+    PROJECT_ROOT / "assets" / "paint_basement",
+)
+PAINT_BASEMENT_MASK_DIR = _pick_existing_dir(  # 手工区域掩码（可选）
+    PROJECT_ROOT / "paint_basement_masks",
+    PROJECT_ROOT / "assets" / "paint_basement_masks",
+)
+# 统一接入位置：仅使用 assets/paint_basement_generated，避免与 output 下副本重复占用。
 PAINT_GEN_DIR = PROJECT_ROOT / "assets" / "paint_basement_generated"
 PAINT_GEN_REGION_DIR = PAINT_GEN_DIR / "regionmap"
 PAINT_GEN_OFFSETS_DIR = PAINT_GEN_DIR / "offsets"
@@ -774,10 +793,10 @@ async def get_sketches(request: Request, limit: int = 30, skip: int = 0, debug: 
                 regionmap_url = str(it.get("regionmap_url") or "")
 
                 def resolve_practice_static(u: str) -> str:
-                    # /practice_static/... -> <PROJECT_ROOT>/assets/practice/...
+                    # /practice_static/... -> <PROJECT_ROOT>/practice/...
                     if u.startswith("/practice_static/"):
                         rel = u[len("/practice_static/"):]
-                        return str((PROJECT_ROOT / "assets" / "practice" / rel).resolve())
+                        return str((PROJECT_ROOT / "practice" / rel).resolve())
                     return ""
 
                 la_path = resolve_practice_static(lineart_url)

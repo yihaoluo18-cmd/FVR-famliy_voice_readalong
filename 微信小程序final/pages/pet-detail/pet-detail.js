@@ -1,5 +1,5 @@
 const app = getApp();
-const DEFAULT_BASE_URL = "http://127.0.0.1:9880";
+const { resolveApiBase } = require("../../utils/api-base.js");
 const {
   getUserId,
   requestEggState,
@@ -30,7 +30,7 @@ try {
 }
 
 function getApiBaseUrl() {
-  return app && app.getApiBaseUrl ? app.getApiBaseUrl() : DEFAULT_BASE_URL;
+  return resolveApiBase(app);
 }
 
 function resolveModelUrl(rel) {
@@ -183,6 +183,32 @@ function mergeCompanionStatLevel(rawStats, snap, key) {
     if (Number.isFinite(n2)) return Math.max(0, Math.min(100, n2));
   }
   return 0;
+}
+
+function buildRandomHatchedInitialLevels() {
+  const rand = (min, max) => Math.floor(min + Math.random() * (max - min + 1));
+  return {
+    hunger: rand(28, 62),
+    mood: rand(26, 58),
+    clean: rand(24, 56),
+    sleepy: rand(40, 72),
+  };
+}
+
+function resolvePetDetailStatusLevels(rawStats, snap, eggActive) {
+  if (eggActive) {
+    return { hunger: 0, mood: 0, clean: 0, sleepy: 0 };
+  }
+  const fromBackendOrSnap = {
+    hunger: mergeCompanionStatLevel(rawStats, snap, "hunger"),
+    mood: mergeCompanionStatLevel(rawStats, snap, "mood"),
+    clean: mergeCompanionStatLevel(rawStats, snap, "clean"),
+    sleepy: mergeCompanionStatLevel(rawStats, snap, "sleepy"),
+  };
+  const hasAnyPositive = Object.values(fromBackendOrSnap).some((n) => Number(n) > 0);
+  if (hasAnyPositive) return fromBackendOrSnap;
+  if (snap && typeof snap === "object") return fromBackendOrSnap;
+  return buildRandomHatchedInitialLevels();
 }
 
 const TUNING = {
@@ -496,10 +522,12 @@ Page({
     const pet = getPetById(this.data.mascotId);
     const rawStats = (data && data.stats) || {};
     const snap = readStatusSnapshot(this.data.mascotId);
-    const hungerLevel = mergeCompanionStatLevel(rawStats, snap, "hunger");
-    const moodLevel = mergeCompanionStatLevel(rawStats, snap, "mood");
-    const cleanLevel = mergeCompanionStatLevel(rawStats, snap, "clean");
-    const sleepyLevel = mergeCompanionStatLevel(rawStats, snap, "sleepy");
+    const eggActive = !!data.egg_model_active;
+    const levels = resolvePetDetailStatusLevels(rawStats, snap, eggActive);
+    const hungerLevel = Number(levels.hunger) || 0;
+    const moodLevel = Number(levels.mood) || 0;
+    const cleanLevel = Number(levels.clean) || 0;
+    const sleepyLevel = Number(levels.sleepy) || 0;
     writeStatusSnapshot(this.data.mascotId, {
       hunger: hungerLevel,
       mood: moodLevel,
@@ -511,7 +539,6 @@ Page({
     const safeGrowth = next > 0 ? Math.max(0, Math.min(100, Math.round((xp / next) * 100))) : 0;
     const growthPercent = data.growth_percent != null ? Number(data.growth_percent) : safeGrowth;
     const dft = Number(data.display_form_tier) || 1;
-    const eggActive = !!data.egg_model_active;
     const unlocked = Array.isArray(data.unlocked_form_tiers) && data.unlocked_form_tiers.length
       ? data.unlocked_form_tiers
       : [1];

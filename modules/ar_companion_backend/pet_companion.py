@@ -40,7 +40,6 @@ class PetCompanionService:
     def __init__(self, store_path: Path, egg_service: Any) -> None:
         self._store_path = store_path
         self._egg_service = egg_service
-        self._project_root = Path(__file__).resolve().parents[2]
         self._store = self._load_store()
 
         # 全局（所有 user 共享）3D 视角/调参：mascot_id -> form_key(egg/tier1-3) -> {tuning,camera}
@@ -81,130 +80,6 @@ class PetCompanionService:
                             mid_store[fk] = entry
                             migrated = True
         if migrated:
-            self._save_store()
-
-        # 兼容历史「场景调参」存储：将 modules/ar_companion_backend/data/ar_companion_scene_tuning_store.json
-        # 中的 companion 视角参数，迁移到当前 pet_companion 全局调参（按 mascot_id）。
-        # 仅在目标 form_key 缺失时补齐，不覆盖现有新结构数据。
-        self._seed_companion_tuning_from_legacy_scene_store()
-        # 再从历史的非分场景参数补齐：ar_companion_tuning_store.json
-        # 该文件通常按 persona 维度保存用户手工调好的镜头参数（你之前主要在这里调）。
-        self._seed_companion_tuning_from_legacy_tuning_store()
-
-    def _seed_companion_tuning_from_legacy_scene_store(self) -> None:
-        legacy_path = self._project_root / "modules" / "ar_companion_backend" / "data" / "ar_companion_scene_tuning_store.json"
-        if not legacy_path.exists():
-            return
-        try:
-            raw = json.loads(legacy_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        if not isinstance(raw, dict):
-            return
-
-        persona_to_mascot = {
-            "default": "cute-dog",
-            "cute_fox": "cute-fox",
-            "cute_dino": "cute-dino",
-            "cute_cat": "cute-cat",
-            "cute_bunny": "cute-bunny",
-            "cute_squirrel": "cute-squirrel",
-            "cute_chick": "cute-chick",
-            "cute_panda": "cute-panda",
-            "cute_koala": "cute-koala",
-            "cute_penguin": "cute-penguin",
-        }
-        target = self._store.setdefault("global_form_view_tuning_companion", {})
-        changed = False
-
-        for key, tuning in raw.items():
-            if not isinstance(key, str) or not isinstance(tuning, dict):
-                continue
-            parts = key.split("::")
-            if len(parts) != 3:
-                continue
-            uid, persona_id, scene_key = parts
-            if scene_key != "companion":
-                continue
-            # 历史数据主要以 wx_child_user 为模板，动态 uid 会在读取时回退到模板。
-            if uid not in {"wx_child_user", ""}:
-                continue
-            mascot_id = persona_to_mascot.get(persona_id)
-            if not mascot_id:
-                continue
-
-            safe_tuning = self._sanitize_view_tuning(tuning)
-            if not safe_tuning:
-                continue
-
-            mascot_store = target.setdefault(mascot_id, {})
-            # 兼容蛋形态与三档模型，避免切换形态后参数丢失。
-            for fk in ("egg", "tier1", "tier2", "tier3"):
-                if isinstance(mascot_store.get(fk), dict):
-                    continue
-                mascot_store[fk] = {"tuning": dict(safe_tuning)}
-                changed = True
-
-        if changed:
-            self._save_store()
-
-    def _seed_companion_tuning_from_legacy_tuning_store(self) -> None:
-        legacy_path = self._project_root / "modules" / "ar_companion_backend" / "data" / "ar_companion_tuning_store.json"
-        if not legacy_path.exists():
-            return
-        try:
-            raw = json.loads(legacy_path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        if not isinstance(raw, dict):
-            return
-
-        persona_to_mascot = {
-            "default": "cute-dog",
-            "cute_fox": "cute-fox",
-            "cute_dino": "cute-dino",
-            "cute_cat": "cute-cat",
-            "cute_bunny": "cute-bunny",
-            "cute_squirrel": "cute-squirrel",
-            "cute_chick": "cute-chick",
-            "cute_panda": "cute-panda",
-            "cute_koala": "cute-koala",
-            "cute_penguin": "cute-penguin",
-        }
-
-        target = self._store.setdefault("global_form_view_tuning_companion", {})
-        changed = False
-
-        for key, tuning in raw.items():
-            if not isinstance(key, str) or not isinstance(tuning, dict):
-                continue
-            parts = key.split("::")
-            if len(parts) != 2:
-                continue
-            uid, persona_id = parts
-            if uid not in {"wx_child_user", ""}:
-                continue
-            mascot_id = persona_to_mascot.get(persona_id)
-            if not mascot_id:
-                continue
-            safe_tuning = self._sanitize_view_tuning(tuning)
-            if not safe_tuning:
-                continue
-
-            mascot_store = target.setdefault(mascot_id, {})
-            # 对 legacy_tuning_store 采用“补齐覆盖”策略：
-            # - 若该形态为空，直接写入
-            # - 若已有值，仅保留已有键并补齐缺失键（避免破坏线上已二次微调）
-            for fk in ("egg", "tier1", "tier2", "tier3"):
-                existing = mascot_store.get(fk) if isinstance(mascot_store.get(fk), dict) else {}
-                existing_tuning = existing.get("tuning") if isinstance(existing.get("tuning"), dict) else {}
-                merged = dict(safe_tuning)
-                merged.update(existing_tuning)
-                if existing_tuning != merged:
-                    mascot_store[fk] = {"tuning": merged}
-                    changed = True
-
-        if changed:
             self._save_store()
 
     def get_state(self, user_id: str, mascot_id: str) -> Dict[str, Any]:

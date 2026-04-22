@@ -7,16 +7,10 @@
       <view class="user-details">
         <text class="baby-name">{{userData.babyName}}</text>
         <view class="stars-info">
-          <text class="star-icon">⭐</text>
+          <image class="star-icon-img" src="https://img.icons8.com/fluency/48/star--v1.png" mode="aspectFit" />
           <text class="stars-text">{{stars}} 颗星</text>
         </view>
       </view>
-    </view>
-    <!-- 右侧：标题 -->
-    <view class="title-section">
-      <text class="sparkle">✨</text>
-      <text class="app-title">童心故事园</text>
-      <text class="sparkle">✨</text>
     </view>
   </view>
 
@@ -24,8 +18,10 @@
   <view class="home-hero">
     <!-- 3D 展示卡片保持稳定：不使用浮动动画，避免模型上下漂移 -->
     <view class="home-pet-card {{homeThreeLoading ? 'home-pet-card-switching' : ''}} {{showGuide && guideHighlight === 'pet' ? 'guide-pulse' : ''}}" bindtap="toggleAvatarPicker">
-      <view class="home-tune-fab" catchtap="onToggleHomeTuning">调参</view>
-      <view class="home-switch-fab" catchtap="onHomeOpenSwitch">切换</view>
+      <view wx:if="{{showHomeModelTapHint}}" class="home-tap-hint">
+        <image class="home-tap-hint-icon" src="../../assets/icons/home-tap-hint.png" mode="aspectFit" />
+        <text class="home-tap-hint-text">点击模型可切换伴宠/形态</text>
+      </view>
       <view class="home-pet-stage" style="background: {{homePetStageBg}};">
         <view wx:if="{{homeThreeLoading}}" class="home-switching-overlay">
           <view class="home-switching-ring"></view>
@@ -84,7 +80,7 @@
             >
               <image class="home-switch-mascot-img {{item.locked ? 'home-switch-img-dim' : ''}}" src="{{item.url}}" mode="aspectFill" />
               <view class="home-switch-mascot-name mascot-name-{{item.id}}">{{item.name}}</view>
-              <view class="home-switch-lock" wx:if="{{item.locked}}">🔒</view>
+              <view class="home-switch-lock" wx:if="{{item.locked}}">锁</view>
             </view>
           </view>
         </view>
@@ -100,13 +96,13 @@
               data-tier="{{item}}"
             >
               <view class="home-form-poster">
-                <image class="home-form-poster-img {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-img-dim' : ''}}" src="{{homeFormPosterUrls[item - 1] || currentMascot.url}}" mode="aspectFill" />
+                <image class="home-form-poster-img {{(homeUnlockedFormTiers.indexOf(item) === -1) ? 'home-switch-img-dim' : ''}}" src="{{currentMascot.url}}" mode="aspectFill" />
                 <view class="home-form-badge">形态{{item}}</view>
               </view>
               <view class="home-form-title">
                 {{item === 1 ? '初阶形态' : (item === 2 ? '中阶形态' : '高阶形态')}}
               </view>
-              <view class="home-switch-lock" wx:if="{{homeUnlockedFormTiers.indexOf(item) === -1}}">🔒</view>
+              <view class="home-switch-lock" wx:if="{{homeUnlockedFormTiers.indexOf(item) === -1}}">锁</view>
             </view>
           </view>
         </view>
@@ -114,69 +110,60 @@
     </view>
 
     <view class="home-pet-meta">
-      <view class="home-pet-name-row">
-        <text class="home-pet-name mascot-name-{{currentMascot.id}}">{{currentMascot.name}}</text>
-      </view>
-
-    <view class="status-grid {{showGuide && guideHighlight === 'status' ? 'guide-pulse' : ''}}">
-  <!-- 第一行：饥饿 + 清洁 -->
-  <view class="status-row">
-    <!-- 饥饿值：加 class="status-hunger" -->
-    <view class="status-item status-hunger">
-      <view class="status-circle">
-        <view class="status-circle-bg"></view>
-        <view class="status-circle-progress" style="--progress: {{hungerLevel}}%; --color: #f59e0b;"></view>
-        <view class="status-circle-content">
-          <text class="mini-emoji">🍎</text>
-          <text class="status-percent">{{hungerLevel}}%</text>
+      <view class="status-title-wrap">
+        <view class="status-title-badge">
+          <image class="sparkle-icon" src="https://img.icons8.com/fluency/48/sparkling.png" mode="aspectFit" />
+          <text class="app-title">亲声伴读园</text>
+          <image class="sparkle-icon" src="https://img.icons8.com/fluency/48/sparkling.png" mode="aspectFit" />
         </view>
       </view>
-      <text class="status-label">饥饿值</text>
-    </view>
+      <view class="status-panel {{showGuide && guideHighlight === 'status' ? 'guide-pulse' : ''}}" style="background: {{homeStatusPanelBg}};">
+        <view class="status-grid">
+          <view class="status-item status-hunger">
+            <view class="status-circle">
+              <view class="status-circle-bg"></view>
+              <view class="status-circle-progress" style="--progress: {{hungerLevelAnim > 0 ? hungerLevelAnim : 10}}%; --color: {{homeStatusRingColor}};"></view>
+              <view class="status-circle-content">
+                <image class="mini-icon" src="../../assets/icons/status-food.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="status-value">{{hungerLevel}}%</text>
+          </view>
 
-    <!-- 清洁度：加 class="status-clean" -->
-    <view class="status-item status-clean">
-      <view class="status-circle">
-        <view class="status-circle-bg"></view>
-        <view class="status-circle-progress" style="--progress: {{cleanLevel}}%; --color: #ec4899;"></view>
-        <view class="status-circle-content">
-          <text class="mini-emoji">🧼</text>
-          <text class="status-percent">{{cleanLevel}}%</text>
+          <view class="status-item status-clean">
+            <view class="status-circle">
+              <view class="status-circle-bg"></view>
+              <view class="status-circle-progress" style="--progress: {{cleanLevelAnim > 0 ? cleanLevelAnim : 10}}%; --color: {{homeStatusRingColor}};"></view>
+              <view class="status-circle-content">
+                <image class="mini-icon" src="../../assets/icons/status-clean.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="status-value">{{cleanLevel}}%</text>
+          </view>
+
+          <view class="status-item status-mood">
+            <view class="status-circle">
+              <view class="status-circle-bg"></view>
+              <view class="status-circle-progress" style="--progress: {{moodLevelAnim > 0 ? moodLevelAnim : 10}}%; --color: {{homeStatusRingColor}};"></view>
+              <view class="status-circle-content">
+                <image class="mini-icon" src="../../assets/icons/status-fun.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="status-value">{{moodLevel}}%</text>
+          </view>
+
+          <view class="status-item status-sleepy">
+            <view class="status-circle">
+              <view class="status-circle-bg"></view>
+              <view class="status-circle-progress" style="--progress: {{sleepyLevelAnim > 0 ? sleepyLevelAnim : 10}}%; --color: {{homeStatusRingColor}};"></view>
+              <view class="status-circle-content">
+                <image class="mini-icon" src="../../assets/icons/status-sleep.png" mode="aspectFit" />
+              </view>
+            </view>
+            <text class="status-value">{{sleepyLevel}}%</text>
+          </view>
         </view>
       </view>
-      <text class="status-label">清洁度</text>
-    </view>
-  </view>
-
-  <!-- 第二行：心情 + 睡眠 -->
-  <view class="status-row">
-    <!-- 心情值：加 class="status-mood" -->
-    <view class="status-item status-mood">
-      <view class="status-circle">
-        <view class="status-circle-bg"></view>
-        <view class="status-circle-progress" style="--progress: {{moodLevel}}%; --color: #f0a8c0;"></view>
-        <view class="status-circle-content">
-          <text class="mini-emoji">⚽</text>
-          <text class="status-percent">{{moodLevel}}%</text>
-        </view>
-      </view>
-      <text class="status-label">心情值</text>
-    </view>
-
-    <!-- 睡眠值：加 class="status-sleepy" -->
-    <view class="status-item status-sleepy">
-      <view class="status-circle">
-        <view class="status-circle-bg"></view>
-        <view class="status-circle-progress" style="--progress: {{sleepyLevel}}%; --color: #fde68a;"></view>
-        <view class="status-circle-content">
-          <text class="mini-emoji">🛏️</text>
-          <text class="status-percent">{{sleepyLevel}}%</text>
-        </view>
-      </view>
-      <text class="status-label">睡眠值</text>
-    </view>
-  </view>
-</view>
     </view>
   </view>
 
@@ -232,7 +219,7 @@
   <!-- 头像选择器 -->
   <view class="avatar-picker {{showAvatarPicker ? 'show' : 'hide'}}" wx:if="{{showAvatarPicker}}">
     <view class="picker-title">
-      <text>选择你的小伙伴 ✨</text>
+      <text>选择你的小伙伴</text>
     </view>
     <view class="avatar-grid">
       <view
@@ -244,32 +231,11 @@
       >
         <image class="option-image {{item.locked ? 'option-image-dim' : ''}}" src="{{item.url}}" mode="aspectFill" />
         <view class="avatar-frost" wx:if="{{item.locked}}">
-          <text class="avatar-frost-icon">🔒</text>
+          <text class="avatar-frost-icon">锁</text>
         </view>
         <view class="option-name">{{item.name}}</view>
         <view class="selected-mark" wx:if="{{currentMascot.id === item.id}}">✓</view>
       </view>
-    </view>
-  </view>
-
-  <!-- 中部：两个进度卡 -->
-  <view class="home-metrics-row">
-    <view class="metric-card" bindtap="goToGrowth">
-  <view class="metric-button-3d">
-    <text class="metric-button-text">阅读计划</text>
-  </view>
-  <text class="metric-label">今日阅读 {{readingMinutesToday}} / {{readingGoalMinutes}} 分钟</text>
-</view>
-    <view class="metric-card" bindtap="goToGrowth">
-      <view class="metric-ring metric-ring-yellow">
-        <view class="metric-ring-bg"></view>
-        <view class="metric-ring-fg metric-ring-fg-yellow" style="--p: {{starsProgress}};"></view>
-        <view class="metric-center">
-          <text class="metric-value">{{starsProgress}}%</text>
-          <text class="metric-sub">今日星星</text>
-        </view>
-      </view>
-      <text class="metric-label">已获得 {{starsToday}} / {{starsGoalToday}} ⭐</text>
     </view>
   </view>
 
@@ -283,36 +249,62 @@
       data-game="{{item}}"
     >
       <view class="quick-icon-ball ball-{{item.id}}">
-        <text class="quick-icon">{{item.iconEmoji}}</text>
+        <image class="quick-icon-img" src="{{item.iconUrl}}" mode="aspectFit" />
       </view>
       <text class="quick-title">{{item.title}}</text>
+    </view>
+  </view>
+
+  <!-- 中部：两个进度卡 -->
+  <view class="home-metrics-row">
+    <view class="metric-card" bindtap="goToGrowth">
+      <view class="metric-status-circle">
+        <view class="metric-status-circle-bg"></view>
+        <view class="metric-status-circle-progress" style="--progress: {{readingProgress > 0 ? readingProgress : 10}}%;"></view>
+        <view class="metric-status-circle-content">
+          <image class="metric-status-icon" src="../../assets/icons/list.png" mode="aspectFit" />
+        </view>
+      </view>
+      <text class="metric-status-value">{{readingProgress}}%</text>
+      <text class="metric-label">今日阅读 {{readingMinutesToday}} / {{readingGoalMinutes}} 分钟</text>
+    </view>
+    <view class="metric-card" bindtap="goToGrowth">
+      <view class="metric-status-circle">
+        <view class="metric-status-circle-bg"></view>
+        <view class="metric-status-circle-progress" style="--progress: {{starsProgress > 0 ? starsProgress : 10}}%;"></view>
+        <view class="metric-status-circle-content">
+          <image class="metric-status-icon" src="https://img.icons8.com/fluency/48/star--v1.png" mode="aspectFit" />
+        </view>
+      </view>
+      <text class="metric-status-value">{{starsProgress}}%</text>
+      <text class="metric-label">已获得 {{starsToday}} / {{starsGoalToday}} 星</text>
     </view>
   </view>
   
   <!-- 绘本阅读（底部两块） -->
   <view class="section">
-    <text class="section-title">📖 听读乐园</text>
+    <text class="section-title">听读乐园</text>
     <view class="reading-stack">
       <view class="reading-menu-item reading-books" bindtap="goToBooks">
         <view class="reading-menu-icon-box">
-          <text class="reading-menu-icon">📚</text>
+          <image class="reading-menu-icon-img" src="../../assets/icons/home-book.png" mode="aspectFit" />
         </view>
         <view class="reading-menu-text">
           <text class="reading-menu-title">看绘本</text>
           <text class="reading-menu-desc">故事书架 · 选一本就开始</text>
         </view>
-        <image class="reading-menu-sticker reading-sticker-book" src="{{mpAssetIconBase}}/icons/book1.png" mode="aspectFit" />
+        <image class="reading-menu-sticker reading-sticker-book" src="../../assets/icons/home-library.png" mode="aspectFit" />
       </view>
 
       <view class="reading-menu-item reading-voice {{showGuide && guideHighlight === 'voice' ? 'guide-pulse' : ''}}" bindtap="goToVoice">
         <view class="reading-menu-icon-box">
-          <text class="reading-menu-icon">🎤</text>
+          <image class="reading-menu-icon-img" src="../../assets/icons/home-mic.png" mode="aspectFit" />
         </view>
         <view class="reading-menu-text">
           <text class="reading-menu-title">克隆魔法音</text>
           <text class="reading-menu-desc">训练专属音色 · 更像家人讲读</text>
         </view>
-        <image class="reading-menu-sticker reading-sticker-mic" src="{{mpAssetIconBase}}/icons/microphone.png" mode="aspectFit" />
+        <image class="reading-menu-sticker reading-sticker-mic" src="../../assets/icons/home-magic-voice.png" mode="aspectFit" />
       </view>
     </view>
   </view>

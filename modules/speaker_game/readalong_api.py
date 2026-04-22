@@ -518,8 +518,17 @@ def _build_grounded_feedback(
     asr_error: str = "",
     positive_reason: str = "",
     uncivil_term: str = "",
+    asr_source: str = "",
 ) -> str:
     rec = str(transcript or "").strip()
+    src = str(asr_source or "").strip().lower()
+
+    if "fallback_heuristic" in src:
+        return (
+            "我已经听到你的声音啦。当前识别网络有点不稳定，这次先按你的表达状态给你评分。"
+            "你可以再讲一遍，我会继续认真听你说。"
+        )
+
     if not rec:
         err = str(asr_error or "").lower()
         if any(x in err for x in ["invalid_api_key", "401", "404", "asr_disabled"]):
@@ -572,6 +581,86 @@ def _looks_like_invalid_asr_text(text: str) -> bool:
         "transcribe",
     ]
     return any(m in t for m in bad_markers)
+
+
+def _decode_wav_to_float_mono(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
+    try:
+        with wave.open(io.BytesIO(bytes(audio_bytes or b"")), "rb") as wf:
+            n_channels = max(1, int(wf.getnchannels() or 1))
+            sample_width = int(wf.getsampwidth() or 2)
+            sample_rate = max(1, int(wf.getframerate() or 16000))
+            n_frames = max(0, int(wf.getnframes() or 0))
+            raw = wf.readframes(n_frames)
+    except Exception:
+        return np.zeros((0,), dtype=np.float32), 16000
+
+    if not raw:
+        return np.zeros((0,), dtype=np.float32), sample_rate
+
+    if sample_width == 1:
+        wav = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        wav = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif sample_width == 4:
+        wav = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+    else:
+        return np.zeros((0,), dtype=np.float32), sample_rate
+
+    if wav.size == 0:
+        return np.zeros((0,), dtype=np.float32), sample_rate
+
+    if n_channels > 1:
+        usable = (wav.size // n_channels) * n_channels
+        if usable <= 0:
+            return np.zeros((0,), dtype=np.float32), sample_rate
+        wav = wav[:usable].reshape(-1, n_channels).mean(axis=1)
+
+    return np.clip(wav, -1.0, 1.0).astype(np.float32), sample_rate
+
+
+def _estimate_audio_proxy_score(audio_bytes: bytes) -> Dict[str, float]:
+    wav, sample_rate = _decode_wav_to_float_mono(audio_bytes)
+    if wav.size <= 0:
+        return {
+            "duration_sec": 0.0,
+            "rms": 0.0,
+            "speech_ratio": 0.0,
+            "clip_ratio": 0.0,
+            "accuracy_proxy": 62.0,
+        }
+
+    duration_sec = float(wav.size / max(sample_rate, 1))
+    abs_wav = np.abs(wav)
+    rms = float(np.sqrt(np.mean(np.square(wav)) + 1e-12))
+    speech_ratio = float(np.mean(abs_wav > 0.012))
+    clip_ratio = float(np.mean(abs_wav >= 0.98))
+
+    duration_norm = float(np.clip((duration_sec - 0.7) / 5.0, 0.0, 1.0))
+    energy_norm = float(np.clip((rms - 0.008) / 0.06, 0.0, 1.0))
+    speech_norm = float(np.clip((speech_ratio - 0.01) / 0.35, 0.0, 1.0))
+
+    proxy = 62.0 + 23.0 * (0.45 * duration_norm + 0.35 * energy_norm + 0.20 * speech_norm)
+    proxy -= 14.0 * float(np.clip(clip_ratio / 0.08, 0.0, 1.0))
+    proxy = float(np.clip(proxy, 58.0, 88.0))
+
+    return {
+        "duration_sec": float(round(duration_sec, 3)),
+        "rms": float(round(rms, 5)),
+        "speech_ratio": float(round(speech_ratio, 5)),
+        "clip_ratio": float(round(clip_ratio, 5)),
+        "accuracy_proxy": float(round(proxy, 2)),
+    }
+
+
+def _build_heuristic_transcript(expected_text: str, duration_sec: float) -> str:
+    expected = re.sub(r"\s+", " ", str(expected_text or "").strip())
+    if expected:
+        return expected[:80]
+    if duration_sec >= 3.0:
+        return "我在描述这张图片里的主要内容"
+    if duration_sec >= 1.2:
+        return "我说出了图里的角色和动作"
+    return "我说了一句简短描述"
 
 
 def _cleanup_audio_cache() -> None:
@@ -1091,18 +1180,27 @@ async def evaluate(
     transcript = str(asr.get("transcript") or "").strip()
     asr_error = str(asr.get("error") or "")
     asr_source = str(asr.get("source") or "fallback")
+    signal_proxy: Dict[str, float] = {}
 
     if _looks_like_invalid_asr_text(transcript):
         transcript = ""
         asr_error = (asr_error + "|invalid_transcript").strip("|")
 
     if not transcript:
+        signal_proxy = _estimate_audio_proxy_score(data_bytes)
+        transcript = _build_heuristic_transcript(expected_text, float(signal_proxy.get("duration_sec", 0.0)))
+        if transcript:
+            asr_source = "fallback_heuristic_from_expected"
+            asr_error = (asr_error + "|asr_degraded_to_heuristic").strip("|")
+
         print(
             f"[readalong][asr-empty] source={asr_source} file={str(file.filename or '')[:80]} "
             f"fmt={fmt or 'wav'} bytes={len(data_bytes)} err={asr_error[:200]}"
         )
 
-    positive = await _ai_positive_score(transcript) if transcript else {"ok": False, "positive": 60.0, "reason": ""}
+    degraded_mode = "fallback_heuristic" in asr_source
+
+    positive = await _ai_positive_score(transcript) if (transcript and not degraded_mode) else {"ok": False, "positive": 60.0, "reason": ""}
     pos_ok = bool(positive.get("ok"))
     pos_val = float(positive.get("positive", 60.0)) if pos_ok else 60.0
     uncivil_term = _detect_uncivil_term(transcript)
@@ -1114,7 +1212,13 @@ async def evaluate(
         "uncivil_term": uncivil_term,
     }
 
-    if uncivil_term:
+    if degraded_mode:
+        proxy_acc = float(signal_proxy.get("accuracy_proxy", 62.0))
+        final_acc = max(58.0, min(88.0, proxy_acc))
+        score["score_mode"] = "degraded_signal_proxy"
+        score["degraded_asr"] = True
+        score["signal_proxy"] = signal_proxy
+    elif uncivil_term:
         final_acc = max(35.0, min(79.0, pos_val))
         score["score_mode"] = "uncivil_guardrail"
     else:
@@ -1132,6 +1236,7 @@ async def evaluate(
         asr_error,
         str(positive.get("reason") or "") if pos_ok else "",
         uncivil_term,
+        asr_source,
     )
 
     tts = await _ai_synthesize_feedback_audio(feedback_text)

@@ -1,4 +1,5 @@
 const app = getApp();
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 Page({
   data: {
@@ -238,7 +239,7 @@ Page({
     } catch (e) {
       this._rpx2px = 0.5;
     }
-    const base = (app && app.globalData && app.globalData.apiBaseUrl) || 'http://127.0.0.1:9880';
+    const base = resolveApiBase(app);
     this.setData({ apiBaseUrl: base });
     
     // 加载涂色任务列表
@@ -303,7 +304,8 @@ Page({
     wx.request({
       url,
       method: 'GET',
-      timeout: 15000,
+      // 首次进入会触发后端生成/校验 regionmap，可能超过 15s
+      timeout: 120000,
       success: (res) => {
         if (res && res.statusCode === 200 && res.data && res.data.ok) {
           const works = Array.isArray(res.data.works) ? res.data.works : [];
@@ -585,12 +587,27 @@ Page({
 
   _toAbsoluteUrl(url) {
     if (!url) return '';
-    if (/^https?:\/\//i.test(url)) return url;
+    const normalizeUrlOnce = (u) => {
+      const s = String(u || '').trim();
+      if (!s) return '';
+      // 避免出现 %2520 这类“二次编码”：先尝试 decode，再 encode 回单次编码
+      try {
+        return encodeURI(decodeURI(s));
+      } catch (e) {
+        // decode 失败（可能有不完整 %），至少保证不会把 % 再编码一遍
+        if (/%[0-9A-Fa-f]{2}/.test(s)) return s;
+        return encodeURI(s);
+      }
+    };
+
+    if (/^https?:\/\//i.test(url)) return normalizeUrlOnce(url);
 
     const base = (this.data.apiBaseUrl || '').replace(/\/$/, '');
     if (!base) return url;
 
-    return url.startsWith('/') ? `${base}${url}` : `${base}/${url}`;
+    const full = url.startsWith('/') ? `${base}${url}` : `${base}/${url}`;
+    // 兼容中文文件名与空格（如 "1 小狗.jpg"），同时避免已编码 URL 被二次编码成 %25xx
+    return normalizeUrlOnce(full);
   },
 
   _toBundledLineArtPath(rawUrl) {
@@ -636,7 +653,7 @@ Page({
         }
       },
       fail: (err) => {
-        wx.showToast({ title: '网络错误', icon: 'none' });
+        wx.showToast({ title: '题库加载超时，请重试', icon: 'none' });
       }
     });
   },
@@ -1901,8 +1918,8 @@ Page({
   _getReferenceAnswerUrl(sketch) {
     if (!sketch) return '';
 
-    // 最新题库/答案库采用“同名文件”一一对应（资源已统一迁移到 /assets 下）：
-    // /assets/paint_basement/<filename>  -> /assets/paint_basement_masks/<filename>
+    // 最新题库/答案库采用“同名文件”一一对应：
+    // /paint_basement/<filename>  -> /paint_basement_masks/<filename>
     // 例如：16 西瓜.jpg -> 16 西瓜.jpg
     const pickStrings = [];
     if (sketch.lineart_url) pickStrings.push(String(sketch.lineart_url));
@@ -1936,7 +1953,15 @@ Page({
     if (!fileName) return '';
 
     // 用绝对 URL，确保小程序图片能正确加载（不能只用相对路径）
-    const p = `/assets/paint_basement_masks/${encodeURIComponent(fileName)}`;
+    // 注意：fileName 可能已是 encode 过的（例如包含 %20）。
+    // 若再 encodeURIComponent 会变成 %2520 导致 404，所以这里先 decode 再单次 encode。
+    let decoded = fileName;
+    try {
+      decoded = decodeURIComponent(String(fileName || ''));
+    } catch (e) {
+      decoded = String(fileName || '');
+    }
+    const p = `/paint_basement_masks/${encodeURIComponent(decoded)}`;
     return this._toAbsoluteUrl(p);
   },
 

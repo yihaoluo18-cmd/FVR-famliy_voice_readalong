@@ -1,5 +1,6 @@
 const app = getApp();
 const { toMiniprogramAssetUrl } = require("../../utils/asset-url.js");
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 Page({
   data: {
@@ -21,7 +22,7 @@ Page({
 
     // 题库与配图索引
     qbank: [], // [{id,title,intro,tips,tags}]
-    imageIndex: {}, // {qid: "/assets/practice/speaker_images/q001.png"}
+    imageIndex: {}, // {qid: "/practice_static/speaker_images/q001.png"}
     generatedIds: [], // ["q001", ...]
     currentItem: null, // 当前题目对象（题库模式）
 
@@ -43,7 +44,7 @@ Page({
   },
 
   onLoad() {
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880'
+    const base = resolveApiBase(app)
     this.setData({
       apiBaseUrl: base,
       speakerRefreshIcon: toMiniprogramAssetUrl("/assets/icons/back.png"),
@@ -263,7 +264,7 @@ Page({
   },
 
     _buildReadalongUploadUrls(pathname) {
-      const base = String((this.data && this.data.apiBaseUrl) || ((app && app.getApiBaseUrl) ? app.getApiBaseUrl() : '') || '').trim().replace(/\/+$/, '')
+      const base = String((this.data && this.data.apiBaseUrl) || resolveApiBase(app) || '').trim().replace(/\/+$/, '')
       const path = String(pathname || '').trim()
       const urls = []
       if (base && path) {
@@ -317,22 +318,9 @@ Page({
       const raw = String(pathOrUrl || '').trim()
       if (!raw) return ''
       if (/^https?:\/\//i.test(raw)) return raw
-      const base = String((this.data && this.data.apiBaseUrl) || ((app && app.getApiBaseUrl) ? app.getApiBaseUrl() : '') || '').trim().replace(/\/+$/, '')
+      const base = String((this.data && this.data.apiBaseUrl) || resolveApiBase(app) || '').trim().replace(/\/+$/, '')
       if (!base) return raw
       return raw.startsWith('/') ? `${base}${raw}` : `${base}/${raw}`
-    },
-
-    _normalizeSpeakerImagePath(pathOrUrl) {
-      const raw = String(pathOrUrl || '').trim();
-      if (!raw) return '';
-      if (/^https?:\/\//i.test(raw)) return raw;
-      const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
-      if (withLeadingSlash.startsWith('/assets/')) return withLeadingSlash;
-      if (withLeadingSlash.startsWith('/practice_static/')) {
-        return `/assets/practice/${withLeadingSlash.slice('/practice_static/'.length)}`;
-      }
-      if (withLeadingSlash.startsWith('/practice/')) return `/assets${withLeadingSlash}`;
-      return withLeadingSlash;
     },
 
     _playFeedbackAudio(pathOrUrl) {
@@ -475,58 +463,21 @@ Page({
   _loadImageIndex() {
     return new Promise((resolve) => {
       const apiBaseUrl = this.data.apiBaseUrl
-      const applyIndex = (data) => {
-        const rawIdx = (data && typeof data === 'object') ? data : {}
-        const idx = {}
-        Object.keys(rawIdx || {}).forEach((k) => {
-          idx[k] = this._normalizeSpeakerImagePath(rawIdx[k])
-        })
-        const ids = Object.keys(idx || {}).sort()
-        const totalQuestions = ids.length || 1
-        const currentQuestion = Math.min(this.data.currentQuestion || 1, totalQuestions)
-        const progressPercent = (currentQuestion / totalQuestions) * 100
-        this.setData({ imageIndex: idx, generatedIds: ids, totalQuestions, currentQuestion, progressPercent })
-        resolve(true)
-      }
-
       wx.request({
-        url: `${apiBaseUrl}/assets/practice/speaker_images_index.json`,
+        url: `${apiBaseUrl}/practice_static/speaker_images_index.json`,
         method: 'GET',
         timeout: 15000,
         success: (res) => {
-          if (res && res.statusCode === 200 && res.data) {
-            applyIndex(res.data)
-            return
-          }
-          wx.request({
-            url: `${apiBaseUrl}/practice_static/speaker_images_index.json`,
-            method: 'GET',
-            timeout: 15000,
-            success: (legacyRes) => {
-              if (legacyRes && legacyRes.statusCode === 200 && legacyRes.data) {
-                applyIndex(legacyRes.data)
-                return
-              }
-              resolve(false)
-            },
-            fail: () => resolve(false),
-          })
+          const data = (res && res.data) || {}
+          const idx = (data && typeof data === 'object') ? data : {}
+          const ids = Object.keys(idx || {}).sort()
+          const totalQuestions = ids.length || 1
+          const currentQuestion = Math.min(this.data.currentQuestion || 1, totalQuestions)
+          const progressPercent = (currentQuestion / totalQuestions) * 100
+          this.setData({ imageIndex: idx, generatedIds: ids, totalQuestions, currentQuestion, progressPercent })
+          resolve(true)
         },
-        fail: () => {
-          wx.request({
-            url: `${apiBaseUrl}/practice_static/speaker_images_index.json`,
-            method: 'GET',
-            timeout: 15000,
-            success: (legacyRes) => {
-              if (legacyRes && legacyRes.statusCode === 200 && legacyRes.data) {
-                applyIndex(legacyRes.data)
-                return
-              }
-              resolve(false)
-            },
-            fail: () => resolve(false),
-          })
-        },
+        fail: () => resolve(false),
       })
     })
   },

@@ -31,7 +31,7 @@ from .schemas import (
 router = APIRouter(tags=["user_mgmt"])
 db.init_db()
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-db.migrate_from_voice_library_json(str(PROJECT_ROOT / "modules" / "tts_backend" / "data" / "voice_library.json"))
+db.migrate_from_voice_library_json(str(PROJECT_ROOT / "voice_library.json"))
 
 # 微信 access_token 内存缓存（用于手机号快速验证组件）
 _wx_stable_token: Dict[str, Any] = {"token": "", "exp": 0.0}

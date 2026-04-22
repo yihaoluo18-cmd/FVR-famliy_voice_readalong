@@ -1,10 +1,13 @@
-const DEFAULT_BASE_URL = "http://127.0.0.1:9880";
+const { resolveApiBase } = require("./api-base.js");
 const DEFAULT_USER_ID = "wx_child_user";
 const STORAGE_KEY_COMPANION_USER_ID = "ar_companion_user_id";
 
 function getApiBaseUrl() {
-  const app = getApp();
-  return (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : DEFAULT_BASE_URL;
+  try {
+    return resolveApiBase(getApp());
+  } catch (e) {
+    return resolveApiBase(null);
+  }
 }
 
 function isApiTemporarilyDown() {

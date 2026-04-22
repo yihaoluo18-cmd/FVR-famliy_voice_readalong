@@ -1,6 +1,7 @@
 // app.js - 小程序全局逻辑
 const { GUIDE_STORAGE_KEY, isMainDone, markMainDone } = require('./utils/guide-flow.js')
-const DEFAULT_API_BASE_URL = 'http://127.0.0.1:9880'
+const { getForcedOnlineApiBase, DEV_LOOPBACK_FALLBACK } = require('./utils/api-base.js')
+const DEFAULT_API_BASE_URL = DEV_LOOPBACK_FALLBACK
 const STORAGE_KEY_API_URL = 'apiBaseUrl'
 const LEGACY_STORAGE_KEY_API_URL = 'readalong.apiBaseUrl'
 const STORAGE_KEY_VOICE_ROLE_MAP = 'voiceRoleMap'
@@ -9,6 +10,7 @@ const STORAGE_KEY_LAST_AUTH_USER = 'lastAuthenticatedUserId'
 const STORAGE_KEY_LAST_GOOD_API_URL = 'lastGoodApiBaseUrl'
 const STORAGE_KEY_CUSTOM_FONT_URL = 'customFontUrl'
 const STORAGE_KEY_API_DOWN_UNTIL = 'apiDownUntilMap'
+const STORAGE_KEY_ACTIVE_TRAINING_TASK = 'activeTrainingTask.v1'
 const STORAGE_KEY_CUSTOM_FONT_LOCAL_PATH = 'customFontLocalPath'
 const GLOBAL_FONT_FAMILY = 'zihunmengquruantangti'
 const FIXED_FONT_FILE_NAME = 'cute-candy.ttf'
@@ -17,7 +19,7 @@ const FONT_FILE_NAME = '字魂萌趣软糖体(商用需授权).ttf'
 const FONT_FOLDER_NAME = '字魂萌趣软糖体(商用需授权)'
 const BASE_VOICE_FEMALE_ID = 'voice_001'
 const BASE_VOICE_MALE_ID = 'voice_002'
-const FRONTEND_HIDDEN_VOICE_IDS = new Set(['voice_003'])
+const VOICE_LIST_CACHE_TTL_MS = 12000
 
 function normalizeBaseUrl(url) {
   if (!url) return ''
@@ -119,6 +121,13 @@ App({
   
   onLaunch() {
     this._voiceChangeSubscribers = []
+    this._voiceListFetchedAt = 0
+    this._voiceListLoading = false
+    this._voiceListCallbacks = []
+    this._voiceSwitching = false
+    this._pendingVoiceSwitch = null
+    this._trainingWatchTimer = null
+    this._trainingModalShownForTask = ''
     this._apiDownUntilMap = safeGetStorage(STORAGE_KEY_API_DOWN_UNTIL, {}) || {}
     this._migrateLegacyApiBaseUrl()
     // 恢复系统字体：不再自动加载自定义字体
@@ -127,6 +136,101 @@ App({
     // 这里直接跳过，直到你在小程序里配置正确的局域网地址后再进入语音页触发刷新。
     const base = this.getApiBaseUrl()
     if (!this._shouldBlockLoopbackRequest(base)) this.refreshVoiceList()
+    this._restoreTrainingWatch()
+  },
+
+  _restoreTrainingWatch() {
+    const stored = safeGetStorage(STORAGE_KEY_ACTIVE_TRAINING_TASK, null)
+    if (!stored || typeof stored !== 'object') return
+    const taskId = String(stored.taskId || '').trim()
+    if (!taskId) return
+    this.startGlobalTrainingWatch(stored)
+  },
+
+  startGlobalTrainingWatch(payload) {
+    const taskId = String((payload && payload.taskId) || '').trim()
+    if (!taskId) return
+    const voiceName = String((payload && payload.voiceName) || '').trim()
+    const source = String((payload && payload.source) || '').trim()
+    const active = {
+      taskId,
+      voiceName,
+      source,
+      startedAt: Date.now()
+    }
+    this.globalData.activeTrainingTask = active
+    try { wx.setStorageSync(STORAGE_KEY_ACTIVE_TRAINING_TASK, active) } catch (e) {}
+    this._scheduleTrainingWatch(1200)
+  },
+
+  clearGlobalTrainingWatch(options) {
+    if (this._trainingWatchTimer) {
+      clearTimeout(this._trainingWatchTimer)
+      this._trainingWatchTimer = null
+    }
+    this.globalData.activeTrainingTask = null
+    try { wx.removeStorageSync(STORAGE_KEY_ACTIVE_TRAINING_TASK) } catch (e) {}
+    if (!(options && options.silent)) {
+      this._trainingModalShownForTask = ''
+    }
+  },
+
+  _scheduleTrainingWatch(delayMs) {
+    if (this._trainingWatchTimer) clearTimeout(this._trainingWatchTimer)
+    const delay = Math.max(800, Number(delayMs || 3000))
+    this._trainingWatchTimer = setTimeout(() => this._pollTrainingStatusOnce(), delay)
+  },
+
+  _pollTrainingStatusOnce() {
+    const active = this.globalData.activeTrainingTask
+    const taskId = String((active && active.taskId) || '').trim()
+    if (!taskId) return
+    const base = this.getApiBaseUrl()
+    wx.request({
+      url: `${base}/train/status?task_id=${encodeURIComponent(taskId)}`,
+      method: 'GET',
+      timeout: 10000,
+      success: (res) => {
+        const data = (res && res.data) || {}
+        const status = String(data.status || '').toLowerCase()
+        if (status === 'completed') {
+          this._handleTrainingCompleted(active, data)
+          return
+        }
+        if (status === 'failed') {
+          this._scheduleTrainingWatch(3500)
+          return
+        }
+        this._scheduleTrainingWatch(3000)
+      },
+      fail: () => this._scheduleTrainingWatch(3600)
+    })
+  },
+
+  _handleTrainingCompleted(active, data) {
+    const taskId = String((active && active.taskId) || '').trim()
+    if (!taskId) return
+    this.clearGlobalTrainingWatch({ silent: true })
+    if (this._trainingModalShownForTask === taskId) return
+    this._trainingModalShownForTask = taskId
+    const pages = getCurrentPages()
+    const cur = pages && pages.length ? pages[pages.length - 1] : null
+    const route = String((cur && cur.route) || '')
+    if (route === 'pages/voice/voice') return
+    const voiceName = String((active && active.voiceName) || '').trim()
+    const voiceId = String((data && data.voice_id) || '').trim()
+    const label = voiceName || voiceId || '新音色'
+    wx.showModal({
+      title: '音色训练完成',
+      content: `“${label}”已训练完成，可立即使用。是否前往魔法音页面查看？`,
+      confirmText: '立即查看',
+      cancelText: '稍后',
+      success: (r) => {
+        if (r && r.confirm) {
+          wx.switchTab({ url: '/pages/voice/voice' })
+        }
+      }
+    })
   },
 
   _isLoopbackBaseUrl(baseUrl) {
@@ -354,6 +458,15 @@ App({
   },
 
   _migrateLegacyApiBaseUrl() {
+    const forced = getForcedOnlineApiBase()
+    if (forced) {
+      this.globalData.apiBaseUrl = forced
+      try {
+        wx.setStorageSync(STORAGE_KEY_API_URL, forced)
+        wx.setStorageSync(LEGACY_STORAGE_KEY_API_URL, forced)
+      } catch (e) {}
+      return
+    }
     const stored = this._readStoredApiBaseUrl()
     let finalBase = stored || normalizeBaseUrl(this.globalData.apiBaseUrl) || DEFAULT_API_BASE_URL
     const lastGood = normalizeBaseUrl(safeGetStorage(STORAGE_KEY_LAST_GOOD_API_URL, ''))
@@ -367,6 +480,15 @@ App({
   },
 
   setApiBaseUrl(url) {
+    const forced = getForcedOnlineApiBase()
+    if (forced) {
+      this.globalData.apiBaseUrl = forced
+      try {
+        wx.setStorageSync(STORAGE_KEY_API_URL, forced)
+        wx.setStorageSync(LEGACY_STORAGE_KEY_API_URL, forced)
+      } catch (e) {}
+      return forced
+    }
     const finalBase = normalizeBaseUrl(url) || DEFAULT_API_BASE_URL
     this.globalData.apiBaseUrl = finalBase
     try {
@@ -377,6 +499,8 @@ App({
   },
 
   getApiBaseUrl() {
+    const forced = getForcedOnlineApiBase()
+    if (forced) return forced
     const inMemory = normalizeBaseUrl(this.globalData.apiBaseUrl || '')
     if (inMemory) return inMemory
     return this._readStoredApiBaseUrl() || DEFAULT_API_BASE_URL
@@ -429,9 +553,7 @@ App({
   },
 
   _sortVoiceListForDisplay(voices) {
-    const list = Array.isArray(voices)
-      ? voices.filter((v) => !FRONTEND_HIDDEN_VOICE_IDS.has(String((v && v.voice_id) || '').trim()))
-      : []
+    const list = Array.isArray(voices) ? voices.slice() : []
     list.sort((a, b) => {
       const pa = this._voiceSortPriority(a)
       const pb = this._voiceSortPriority(b)
@@ -504,6 +626,17 @@ App({
     })
     this.globalData.voiceRoleMap = next
     try { wx.setStorageSync(STORAGE_KEY_VOICE_ROLE_MAP, next) } catch (e) {}
+  },
+
+  _finishVoiceListFetch(err, voices) {
+    const list = Array.isArray(voices) ? voices : []
+    const callbacks = Array.isArray(this._voiceListCallbacks) ? this._voiceListCallbacks.slice() : []
+    this._voiceListCallbacks = []
+    this._voiceListLoading = false
+    if (!err) this._voiceListFetchedAt = Date.now()
+    callbacks.forEach((fn) => {
+      try { fn(err || null, list) } catch (e) {}
+    })
   },
 
   /**
@@ -589,19 +722,38 @@ App({
   },
 
   refreshVoiceList(callback) {
+    const done = typeof callback === 'function' ? callback : () => {}
+    const now = Date.now()
+    const inMemory = Array.isArray(this.globalData.voiceList) ? this.globalData.voiceList : []
+    if (inMemory.length && (now - Number(this._voiceListFetchedAt || 0) < VOICE_LIST_CACHE_TTL_MS)) {
+      done(null, inMemory)
+      return
+    }
+
+    if (this._voiceListLoading) {
+      this._voiceListCallbacks.push(done)
+      return
+    }
+
+    this._voiceListLoading = true
+    this._voiceListCallbacks = [done]
+
+    const finish = (err, voices) => this._finishVoiceListFetch(err, voices)
     const base = this.getApiBaseUrl()
+
     if (this.isApiTemporarilyDown(base)) {
       const cached = safeGetStorage(STORAGE_KEY_VOICE_LIST_CACHE, []) || []
       if (Array.isArray(cached) && cached.length) {
         const sortedCached = this._sortVoiceListForDisplay(cached)
         this.globalData.voiceList = sortedCached
         this._notifyVoiceChange()
-        if (typeof callback === 'function') callback(null, sortedCached)
+        finish(null, sortedCached)
         return
       }
-      if (typeof callback === 'function') callback(new Error('API 暂不可用，稍后重试'))
+      finish(new Error('API 暂不可用，稍后重试'), [])
       return
     }
+
     if (this._shouldBlockLoopbackRequest(base)) {
       const cached = safeGetStorage(STORAGE_KEY_VOICE_LIST_CACHE, []) || []
       if (Array.isArray(cached) && cached.length) {
@@ -613,11 +765,12 @@ App({
           ? String(defaultVoice.name || defaultVoice.voice_id || '基础音色（默认）')
           : '基础音色（默认）'
         this._notifyVoiceChange()
-        if (typeof callback === 'function') callback(null, sortedCached)
+        finish(null, sortedCached)
         return
       }
       // 无缓存时继续尝试请求（兼容开发者工具直连本机 127.0.0.1）
     }
+
     const headers = {}
     const tok = this.getAuthToken()
     if (tok) headers.Authorization = `Bearer ${tok}`
@@ -631,10 +784,10 @@ App({
         const voicesRaw = (res && res.data && Array.isArray(res.data.voices)) ? res.data.voices : []
         const voices = this._sortVoiceListForDisplay(voicesRaw)
         this.globalData.voiceList = voices
-          this.clearApiDownMark(base)
-          try { wx.setStorageSync(STORAGE_KEY_LAST_GOOD_API_URL, base) } catch (e) {}
-            try { wx.setStorageSync(STORAGE_KEY_VOICE_LIST_CACHE, voices) } catch (e) {}
-          this._pruneRoleVoiceMap(voices)
+        this.clearApiDownMark(base)
+        try { wx.setStorageSync(STORAGE_KEY_LAST_GOOD_API_URL, base) } catch (e) {}
+        try { wx.setStorageSync(STORAGE_KEY_VOICE_LIST_CACHE, voices) } catch (e) {}
+        this._pruneRoleVoiceMap(voices)
 
         const defaultVoice = this._resolveDefaultVoiceFromList(voices)
         this.globalData.defaultVoiceId = defaultVoice ? String(defaultVoice.voice_id || '') : ''
@@ -658,17 +811,17 @@ App({
         } catch (e) {}
 
         this._notifyVoiceChange()
-        if (typeof callback === 'function') callback(null, voices)
+        finish(null, voices)
       },
       fail: (err) => {
-          this.markApiTemporarilyDown(base, 20000)
-          const cached = safeGetStorage(STORAGE_KEY_VOICE_LIST_CACHE, []) || []
-          if (Array.isArray(cached) && cached.length && (!Array.isArray(this.globalData.voiceList) || !this.globalData.voiceList.length)) {
-            this.globalData.voiceList = this._sortVoiceListForDisplay(cached)
-            this._notifyVoiceChange()
-          }
-          if (typeof callback === 'function') callback(err || new Error('声音列表获取失败'))
+        this.markApiTemporarilyDown(base, 20000)
+        const cached = safeGetStorage(STORAGE_KEY_VOICE_LIST_CACHE, []) || []
+        if (Array.isArray(cached) && cached.length && (!Array.isArray(this.globalData.voiceList) || !this.globalData.voiceList.length)) {
+          this.globalData.voiceList = this._sortVoiceListForDisplay(cached)
+          this._notifyVoiceChange()
         }
+        finish(err || new Error('声音列表获取失败'), this.globalData.voiceList || [])
+      }
     })
   },
 
@@ -676,6 +829,30 @@ App({
     const done = typeof callback === 'function' ? callback : () => {}
     const id = String(voiceId || '').trim()
     const name = String(voiceName || '').trim() || '基础音色（默认）'
+
+    const applyVoiceLocally = (targetId, targetName) => {
+      this.globalData.voiceId = targetId
+      this.globalData.globalVoiceName = targetName
+      try {
+        wx.setStorageSync('voiceId', targetId)
+        wx.setStorageSync('globalVoiceName', targetName)
+      } catch (e) {}
+      this._notifyVoiceChange()
+    }
+
+    const flushPending = () => {
+      this._voiceSwitching = false
+      const pending = this._pendingVoiceSwitch
+      this._pendingVoiceSwitch = null
+      if (pending && pending.id) {
+        const queuedCallbacks = Array.isArray(pending.callbacks) ? pending.callbacks : []
+        this.setGlobalVoice(pending.id, pending.name, (perr, pdata) => {
+          queuedCallbacks.forEach((fn) => {
+            try { fn(perr, pdata) } catch (e) {}
+          })
+        })
+      }
+    }
 
     if (!id) {
       this.globalData.voiceId = ''
@@ -685,35 +862,114 @@ App({
         wx.setStorageSync('globalVoiceName', this.globalData.globalVoiceName)
       } catch (e) {}
       this._notifyVoiceChange()
-      done(null)
+      done(null, { code: 0, message: 'cleared' })
       return
     }
 
-    const base = this.getApiBaseUrl()
-    wx.request({
-      url: `${base}/use_voice`,
-      method: 'POST',
-      header: { 'Content-Type': 'application/json' },
-      timeout: 15000,
-      data: { voice_id: id },
-      success: (res) => {
-        const d = (res && res.data) || {}
-        if (res.statusCode !== 200 || Number(d.code) !== 0) {
-          done(new Error((d && d.message) || '切换失败'))
-          return
+    const currentId = this.getVoiceId()
+    if (!this._voiceSwitching && currentId && currentId === id) {
+      applyVoiceLocally(id, name)
+      done(null, { code: 0, message: 'already_selected', voice_id: id, skipped: true })
+      return
+    }
+
+    const isQwenBaseVoice = (() => {
+      if (id === 'voice_001' || id === 'voice_002') return true
+      const list = Array.isArray(this.globalData.voiceList) ? this.globalData.voiceList : []
+      const matched = list.find((v) => String((v && v.voice_id) || '').trim() === id)
+      const provider = String((matched && matched.provider) || '').trim().toLowerCase()
+      const group = String((matched && matched.voice_group) || '').trim().toLowerCase()
+      return provider === 'qwen_tts' && group === 'qwen_base'
+    })()
+    if (isQwenBaseVoice) {
+      applyVoiceLocally(id, name)
+      if (this._voiceSwitching) {
+        this._pendingVoiceSwitch = { id, name, callbacks: [] }
+      }
+      done(null, { code: 0, message: 'qwen_direct_fast', voice_id: id, skipped: true })
+      return
+    }
+
+    if (this._voiceSwitching) {
+      if (this._pendingVoiceSwitch && this._pendingVoiceSwitch.id === id) {
+        this._pendingVoiceSwitch.callbacks.push(done)
+      } else {
+        this._pendingVoiceSwitch = { id, name, callbacks: [done] }
+      }
+      return
+    }
+
+    const runSwitch = (targetId, targetName, callbacks, attempt = 1) => {
+      this._voiceSwitching = true
+      const base = this.getApiBaseUrl()
+      const timeoutMs = attempt <= 1 ? 180000 : 120000
+      wx.request({
+        url: `${base}/use_voice`,
+        method: 'POST',
+        header: { 'Content-Type': 'application/json' },
+        timeout: timeoutMs,
+        data: { voice_id: targetId },
+        success: (res) => {
+          const d = (res && res.data) || {}
+          const msg = String((d && d.message) || '').trim().toLowerCase()
+          const ok = res.statusCode === 200 && (Number(d.code) === 0 || msg === 'success')
+
+          let err = null
+          let payload = d
+          if (ok) {
+            const finalId = String((d && d.voice_id) || targetId)
+            applyVoiceLocally(finalId, targetName)
+          } else {
+            const status = Number(res && res.statusCode)
+            const code = Number(d && d.code)
+            const hardFail = status === 400 || code === 400
+            if (hardFail) {
+              err = new Error((d && d.message) || '切换失败')
+            } else if (attempt < 2) {
+              runSwitch(targetId, targetName, callbacks, attempt + 1)
+              return
+            } else {
+              applyVoiceLocally(targetId, targetName)
+              payload = Object.assign({}, d, {
+                code: 0,
+                message: (d && d.message) || 'switch_local_only',
+                voice_id: targetId,
+                local_only: true,
+              })
+            }
+          }
+
+          callbacks.forEach((fn) => {
+            try { fn(err, payload) } catch (e) {}
+          })
+
+          flushPending()
+        },
+        fail: (err) => {
+          if (attempt < 2) {
+            runSwitch(targetId, targetName, callbacks, attempt + 1)
+            return
+          }
+          applyVoiceLocally(targetId, targetName)
+          const payload = {
+            code: 0,
+            message: 'switch_local_only',
+            voice_id: targetId,
+            local_only: true,
+            network_error: (err && err.errMsg) || 'request_failed',
+          }
+          callbacks.forEach((fn) => {
+            try { fn(null, payload) } catch (e) {}
+          })
+
+          flushPending()
         }
-        this.globalData.voiceId = id
-        this.globalData.globalVoiceName = name
-        try {
-          wx.setStorageSync('voiceId', id)
-          wx.setStorageSync('globalVoiceName', name)
-        } catch (e) {}
-        this._notifyVoiceChange()
-        done(null, d)
-      },
-      fail: (err) => done(err || new Error('切换失败'))
-    })
+      })
+    }
+
+    runSwitch(id, name, [done])
   },
+
 
   setDefaultVoice(callback) {
     const done = typeof callback === 'function' ? callback : () => {}

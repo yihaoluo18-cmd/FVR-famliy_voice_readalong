@@ -1,0 +1,3689 @@
+import os
+import uuid
+import time
+import subprocess
+import json
+import re
+import hashlib
+import torch
+import numpy as np
+import librosa
+import torchaudio
+import shutil
+import yaml
+import traceback
+from pathlib import Path
+from datetime import datetime
+from pydantic import BaseModel
+from typing import List, Dict, Optional, Tuple
+import psutil
+import sys
+import logging
+
+# 配置logger（如果未配置）
+if not hasattr(logging, '_logger_configured'):
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logging._logger_configured = True
+
+logger = logging.getLogger(__name__)
+
+try:
+    from tools.train_phase_timing import (
+        TrainPhaseRecorder,
+        emit_subprocess_wall,
+        get_current as _train_phase_get,
+        set_current as _train_phase_set,
+    )
+except ImportError:
+    TrainPhaseRecorder = None  # type: ignore
+
+    def _train_phase_set(_x):
+        return None
+
+    def _train_phase_get():
+        return None
+
+    def emit_subprocess_wall(*_a, **_k):
+        return None
+
+
+# 导入音频提纯模块
+try:
+    from tools.audio_purification import purify_audio_file
+    AUDIO_PURIFICATION_AVAILABLE = True
+except ImportError:
+    AUDIO_PURIFICATION_AVAILABLE = False
+    logger.warning("音频提纯模块未找到，将跳过音频降噪除杂步骤")
+
+# 文本处理相关导入（延迟导入，仅在需要时导入）
+try:
+    from text.LangSegmenter import LangSegmenter
+    from text.cleaner import clean_text
+    from text import cleaned_text_to_sequence
+    TEXT_MODULES_AVAILABLE = True
+except ImportError:
+    TEXT_MODULES_AVAILABLE = False
+    # 如果导入失败，这些函数将无法使用，但不会影响其他功能
+
+# 导入配置
+try:
+    import config as global_config
+except Exception as cfg_exc:
+    print(f"警告: 无法导入 config.py: {cfg_exc}")
+    global_config = None
+
+# 存储路径（需提前创建）
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATASET_DIR = "user_datasets"  # 用户数据集
+# 限制训练/预处理实际读取的句子数量（避免数据集过大导致训练慢）
+# 和前端当前设计保持一致：一共最多读取 14 句（索引 0~13），用户可以选择读几句
+MAX_DATASET_SENTENCES = 14
+
+# 企业级训练优化默认开启，可通过环境变量按需关闭
+ENTERPRISE_OPT_DEFAULT_ON = True
+TINY_DATASET_THRESHOLD = 16
+SMALL_DATASET_THRESHOLD = 48
+TRAIN_PREP_CACHE_VERSION = "v1"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _limit_sentence_txt_files(text_files: List[str], max_sentences: int = MAX_DATASET_SENTENCES) -> List[str]:
+    """将数据集限制为前 N 句（优先按 sentence_{idx}.txt 的 idx 排序截断）。"""
+    import re
+
+    sent = []
+    other = []
+    for f in text_files:
+        m = re.match(r"^sentence_(\d+)\.txt$", f)
+        if m:
+            sent.append((int(m.group(1)), f))
+        else:
+            other.append(f)
+    if sent:
+        sent.sort(key=lambda x: x[0])
+        return [f for _, f in sent[:max_sentences]]
+    # fallback：没有 sentence_*.txt 的情况下，按文件名排序截断
+    return sorted(other)[:max_sentences]
+
+
+
+def _pick_ref_text_snippet(text: str, max_chars: int = 48) -> str:
+    """为参考音频挑选稳定短提示词，避免长提示导致漏字和卡顿。"""
+    t = str(text or "").strip().replace("\n", "").replace("\r", "")
+    if not t:
+        return ""
+    punct = "。！？!?；;"
+    cut = min(len(t), max_chars)
+    for i, ch in enumerate(t[: max_chars + 1], start=1):
+        if ch in punct:
+            cut = min(i, max_chars)
+            break
+    out = t[:cut].strip("，,、；;：:。！？!?")
+    if len(out) < 6:
+        out = t[: min(len(t), max_chars)]
+    out = out.strip()
+    if out and out[-1] not in "。！？!?":
+        out += "。"
+    return out
+TRAIN_OUTPUT_DIR = "user_models"  # 训练输出模型
+TRAIN_LOG_DIR = "train_logs"  # 训练日志
+os.makedirs(DATASET_DIR, exist_ok=True)
+os.makedirs(TRAIN_OUTPUT_DIR, exist_ok=True)
+os.makedirs(TRAIN_LOG_DIR, exist_ok=True)
+
+# Python执行路径
+PYTHON_EXEC = getattr(global_config, "python_exec", sys.executable or "python") if global_config else (sys.executable or "python")
+
+# 训练任务状态（内存存储，生产环境用数据库）
+train_tasks: Dict[str, Dict] = {}  # {task_id: {status, progress, log_path, model_path, version}}
+
+# 存储所有子进程，用于API关闭时清理
+active_processes: Dict[str, subprocess.Popen] = {}  # {task_id: process}
+active_process_lock = {}  # 用于进程管理的锁
+
+# 只支持 v2Pro 版本
+model_versions = ["v2Pro"]
+v3v4set = set()  # v2Pro 不需要特殊处理
+
+# 语言配置（v2Pro 支持的语言）
+def get_dict_language(version: str):
+    """根据模型版本返回语言配置（只支持 v2Pro）"""
+    if version == "v2Pro":
+        return {
+            "中文": "all_zh",
+            "粤语": "all_yue",
+            "英文": "en",
+            "日文": "all_ja",
+            "韩文": "all_ko",
+            "中英混合": "zh",
+            "粤英混合": "yue",
+            "日英混合": "ja",
+            "韩英混合": "ko",
+            "多语种混合": "auto",
+            "多语种混合(粤语)": "auto_yue"
+        }
+    else:
+        # 默认返回 v2Pro 的语言配置
+        return get_dict_language("v2Pro")
+
+class TrainParams(BaseModel):
+    """训练参数模型（与官方参数完全一致）"""
+    user_id: str  # 用户ID
+    model_version: str = "v2Pro"  # 模型版本
+    epochs: int = 15  # 训练轮次（官方默认15轮，S1使用15轮，S2使用8轮）
+    batch_size: int = 8  # 批次大小（官方默认8）
+    learning_rate: float = 1e-5  # 学习率
+    language: str = "中文"  # 训练数据主要语言
+    fast_mode: bool = False  # 快速训练模式（减少epochs和保存频率，用于快速测试）
+
+
+def set_high_priority():
+    """设置进程优先级（复用主程序逻辑）"""
+    if os.name != "nt":
+        return
+    p = psutil.Process(os.getpid())
+    try:
+        p.nice(psutil.HIGH_PRIORITY_CLASS)
+        print("已将训练进程优先级设为 High")
+    except psutil.AccessDenied:
+        print("权限不足，无法修改训练进程优先级（请用管理员运行）")
+
+
+def preprocess_audio(file_path: str, target_sr: int = 16000) -> torch.Tensor:
+    """音频预处理（与主程序get_spepc逻辑对齐）"""
+    audio, sr = torchaudio.load(file_path)
+    # 转单声道
+    if audio.shape[0] == 2:
+        audio = audio.mean(0).unsqueeze(0)
+    # 重采样
+    if sr != target_sr:
+        resampler = torchaudio.transforms.Resample(sr, target_sr)
+        audio = resampler(audio)
+    # 归一化
+    max_val = audio.abs().max()
+    if max_val > 1:
+        audio /= max_val
+    return audio.squeeze(0)
+
+
+def split_text(text: str, language: str, max_length: int = 120) -> List[str]:
+    """文本切分（复用主程序cut逻辑），超长句强制分割"""
+    splits = {"，", "。", "？", "！", ",", ".", "?", "!", "~", ":", "：", "—", "…"}
+    if not text:
+        return []
+    # 确保文本以标点结尾
+    if text[-1] not in splits:
+        text += "。" if language != "en" else "."
+    # 按标点切分
+    parts = []
+    current = []
+    for char in text:
+        current.append(char)
+        if char in splits:
+            parts.append("".join(current))
+            current = []
+    if current:
+        parts.append("".join(current))
+    # 二次分割，限制长度
+    final_parts = []
+    for seg in parts:
+        seg = seg.strip()
+        if not seg:
+            continue
+        while len(seg) > max_length:
+            final_parts.append(seg[:max_length])
+            seg = seg[max_length:]
+        if seg:
+            final_parts.append(seg)
+    return final_parts
+
+
+def _resolve_path(path_str: str) -> Path:
+    """解析路径，支持相对路径和绝对路径"""
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    return BASE_DIR / path
+
+
+def _get_versioned_path(attr_name: str, version: str, fallback: Optional[str] = None) -> Path:
+    """从config中获取版本化路径"""
+    if not global_config:
+        if fallback:
+            return _resolve_path(fallback)
+        raise ValueError(f"{attr_name} 未配置且未提供备用路径")
+    
+    mapping = getattr(global_config, attr_name, None)
+    candidate = None
+    if isinstance(mapping, dict):
+        candidate = mapping.get(version)
+    elif isinstance(mapping, str):
+        candidate = mapping
+    if not candidate:
+        candidate = fallback
+    if not candidate:
+        raise ValueError(f"{attr_name} 未配置且未提供备用路径")
+    return _resolve_path(candidate)
+
+def _default_pretrained_s2g_path(version: str) -> str:
+    """返回默认的 SoVITS 预训练生成器权重路径。"""
+    if version in {"v2Pro", "v2ProPlus"}:
+        return "GPT_SoVITS/pretrained_models/v2Pro/s2Gv2Pro.pth"
+    return "GPT_SoVITS/pretrained_models/s2G488k.pth"
+
+
+def _default_pretrained_gpt_path(version: str) -> str:
+    """返回默认的 GPT 预训练权重路径。"""
+    if version in {"v3", "v4"}:
+        return "GPT_SoVITS/pretrained_models/s1v3.ckpt"
+    if version in {"v2Pro", "v2ProPlus", "v2"}:
+        return "GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt"
+    return "GPT_SoVITS/pretrained_models/s1bert25hz-2kh-longer-epoch=68e-step=50232.ckpt"
+
+
+
+def _find_free_gpu(min_free_memory_mb: int = 4096) -> Optional[int]:
+    """查找空闲的GPU（单卡，保持向后兼容）
+    
+    Args:
+        min_free_memory_mb: 最小空闲内存（MB），默认4GB
+    
+    Returns:
+        可用的GPU索引，如果没有找到则返回None
+    """
+    gpus = _find_free_gpus(min_free_memory_mb=min_free_memory_mb, num_gpus=1)
+    return gpus[0] if gpus else None
+
+
+def _find_free_gpus(min_free_memory_mb: int = 4096, num_gpus: int = 4) -> List[int]:
+    """查找多个空闲的GPU
+    
+    Args:
+        min_free_memory_mb: 每个GPU的最小空闲内存（MB），默认4GB
+        num_gpus: 需要查找的GPU数量，默认4张
+    
+    Returns:
+        可用的GPU索引列表，按空闲内存从多到少排序
+    """
+    if not torch.cuda.is_available():
+        return [0] if num_gpus >= 1 else []
+    
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            # 如果nvidia-smi失败，返回默认GPU列表
+            return list(range(min(num_gpus, torch.cuda.device_count())))
+        
+        free_gpus = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                parts = line.split(', ')
+                if len(parts) >= 3:
+                    gpu_idx = int(parts[0])
+                    mem_used = int(parts[1])
+                    mem_total = int(parts[2])
+                    mem_free = mem_total - mem_used
+                    if mem_free >= min_free_memory_mb:
+                        free_gpus.append((gpu_idx, mem_free))
+        
+        if free_gpus:
+            # 按空闲内存从多到少排序
+            free_gpus.sort(key=lambda x: x[1], reverse=True)
+            # 返回前 num_gpus 个GPU
+            selected_gpus = [gpu[0] for gpu in free_gpus[:num_gpus]]
+            return selected_gpus
+        else:
+            # 如果没有足够的空闲GPU，选择使用最少的
+            all_gpus = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split(', ')
+                    if len(parts) >= 3:
+                        gpu_idx = int(parts[0])
+                        mem_used = int(parts[1])
+                        all_gpus.append((gpu_idx, mem_used))
+            if all_gpus:
+                all_gpus.sort(key=lambda x: x[1])
+                # 返回使用最少的 num_gpus 个GPU
+                selected_gpus = [gpu[0] for gpu in all_gpus[:num_gpus]]
+                return selected_gpus
+            # 如果都没有，返回前 num_gpus 个GPU（即使显存不足）
+            total_gpus = torch.cuda.device_count()
+            return list(range(min(num_gpus, total_gpus)))
+    except Exception as e:
+        print(f"查找空闲GPU失败: {e}，使用默认GPU列表")
+        total_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        return list(range(min(num_gpus, total_gpus)))
+
+
+def _run_command(
+    task_id: str,
+    description: str,
+    command: List[str],
+    log_file: str,
+    env_overrides: Optional[Dict[str, str]] = None,
+):
+    """执行命令并记录日志，支持进度更新"""
+    env = os.environ.copy()
+    if env_overrides:
+        env.update({k: str(v) for k, v in env_overrides.items() if v is not None})
+    
+    # 自动选择空闲GPU（如果使用CUDA且未在环境变量中指定）
+    # 多卡训练：S2训练使用4张卡，S1训练使用2张卡（GPT模型较小，多卡收益有限）
+    if torch.cuda.is_available() and "CUDA_VISIBLE_DEVICES" not in env:
+        # 根据任务类型选择不同的最小空闲显存要求和GPU数量
+        if "GPT" in description or "s1" in description.lower():
+            # S1 GPT训练：使用2张卡，每张至少8GB空闲
+            min_memory_mb = 8192
+            num_gpus = 2
+        else:
+            # S2 SoVITS训练：使用4张卡，每张至少4GB空闲
+            min_memory_mb = 4096
+            num_gpus = 4
+        
+        free_gpus = _find_free_gpus(min_free_memory_mb=min_memory_mb, num_gpus=num_gpus)
+        if free_gpus:
+            # 将GPU列表转换为环境变量格式（用逗号分隔）
+            gpu_str = ",".join(map(str, free_gpus))
+            env["CUDA_VISIBLE_DEVICES"] = gpu_str
+            env["_CUDA_VISIBLE_DEVICES"] = gpu_str  # 兼容某些脚本
+            # 只在日志文件中记录，不在控制台输出（避免干扰）
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write(f"[GPU选择] {description} 自动选择 {len(free_gpus)} 张GPU: {gpu_str} (每张至少需要 {min_memory_mb}MB 空闲显存)\n")
+        else:
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write(f"[GPU警告] 未找到足够的空闲GPU（至少需要 {num_gpus} 张，每张 {min_memory_mb}MB），将使用默认GPU\n")
+    
+    # 确保Python路径包含项目根目录
+    python_path = env.get("PYTHONPATH", "")
+    project_paths = [
+        str(BASE_DIR),
+        str(BASE_DIR / "GPT_SoVITS"),
+    ]
+
+    # Prefer vendored pure-python dependencies (offline-safe).
+    third_party_dir = BASE_DIR / "third_party"
+    if third_party_dir.exists():
+        project_paths.append(str(third_party_dir))
+
+    if python_path:
+        project_paths.append(python_path)
+    env["PYTHONPATH"] = os.pathsep.join(project_paths)
+    
+    log_file_path = Path(log_file)
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # 在执行命令前更新消息
+    if task_id in train_tasks:
+        # 根据描述更新消息
+        if "step1" in description.lower() or "2-name2text" in description.lower():
+            train_tasks[task_id]["message"] = "正在提取文本与BERT特征..."
+        elif "step2" in description.lower() or "hubert" in description.lower():
+            train_tasks[task_id]["message"] = "正在提取HuBERT特征（这可能需要一些时间）..."
+        elif "step2b" in description.lower() or "sv" in description.lower():
+            train_tasks[task_id]["message"] = "正在提取说话人特征..."
+        elif "step3" in description.lower() or "semantic" in description.lower():
+            train_tasks[task_id]["message"] = "正在生成语义token..."
+        else:
+            train_tasks[task_id]["message"] = f"正在执行: {description}"
+    
+    # 捕获错误输出
+    error_output = []
+    
+    with open(log_file_path, "a", encoding="utf-8") as log_fp:
+        log_fp.write(f"\n[{datetime.now().isoformat()}] {description}\n")
+        log_fp.write(f"命令: {' '.join(command)}\n")
+        log_fp.write(f"PYTHONPATH: {env['PYTHONPATH']}\n")
+        # 记录GPU信息
+        if torch.cuda.is_available():
+            cuda_visible = env.get("CUDA_VISIBLE_DEVICES", "未设置")
+            log_fp.write(f"CUDA_VISIBLE_DEVICES: {cuda_visible}\n")
+            if cuda_visible != "未设置":
+                try:
+                    gpu_idx = int(cuda_visible)
+                    log_fp.write(f"使用GPU: {gpu_idx} ({torch.cuda.get_device_name(gpu_idx)})\n")
+                except:
+                    pass
+        else:
+            log_fp.write(f"GPU可用: 否 (使用CPU，速度较慢)\n")
+        log_fp.flush()
+        
+        process = subprocess.Popen(
+            command,
+            cwd=str(BASE_DIR),
+            env=env,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,  # 将stderr重定向到stdout
+            shell=False,
+        )
+        
+        # 注册进程，用于API关闭时清理
+        active_processes[task_id] = process
+        
+        # 非阻塞等待，定期检查进程状态和日志
+        import re
+        last_log_size = 0
+        no_progress_count = 0
+        max_no_progress = 600  # 10分钟没有进度更新则认为可能卡住（HuBERT处理较慢）
+        last_progress_time = time.time()
+        process_start_time = time.time()
+        max_process_time = 3600  # 1小时超时（单个步骤最多1小时）
+        
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                # 进程已结束，从注册表中移除
+                active_processes.pop(task_id, None)
+                break
+            
+            # 检查进程是否超时
+            elapsed_time = time.time() - process_start_time
+            if elapsed_time > max_process_time:
+                logger.warning(f"{description} 执行超时（{elapsed_time/60:.1f}分钟），终止进程")
+                try:
+                    process.terminate()
+                    time.sleep(2)
+                    if process.poll() is None:
+                        process.kill()
+                except:
+                    pass
+                return_code = -1
+                active_processes.pop(task_id, None)
+                break
+            
+            # 检查进程是否还在运行（防止进程变成僵尸进程）
+            try:
+                if process.poll() is None:
+                    # 进程还在运行，继续等待
+                    pass
+            except:
+                # 进程可能已经结束
+                active_processes.pop(task_id, None)
+                break
+            
+            # 检查日志文件是否有更新（表示进程还在运行）
+            try:
+                current_log_size = log_file_path.stat().st_size
+                if current_log_size > last_log_size:
+                    last_log_size = current_log_size
+                    no_progress_count = 0
+                    last_progress_time = time.time()
+                    
+                    # 尝试从日志中提取进度信息（每10次检查一次，避免频繁读取）
+                    if task_id in train_tasks and no_progress_count % 10 == 0:
+                        try:
+                            # 只读取最后30行，避免读取整个文件
+                            with open(log_file_path, "rb") as f:
+                                try:
+                                    f.seek(-5000, 2)  # 从文件末尾向前5000字节
+                                except:
+                                    f.seek(0)
+                                log_tail = f.read().decode('utf-8', errors='ignore')
+                                log_lines = log_tail.split('\n')[-30:]
+                            
+                            # 查找进度相关的日志
+                            for line in reversed(log_lines):
+                                if "进度" in line or "progress" in line.lower():
+                                    # 提取进度信息
+                                    match = re.search(r'(\d+)/(\d+)', line)
+                                    if "HuBERT特征提取进度" in line:
+                                        if match:
+                                            current, total = match.groups()
+                                            train_tasks[task_id]["message"] = f"正在提取HuBERT特征: {current}/{total}"
+                                        else:
+                                            train_tasks[task_id]["message"] = "正在提取HuBERT特征..."
+                                        break
+                                    elif "BERT特征提取进度" in line:
+                                        if match:
+                                            current, total = match.groups()
+                                            train_tasks[task_id]["message"] = f"正在提取BERT特征: {current}/{total}"
+                                        else:
+                                            train_tasks[task_id]["message"] = "正在提取BERT特征..."
+                                        break
+                                    elif "SV特征提取进度" in line:
+                                        if match:
+                                            current, total = match.groups()
+                                            train_tasks[task_id]["message"] = f"正在提取SV特征: {current}/{total}"
+                                        else:
+                                            train_tasks[task_id]["message"] = "正在提取SV特征..."
+                                        break
+                                    elif "语义token提取进度" in line:
+                                        if match:
+                                            current, total = match.groups()
+                                            train_tasks[task_id]["message"] = f"正在生成语义token: {current}/{total}"
+                                        else:
+                                            train_tasks[task_id]["message"] = "正在生成语义token..."
+                                        break
+                        except Exception as e:
+                            # 忽略读取错误，不影响主流程
+                            pass
+                else:
+                    no_progress_count += 1
+                    time_since_progress = time.time() - last_progress_time
+                    if no_progress_count > max_no_progress or time_since_progress > max_no_progress * 2:
+                        # 长时间没有进度，可能卡住了
+                        if task_id in train_tasks:
+                            elapsed_min = elapsed_time / 60
+                            train_tasks[task_id]["message"] = f"{description} 执行中（已运行 {elapsed_min:.1f} 分钟，请检查日志或稍候）..."
+                        # 如果超过20分钟没有进度，警告用户
+                        if time_since_progress > 1200:  # 20分钟
+                            logger.warning(f"{description} 已 {time_since_progress/60:.1f} 分钟没有进度更新，可能卡住")
+            except:
+                pass
+            
+            time.sleep(2)  # 每2秒检查一次
+        
+        return_code = process.returncode
+        cmd_wall_s = time.time() - process_start_time
+        try:
+            cuda_vis = env.get("CUDA_VISIBLE_DEVICES", "")
+            oom_fb = "CPU回退" in description
+            emit_subprocess_wall(description, command, cuda_vis, return_code, cmd_wall_s, oom_cpu_fallback=oom_fb)
+        except Exception:
+            pass
+    
+    # 读取最后几行错误信息
+    if return_code != 0:
+        try:
+            with open(log_file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                # 获取最后20行作为错误信息
+                error_lines = lines[-20:] if len(lines) > 20 else lines
+                error_output = "".join(error_lines)
+        except:
+            error_output = "无法读取日志文件"
+        
+        error_msg = f"{description} 失败，退出码 {return_code}"
+        if error_output:
+            # 提取关键错误信息（最后几行）
+            error_lines = error_output.strip().split('\n')
+            for line in reversed(error_lines[-5:]):  # 最后5行
+                if 'Error' in line or 'Traceback' in line or 'RuntimeError' in line or 'ValueError' in line:
+                    error_msg += f"\n错误详情: {line.strip()}"
+                    break
+        
+        # 更新任务状态
+        if task_id in train_tasks:
+            train_tasks[task_id]["message"] = error_msg
+            train_tasks[task_id]["status"] = "failed"
+        
+        raise RuntimeError(error_msg)
+
+
+def _locate_prepare_output(exp_dir: Path, prefix: str, suffix: str) -> Optional[Path]:
+    """查找预处理输出文件"""
+    # 先查找带 -0 后缀的文件
+    candidate = exp_dir / f"{prefix}-0{suffix}"
+    if candidate.exists():
+        return candidate
+    # 再查找不带后缀的文件
+    candidate = exp_dir / f"{prefix}{suffix}"
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _ensure_header(file_path: Path, header: str):
+    """确保文件有正确的表头"""
+    if not file_path.exists():
+        return
+    with open(file_path, "r", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+        if first_line != header:
+            content = f.read()
+            with open(file_path, "w", encoding="utf-8") as wf:
+                wf.write(header + "\n")
+                if first_line:
+                    wf.write(first_line + "\n")
+                wf.write(content)
+
+
+def _find_latest_weight(weight_dir: Path, pattern: str, desc: str) -> Path:
+    """查找最新的权重文件"""
+    if not weight_dir.exists():
+        raise FileNotFoundError(f"{desc}目录不存在: {weight_dir}")
+
+    matches = list(weight_dir.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"未找到{desc}: {pattern} in {weight_dir}")
+
+    # 按修改时间排序，返回最新的
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
+def _pick_latest_sovits_generator_checkpoint(candidates: list[Path]) -> Optional[Path]:
+    """从候选 SoVITS 权重中优先选择可推理生成器权重（避免误选 D_ 判别器）。"""
+    if not candidates:
+        return None
+
+    cleaned = []
+    for p in candidates:
+        try:
+            name = p.name
+        except Exception:
+            continue
+        lower = name.lower()
+        if lower.startswith("d_") or "discriminator" in lower:
+            continue
+        cleaned.append(p)
+
+    if not cleaned:
+        return None
+
+    # 训练目录通常产出 G_*.pth，优先使用。
+    g_first = [p for p in cleaned if p.name.startswith("G_")]
+    target = g_first if g_first else cleaned
+    target.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return target[0]
+
+
+def _count_dataset_samples(dataset_list_path: Path) -> int:
+    """统计 dataset.list 的有效样本数。"""
+    try:
+        if not dataset_list_path.exists():
+            return 0
+        cnt = 0
+        with open(dataset_list_path, "r", encoding="utf-8") as f:
+            for line in f:
+                t = line.strip()
+                if t and "|" in t:
+                    cnt += 1
+        return cnt
+    except Exception:
+        return 0
+
+
+def _decide_training_gpu_counts(sample_count: int, has_gpu: bool, max_visible_gpus: int = 1) -> Tuple[int, int, str]:
+    """根据样本规模选择 S1/S2 推荐 GPU 数，降低小数据集开销并允许大数据集吃满空闲卡。"""
+    if not has_gpu:
+        return 1, 1, "cpu"
+
+    visible = max(1, int(max_visible_gpus or 1))
+    if sample_count <= TINY_DATASET_THRESHOLD:
+        return 1, 1, "tiny_dataset"
+
+    if sample_count <= SMALL_DATASET_THRESHOLD:
+        # 小数据集主要避免 DDP 固定成本；S2 适度并行。
+        return 1, min(visible, 2), "small_dataset"
+
+    # 正常数据集：优先吃满可见 GPU，提升总体吞吐。
+    return visible, visible, "normal_dataset"
+
+
+def _build_prepare_cache_root(dataset_list_path: Path, version: str) -> Path:
+    """基于数据集内容+版本构建稳定预处理缓存目录。"""
+    try:
+        payload = dataset_list_path.read_bytes()
+    except Exception:
+        payload = str(dataset_list_path).encode("utf-8", errors="ignore")
+    h = hashlib.sha1()
+    h.update(payload)
+    h.update(f"|{version}|{TRAIN_PREP_CACHE_VERSION}".encode("utf-8"))
+    digest = h.hexdigest()[:24]
+    return BASE_DIR / "runtime" / "cache" / "tts_preprocess" / f"{version}_{digest}"
+
+
+def _copy_file_if_exists(src: Path, dst: Path):
+    if not src.exists() or (not src.is_file()):
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def _copy_dir_if_exists(src: Path, dst: Path):
+    if not src.exists() or (not src.is_dir()):
+        return
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+
+
+def _prepare_step_specs(version: str) -> Dict[str, List[Tuple[str, str]]]:
+    specs: Dict[str, List[Tuple[str, str]]] = {
+        "step1": [("glob", "2-name2text*.txt"), ("dir", "3-bert")],
+        "step2": [("dir", "4-cnhubert"), ("dir", "5-wav32k")],
+        "step3": [("glob", "6-name2semantic*.tsv")],
+    }
+    specs["step2b"] = [("dir", "7-sv_cn")] if "Pro" in str(version or "") else []
+    return specs
+
+
+def _is_prepare_step_ready(root: Path, specs: List[Tuple[str, str]]) -> bool:
+    if not specs:
+        return True
+    for kind, name in specs:
+        if kind == "dir":
+            p = root / name
+            if (not p.exists()) or (not p.is_dir()):
+                return False
+            if not any(p.glob("*")):
+                return False
+        elif kind == "glob":
+            matches = list(root.glob(name))
+            if not matches:
+                return False
+            if not any(m.is_file() and m.stat().st_size > 0 for m in matches):
+                return False
+    return True
+
+
+def _restore_prepare_step_cache(cache_root: Path, step_name: str, exp_dir: Path, specs: List[Tuple[str, str]]) -> bool:
+    step_cache = cache_root / step_name
+    if not _is_prepare_step_ready(step_cache, specs):
+        return False
+
+    for kind, name in specs:
+        if kind == "dir":
+            _copy_dir_if_exists(step_cache / name, exp_dir / name)
+        elif kind == "glob":
+            for src in step_cache.glob(name):
+                if src.is_file():
+                    _copy_file_if_exists(src, exp_dir / src.name)
+    return _is_prepare_step_ready(exp_dir, specs)
+
+
+def _save_prepare_step_cache(cache_root: Path, step_name: str, exp_dir: Path, specs: List[Tuple[str, str]]):
+    if not specs:
+        return
+    step_cache = cache_root / step_name
+    if step_cache.exists():
+        shutil.rmtree(step_cache, ignore_errors=True)
+    step_cache.mkdir(parents=True, exist_ok=True)
+
+    for kind, name in specs:
+        if kind == "dir":
+            _copy_dir_if_exists(exp_dir / name, step_cache / name)
+        elif kind == "glob":
+            for src in exp_dir.glob(name):
+                if src.is_file():
+                    _copy_file_if_exists(src, step_cache / src.name)
+
+
+def process_dataset(dataset_path: str, language: str, version: str, log_path: str = None) -> List[Dict]:
+    """处理用户数据集（音频+文本对齐，与主程序预处理逻辑一致，增强容错&日志）"""
+    processed = []
+    text_files = [f for f in os.listdir(dataset_path) if f.endswith(".txt")]
+    text_files = _limit_sentence_txt_files(text_files, MAX_DATASET_SENTENCES)
+    for txt_file in text_files:
+        try:
+            with open(os.path.join(dataset_path, txt_file), "r", encoding="utf-8") as f:
+                text = f.read().strip()
+            audio_file = os.path.splitext(txt_file)[0] + ".wav"
+            audio_path = os.path.join(dataset_path, audio_file)
+            if not os.path.exists(audio_path):
+                if log_path:
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"音频文件缺失：{audio_path}\n")
+                continue
+            audio = preprocess_audio(audio_path)
+            # 用max_length防长文本
+            text_parts = split_text(text, get_dict_language(version)[language], max_length=120)
+            if not text_parts:
+                if log_path:
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"文本切分失败（空）：{txt_file}\n")
+                continue
+            for part in text_parts:
+                try:
+                    if not TEXT_MODULES_AVAILABLE:
+                        raise ImportError("text模块未安装，无法处理文本")
+                    lang_code = get_dict_language(version)[language].replace("all_", "")
+                    phones, word2ph, norm_text = clean_text(part, lang_code, version)
+                    phones = cleaned_text_to_sequence(phones, version)
+                except Exception as e:
+                    if log_path:
+                        with open(log_path, "a", encoding="utf-8") as logf:
+                            logf.write(f"音素/清理异常：{txt_file} | {str(e)} | 文本片段: {part}\n")
+                    continue
+                processed.append({
+                    "audio": audio.numpy(),
+                    "phones": phones,
+                    "text": norm_text,
+                    "language": lang_code
+                })
+        except Exception as e:
+            if log_path:
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"文件处理异常：{txt_file} | {str(e)}\n")
+            continue
+    return processed
+
+
+def _create_dataset_list(dataset_path: str, output_path: str, language: str = "zh") -> Path:
+    """创建数据集列表文件，格式：wav_path|spk_name|language|text
+    
+    Args:
+        dataset_path: 数据集目录路径
+        output_path: 输出目录路径
+        language: 语言代码，支持: zh, en, ja, ko, yue (默认: zh)
+    """
+    dataset_list_path = Path(output_path) / "dataset.list"
+    dataset_path_obj = Path(dataset_path)
+    
+    if not dataset_path_obj.exists():
+        raise FileNotFoundError(f"数据集目录不存在: {dataset_path}")
+    
+    text_files = [f for f in os.listdir(dataset_path) if f.endswith(".txt")]
+    # 只读取前 N 句，避免数据集过大
+    text_files = _limit_sentence_txt_files(text_files, MAX_DATASET_SENTENCES)
+    
+    if not text_files:
+        raise ValueError(f"数据集目录中没有找到文本文件: {dataset_path}")
+    
+    # 语言代码映射（确保使用预处理脚本支持的语言代码）
+    language_map = {
+        "中文": "zh",
+        "中文（简体）": "zh",
+        "中文（繁体）": "zh",
+        "Chinese": "zh",
+        "chinese": "zh",
+        "English": "en",
+        "english": "en",
+        "日语": "ja",
+        "Japanese": "ja",
+        "japanese": "ja",
+        "韩语": "ko",
+        "Korean": "ko",
+        "korean": "ko",
+        "粤语": "yue",
+        "Cantonese": "yue",
+        "cantonese": "yue",
+    }
+    
+    # 标准化语言代码
+    lang_code = language_map.get(language, language).lower()
+    if lang_code not in ["zh", "en", "ja", "ko", "yue"]:
+        lang_code = "zh"  # 默认使用中文
+    
+    valid_pairs = []
+    invalid_files = []
+    
+    with open(dataset_list_path, "w", encoding="utf-8") as f:
+        for txt_file in sorted(text_files):
+            audio_file = os.path.splitext(txt_file)[0] + ".wav"
+            audio_path = dataset_path_obj / audio_file
+            txt_path = dataset_path_obj / txt_file
+            
+            if not audio_path.exists():
+                invalid_files.append(f"音频文件不存在: {audio_file}")
+                continue
+            
+            if not txt_path.exists():
+                invalid_files.append(f"文本文件不存在: {txt_file}")
+                continue
+            
+            # 验证音频文件大小（至少1KB）
+            try:
+                if audio_path.stat().st_size < 1024:
+                    invalid_files.append(f"音频文件太小（可能损坏）: {audio_file}")
+                    continue
+            except:
+                invalid_files.append(f"无法读取音频文件: {audio_file}")
+                continue
+            
+            # 读取文本内容
+            try:
+                with open(txt_path, "r", encoding="utf-8") as tf:
+                    text_content = tf.read().strip()
+                
+                if not text_content:
+                    invalid_files.append(f"文本文件为空: {txt_file}")
+                    continue
+            except Exception as e:
+                invalid_files.append(f"读取文本文件失败 {txt_file}: {e}")
+                continue
+            
+            # 格式：wav_path|spk_name|language|text
+            # spk_name 使用文件名（不含扩展名）作为说话人ID
+            spk_name = os.path.splitext(txt_file)[0]
+            f.write(f"{audio_path}|{spk_name}|{lang_code}|{text_content}\n")
+            valid_pairs.append((audio_file, txt_file))
+    
+    if invalid_files:
+        # 使用print而不是logger（避免导入问题）
+        print(f"警告: 数据集验证发现 {len(invalid_files)} 个无效文件（已跳过）")
+        for msg in invalid_files[:10]:  # 只显示前10个
+            print(f"  - {msg}")
+        if len(invalid_files) > 10:
+            print(f"  ... 还有 {len(invalid_files) - 10} 个无效文件")
+    
+    if not valid_pairs:
+        raise ValueError(f"数据集目录中没有有效的音频-文本对: {dataset_path}")
+    
+    print(f"数据集列表创建成功: {len(valid_pairs)} 个有效文件对")
+    
+    return dataset_list_path
+
+
+def _verify_audio_features_completeness(exp_dir: Path, version: str, log_file: str, task_id: str):
+    """验证所有音频特征提取的完整性"""
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"\n{'='*60}\n")
+        logf.write(f"[音频特征完整性验证] 检查所有特征提取结果...\n")
+        logf.write(f"{'='*60}\n")
+        
+        # 检查各个特征目录
+        feature_dirs = {
+            "32k音频": exp_dir / "5-wav32k",
+            "HuBERT特征": exp_dir / "4-cnhubert",
+        }
+        
+        if "Pro" in version:
+            feature_dirs["SV特征"] = exp_dir / "7-sv_cn"
+        
+        # 统计每个目录的文件
+        feature_stats = {}
+        for name, dir_path in feature_dirs.items():
+            if dir_path.exists():
+                files = list(dir_path.glob("*.*"))
+                feature_stats[name] = {
+                    "count": len(files),
+                    "files": files,
+                    "valid": 0,
+                    "invalid": []
+                }
+                
+                # 验证文件可读性
+                for f in files[:10]:  # 只检查前10个
+                    try:
+                        size = f.stat().st_size
+                        if size > 0:
+                            feature_stats[name]["valid"] += 1
+                        else:
+                            feature_stats[name]["invalid"].append(f.name)
+                    except:
+                        feature_stats[name]["invalid"].append(f.name)
+            else:
+                feature_stats[name] = {
+                    "count": 0,
+                    "files": [],
+                    "valid": 0,
+                    "invalid": [],
+                    "missing": True
+                }
+        
+        # 输出统计信息
+        logf.write(f"\n[统计] 各特征文件数量：\n")
+        for name, stats in feature_stats.items():
+            if stats.get("missing"):
+                logf.write(f"  ❌ {name}: 目录不存在\n")
+            else:
+                logf.write(f"  ✅ {name}: {stats['count']} 个文件 (有效: {stats['valid']}/{min(10, stats['count'])})\n")
+                if stats['invalid']:
+                    logf.write(f"     无效文件: {stats['invalid'][:3]}\n")
+        
+        # 检查文件数量一致性
+        counts = [stats['count'] for stats in feature_stats.values() if not stats.get("missing")]
+        if counts:
+            max_count = max(counts)
+            min_count = min(counts)
+            
+            if max_count != min_count:
+                logf.write(f"\n⚠️ 警告: 特征文件数量不一致！\n")
+                logf.write(f"   最大数量: {max_count}, 最小数量: {min_count}, 差异: {max_count - min_count}\n")
+                
+                # 找出缺失的文件
+                wav32k_dir = feature_dirs.get("32k音频")
+                if wav32k_dir and wav32k_dir.exists():
+                    wav32k_files = {f.stem for f in wav32k_dir.glob("*.wav")}
+                    
+                    for name, dir_path in feature_dirs.items():
+                        if name != "32k音频" and dir_path.exists():
+                            feature_files = {f.stem for f in dir_path.glob("*.*")}
+                            missing = wav32k_files - feature_files
+                            if missing:
+                                logf.write(f"   {name}缺失的文件 ({len(missing)} 个): {list(missing)[:5]}\n")
+            else:
+                logf.write(f"\n✅ 所有特征文件数量一致: {max_count} 个\n")
+        
+        # 检查关键特征是否存在
+        critical_features = ["32k音频", "HuBERT特征"]
+        if "Pro" in version:
+            critical_features.append("SV特征")
+        
+        missing_critical = []
+        for name in critical_features:
+            stats = feature_stats.get(name, {})
+            if stats.get("missing") or stats.get("count", 0) == 0:
+                missing_critical.append(name)
+        
+        logf.write(f"\n{'='*60}\n")
+        if missing_critical:
+            logf.write(f"❌ 关键特征缺失: {', '.join(missing_critical)}\n")
+            logf.write(f"   训练可能无法正常进行，请检查预处理日志。\n")
+        else:
+            logf.write(f"✅ 所有关键特征已提取完成\n")
+        logf.write(f"{'='*60}\n")
+
+
+def _run_prepare_steps(
+    task_id: str,
+    dataset_list_path: Path,
+    exp_dir: Path,
+    exp_name: str,
+    version: str,
+    log_file: str,
+):
+    """执行数据预处理步骤"""
+    is_half = getattr(global_config, "is_half", True) if global_config else True
+    bert_dir = _resolve_path(getattr(global_config, "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large") if global_config else "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large")
+    ssl_dir = _resolve_path(getattr(global_config, "cnhubert_path", "GPT_SoVITS/pretrained_models/chinese-hubert-base") if global_config else "GPT_SoVITS/pretrained_models/chinese-hubert-base")
+    # SV模型路径：优先使用配置中的路径，否则尝试多个可能的位置
+    default_sv_paths = [
+        "GPT_SoVITS/pretrained_models/sv/pretrained_eres2netv2w24s4ep4.ckpt",
+        "GPT_SoVITS/pretrained_models/AI-ModelScope/GPT-SoVITS/sv/pretrained_eres2netv2w24s4ep4.ckpt",
+    ]
+    sv_path = None
+    if global_config and hasattr(global_config, "sv_path") and global_config.sv_path:
+        sv_path = _resolve_path(global_config.sv_path)
+    else:
+        # 尝试找到存在的SV模型文件
+        for path in default_sv_paths:
+            resolved = _resolve_path(path)
+            if resolved.exists():
+                sv_path = resolved
+                break
+        if sv_path is None:
+            sv_path = _resolve_path(default_sv_paths[0])  # 使用默认路径，如果不存在会在运行时报错
+    
+    rec = _train_phase_get()
+    if rec is not None:
+        t_probe = time.perf_counter()
+        probe: Dict[str, object] = {}
+        for label, pth in (("bert_dir", bert_dir), ("cnhubert_dir", ssl_dir), ("sv_path", sv_path)):
+            try:
+                pp = Path(pth) if pth is not None else None
+                if pp and pp.exists():
+                    st = pp.stat()
+                    probe[f"{label}_exists"] = True
+                    probe[f"{label}_size_bytes"] = int(getattr(st, "st_size", 0) or 0)
+                else:
+                    probe[f"{label}_exists"] = False
+            except Exception as ex:
+                probe[f"{label}_err"] = str(ex)
+        rec.emit("pretrained_paths_stat_probe", time.perf_counter() - t_probe, **probe)
+
+    env_common = {
+        "inp_text": str(dataset_list_path),
+        "inp_wav_dir": "",
+        "exp_name": exp_name,
+        "opt_dir": str(exp_dir),
+        "i_part": "0",
+        "all_parts": "1",
+        "is_half": str(is_half),
+        "version": version,
+    }
+
+    prepare_cache_enabled = _env_flag("TRAIN_PREP_CACHE", ENTERPRISE_OPT_DEFAULT_ON)
+    prepare_cache_root = _build_prepare_cache_root(dataset_list_path, version) if prepare_cache_enabled else None
+    prepare_specs = _prepare_step_specs(version)
+
+    if prepare_cache_root is not None:
+        prepare_cache_root.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write(f"[预处理缓存] 已启用，cache_root={prepare_cache_root}\n")
+
+
+    def _run_prepare_command_with_fallback(description: str, command: List[str], extra_env: Dict[str, str]):
+        try:
+            _run_command(task_id, description, command, log_file, extra_env)
+            return
+        except RuntimeError as e:
+            msg = str(e or "")
+            lower = msg.lower()
+            is_oom = ("cuda out of memory" in lower) or ("out of memory" in lower and "cuda" in lower)
+            if not is_oom:
+                raise
+
+            # 仅在显存不足时做自动降级：切到CPU重试预处理，保证流程可继续。
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            if task_id in train_tasks:
+                train_tasks[task_id]["message"] = f"{description} 显存不足，自动切换CPU重试..."
+
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write(f"\n[OOM回退] {description} 触发CUDA显存不足，尝试CPU重试。\n")
+
+            fallback_env = {
+                **extra_env,
+                "is_half": "False",
+                "CUDA_VISIBLE_DEVICES": "",
+                "_CUDA_VISIBLE_DEVICES": "",
+                "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:64",
+            }
+            _run_command(task_id, f"{description} (CPU回退)", command, log_file, fallback_env)
+    
+    train_tasks[task_id]["progress"] = 10
+    train_tasks[task_id]["message"] = "正在提取文本与BERT特征..."
+
+    # Step 1: 生成 2-name2text（支持缓存命中）
+    step1_hit = False
+    if prepare_cache_root is not None:
+        step1_hit = _restore_prepare_step_cache(prepare_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
+    if step1_hit:
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write("[预处理缓存] step1 命中，跳过重算。\n")
+    else:
+        _run_prepare_command_with_fallback(
+            "step1: 生成 2-name2text",
+            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "1-get-text.py")],
+            {**env_common, "bert_pretrained_dir": str(bert_dir)},
+        )
+        if prepare_cache_root is not None:
+            _save_prepare_step_cache(prepare_cache_root, "step1", exp_dir, prepare_specs.get("step1", []))
+
+    train_tasks[task_id]["progress"] = 25
+    train_tasks[task_id]["message"] = "BERT特征提取完成，开始提取HuBERT特征..."
+
+    # Step 2: 生成 HuBERT 与 32k wav
+    step2_hit = False
+    if prepare_cache_root is not None:
+        step2_hit = _restore_prepare_step_cache(prepare_cache_root, "step2", exp_dir, prepare_specs.get("step2", []))
+    if step2_hit:
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write("[预处理缓存] step2 命中，跳过重算。\n")
+    else:
+        # 检查是否有其他任务正在处理相同的数据集，避免重复处理
+        dataset_list_content = dataset_list_path.read_text(encoding="utf-8") if dataset_list_path.exists() else ""
+        dataset_hash = int(hashlib.sha1(dataset_list_content.encode("utf-8")).hexdigest()[:8], 16) % 1000000
+
+        # 添加任务锁，避免多个任务同时处理相同数据集
+        lock_file = exp_dir / f".hubert_lock_{dataset_hash}"
+        hubert_lock_wait_sec = 0.0
+        if lock_file.exists():
+            # 检查锁文件是否过期（超过1小时）
+            lock_age = time.time() - lock_file.stat().st_mtime
+            if lock_age > 3600:
+                lock_file.unlink()  # 删除过期锁
+            else:
+                _lw0 = time.perf_counter()
+                train_tasks[task_id]["message"] = f"等待其他任务完成HuBERT特征提取（锁文件存在，已等待 {lock_age/60:.1f} 分钟）..."
+                # 等待锁释放
+                max_wait = 300  # 最多等待5分钟
+                wait_start = time.time()
+                while lock_file.exists() and (time.time() - wait_start) < max_wait:
+                    time.sleep(5)
+                    lock_age = time.time() - lock_file.stat().st_mtime if lock_file.exists() else 0
+                    train_tasks[task_id]["message"] = f"等待其他任务完成HuBERT特征提取（已等待 {lock_age/60:.1f} 分钟）..."
+                if lock_file.exists():
+                    lock_file.unlink()  # 强制删除过期锁
+                hubert_lock_wait_sec = time.perf_counter() - _lw0
+                rec = _train_phase_get()
+                if rec is not None:
+                    rec.emit("hubert_lock_wait", hubert_lock_wait_sec, lock_file=str(lock_file))
+
+        # 创建锁文件
+        try:
+            lock_file.touch()
+        except Exception:
+            pass
+
+        try:
+            _run_prepare_command_with_fallback(
+                "step2: 生成 HuBERT 与 32k wav",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-hubert-wav32k.py")],
+                {**env_common, "cnhubert_base_dir": str(ssl_dir)},
+            )
+            if prepare_cache_root is not None:
+                _save_prepare_step_cache(prepare_cache_root, "step2", exp_dir, prepare_specs.get("step2", []))
+        finally:
+            # 删除锁文件
+            try:
+                if lock_file.exists():
+                    lock_file.unlink()
+            except Exception:
+                pass
+
+    train_tasks[task_id]["progress"] = 40
+    train_tasks[task_id]["message"] = "HuBERT 特征提取完成，准备生成语义 token..."
+    
+    # Step 2b: v2Pro 需要生成 SV 说话人特征
+    if "Pro" in version:
+        # 在SV特征提取前，验证前置条件
+        wav32k_dir = exp_dir / "5-wav32k"
+        wav32k_files = list(wav32k_dir.glob("*.wav")) if wav32k_dir.exists() else []
+        
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write(f"\n{'='*60}\n")
+            logf.write(f"[SV特征提取前验证] 检查前置条件...\n")
+            logf.write(f"{'='*60}\n")
+            logf.write(f"32k音频文件数量: {len(wav32k_files)}\n")
+            logf.write(f"SV模型路径: {sv_path}\n")
+            logf.write(f"SV模型文件存在: {sv_path.exists() if sv_path else False}\n")
+            
+            if len(wav32k_files) == 0:
+                error_msg = "无法提取SV特征：32k音频文件不存在！请先完成HuBERT特征提取。"
+                logf.write(f"❌ {error_msg}\n")
+                raise ValueError(error_msg)
+            
+            if not sv_path or not sv_path.exists():
+                error_msg = f"SV模型文件不存在！路径: {sv_path}\n请检查SV模型路径配置。"
+                logf.write(f"❌ {error_msg}\n")
+                raise FileNotFoundError(error_msg)
+            
+            logf.write(f"✅ 前置条件验证通过\n")
+            logf.write(f"{'='*60}\n")
+        
+        # 执行SV特征提取（支持缓存命中）
+        step2b_hit = False
+        if prepare_cache_root is not None:
+            step2b_hit = _restore_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
+        if step2b_hit:
+            with open(log_file, "a", encoding="utf-8") as logf:
+                logf.write("[预处理缓存] step2b 命中，跳过重算。\n")
+        else:
+            _run_prepare_command_with_fallback(
+                "step2b: 生成 SV 说话人特征",
+                [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "2-get-sv.py")],
+                {**env_common, "sv_path": str(sv_path)},
+            )
+            if prepare_cache_root is not None:
+                _save_prepare_step_cache(prepare_cache_root, "step2b", exp_dir, prepare_specs.get("step2b", []))
+        train_tasks[task_id]["progress"] = 45
+        
+        # 详细验证SV特征是否成功生成
+        sv_dir = exp_dir / "7-sv_cn"
+        
+        # 先检查日志文件中是否有SV提取的错误信息
+        sv_extraction_errors = []
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                # 查找SV提取相关的错误（从后往前查找，找到最近的错误）
+                sv_section_start = -1
+                for i in range(len(lines) - 1, -1, -1):
+                    if "step2b" in lines[i].lower() or "sv" in lines[i].lower() or "说话人特征" in lines[i]:
+                        sv_section_start = i
+                        break
+                
+                if sv_section_start >= 0:
+                    # 读取SV提取部分的日志
+                    sv_section = lines[sv_section_start:]
+                    for line in sv_section:
+                        line_lower = line.lower()
+                        if any(keyword in line_lower for keyword in ["error", "traceback", "failed", "exception", "无法", "失败"]):
+                            sv_extraction_errors.append(line.strip())
+        except Exception as e:
+            pass
+        
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write(f"\n{'='*60}\n")
+            logf.write(f"[SV特征提取后验证] 检查提取结果...\n")
+            logf.write(f"{'='*60}\n")
+            
+            if not sv_dir.exists():
+                error_msg = (
+                    f"❌ SV特征目录不存在！\n"
+                    f"预期目录: {sv_dir}\n"
+                    f"可能原因：SV特征提取脚本未执行或执行失败\n"
+                )
+                if sv_extraction_errors:
+                    error_msg += f"\n日志中的错误信息：\n"
+                    for err in sv_extraction_errors[-5:]:  # 只显示最后5个错误
+                        error_msg += f"  - {err}\n"
+                error_msg += f"\n请检查预处理日志中的错误信息。"
+                logf.write(f"{error_msg}\n")
+                logf.write(f"{'='*60}\n")
+                train_tasks[task_id]["message"] = "说话人特征提取失败：目录未创建"
+                raise FileNotFoundError(error_msg)
+            
+            sv_files = list(sv_dir.glob("*.pt"))
+            logf.write(f"SV特征目录: {sv_dir}\n")
+            logf.write(f"SV特征文件数量: {len(sv_files)}\n")
+            logf.write(f"32k音频文件数量: {len(wav32k_files)}\n")
+            
+            # 如果目录为空，检查日志中的错误
+            if len(sv_files) == 0 and sv_extraction_errors:
+                logf.write(f"\n⚠️ 发现日志中的错误信息：\n")
+                for err in sv_extraction_errors[-10:]:  # 显示最后10个错误
+                    logf.write(f"  - {err}\n")
+            
+            if len(sv_files) == 0:
+                # 详细诊断为什么SV特征提取失败
+                # 尝试手动验证SV模型和音频文件
+                logf.write(f"\n[诊断] 尝试手动验证SV提取条件...\n")
+                
+                # 检查SV模型文件
+                sv_model_valid = False
+                try:
+                    if sv_path.exists():
+                        sv_model_size = sv_path.stat().st_size
+                        logf.write(f"  SV模型文件大小: {sv_model_size / 1024 / 1024:.2f} MB\n")
+                        # 尝试加载SV模型
+                        try:
+                            sv_model_check = torch.load(str(sv_path), map_location="cpu", weights_only=False)
+                            if sv_model_check is not None:
+                                sv_model_valid = True
+                                logf.write(f"  ✅ SV模型文件可读\n")
+                            else:
+                                logf.write(f"  ❌ SV模型文件为空\n")
+                        except Exception as e:
+                            logf.write(f"  ❌ SV模型文件加载失败: {str(e)}\n")
+                    else:
+                        logf.write(f"  ❌ SV模型文件不存在: {sv_path}\n")
+                except Exception as e:
+                    logf.write(f"  ❌ 检查SV模型时出错: {str(e)}\n")
+                
+                # 检查32k音频文件样本
+                logf.write(f"\n[诊断] 检查32k音频文件样本...\n")
+                sample_wav_files = wav32k_files[:3]  # 检查前3个
+                valid_wav_count = 0
+                invalid_wav_files = []
+                for wav_file in sample_wav_files:
+                    try:
+                        wav_size = wav_file.stat().st_size
+                        if wav_size > 0:
+                            # 尝试加载音频文件
+                            try:
+                                import torchaudio
+                                wav_data, sr = torchaudio.load(str(wav_file))
+                                logf.write(f"  ✅ {wav_file.name}: {wav_size / 1024:.2f} KB, 采样率: {sr}Hz, 形状: {wav_data.shape}\n")
+                                valid_wav_count += 1
+                            except Exception as e:
+                                logf.write(f"  ⚠️ {wav_file.name}: 文件存在但无法加载 - {str(e)}\n")
+                                invalid_wav_files.append(wav_file.name)
+                        else:
+                            invalid_wav_files.append(wav_file.name)
+                            logf.write(f"  ❌ {wav_file.name}: 文件为空\n")
+                    except Exception as e:
+                        invalid_wav_files.append(wav_file.name)
+                        logf.write(f"  ❌ {wav_file.name}: 读取失败 - {str(e)}\n")
+                
+                error_msg = (
+                    f"❌ SV特征提取完成，但目录为空！\n"
+                    f"目录路径: {sv_dir}\n"
+                    f"32k音频文件数量: {len(wav32k_files)}\n"
+                    f"SV特征文件数量: {len(sv_files)}\n"
+                    f"SV模型文件: {sv_path}\n"
+                    f"SV模型可读: {sv_model_valid}\n"
+                    f"音频文件样本验证: {valid_wav_count}/{len(sample_wav_files)} 个有效\n\n"
+                )
+                
+                # 根据诊断结果提供针对性的错误信息
+                possible_causes = []
+                suggestions = []
+                
+                if not sv_model_valid:
+                    possible_causes.append("SV模型文件损坏或无法加载")
+                    suggestions.append(f"检查SV模型文件: {sv_path}")
+                    suggestions.append("尝试重新下载SV模型文件")
+                
+                if valid_wav_count == 0:
+                    possible_causes.append("32k音频文件无法读取或格式不正确")
+                    suggestions.append("检查32k音频文件格式（需要32kHz单声道WAV）")
+                    suggestions.append("验证音频文件是否损坏")
+                elif valid_wav_count < len(sample_wav_files):
+                    possible_causes.append("部分32k音频文件有问题")
+                    suggestions.append("检查有问题的音频文件")
+                
+                if sv_extraction_errors:
+                    possible_causes.append("SV特征提取脚本执行时出现错误")
+                    suggestions.append("查看日志中的详细错误信息")
+                    error_msg += f"\n日志中的错误信息：\n"
+                    for err in sv_extraction_errors[-5:]:
+                        error_msg += f"  - {err}\n"
+                
+                if not possible_causes:
+                    possible_causes.append("SV特征提取脚本执行失败但未报告错误")
+                    possible_causes.append("SV模型与音频文件不兼容")
+                    suggestions.append("检查SV特征提取脚本是否正确执行")
+                    suggestions.append("查看完整的预处理日志")
+                
+                error_msg += (
+                    f"\n可能原因：\n"
+                )
+                for i, cause in enumerate(possible_causes, 1):
+                    error_msg += f"{i}. {cause}\n"
+                
+                error_msg += (
+                    f"\n建议操作：\n"
+                )
+                for i, suggestion in enumerate(suggestions, 1):
+                    error_msg += f"{i}. {suggestion}\n"
+                
+                # 添加手动测试建议
+                error_msg += (
+                    f"\n手动测试建议：\n"
+                    f"1. 手动运行SV提取脚本测试：\n"
+                    f"   cd {BASE_DIR}\n"
+                    f"   python GPT_SoVITS/prepare_datasets/2-get-sv.py\n"
+                    f"   设置环境变量：\n"
+                    f"   - inp_text={dataset_list_path}\n"
+                    f"   - opt_dir={exp_dir}\n"
+                    f"   - sv_path={sv_path}\n"
+                    f"   - exp_name={exp_name}\n"
+                    f"2. 检查SV模型文件：\n"
+                    f"   python -c \"import torch; print(torch.load('{sv_path}', map_location='cpu'))\"\n"
+                    f"3. 检查32k音频文件：\n"
+                    f"   使用音频播放器播放 {wav32k_files[0] if wav32k_files else 'N/A'}\n"
+                )
+                
+                logf.write(f"\n{error_msg}\n")
+                logf.write(f"{'='*60}\n")
+                train_tasks[task_id]["message"] = "说话人特征提取失败：目录为空"
+                raise ValueError(error_msg)
+            
+            # 验证SV特征文件与32k音频文件数量是否匹配
+            wav32k_names = {f.stem for f in wav32k_files}
+            sv_names = {f.stem for f in sv_files}
+            missing_sv = wav32k_names - sv_names
+            extra_sv = sv_names - wav32k_names
+            
+            if len(sv_files) != len(wav32k_files):
+                logf.write(f"⚠️ 警告: SV特征文件数量({len(sv_files)})与32k音频文件数量({len(wav32k_files)})不匹配！\n")
+                if missing_sv:
+                    logf.write(f"  缺少SV特征的音频文件 ({len(missing_sv)} 个): {list(missing_sv)[:5]}\n")
+                if extra_sv:
+                    logf.write(f"  多余的SV特征文件 ({len(extra_sv)} 个): {list(extra_sv)[:5]}\n")
+            else:
+                logf.write(f"✅ SV特征文件数量与32k音频文件数量匹配\n")
+            
+            # 验证SV特征文件是否可读
+            logf.write(f"\n[验证] 检查SV特征文件可读性...\n")
+            valid_sv_count = 0
+            invalid_sv_files = []
+            for sv_file in sv_files[:10]:  # 检查前10个
+                try:
+                    file_size = sv_file.stat().st_size
+                    if file_size == 0:
+                        invalid_sv_files.append(sv_file.name)
+                        logf.write(f"  ❌ {sv_file.name}: 文件为空\n")
+                    else:
+                        # 尝试加载文件验证
+                        try:
+                            sv_data = torch.load(str(sv_file), map_location="cpu", weights_only=False)
+                            if sv_data is not None:
+                                valid_sv_count += 1
+                                logf.write(f"  ✅ {sv_file.name}: {file_size / 1024:.2f} KB (可读)\n")
+                            else:
+                                invalid_sv_files.append(sv_file.name)
+                                logf.write(f"  ⚠️ {sv_file.name}: 文件可读但数据为空\n")
+                        except Exception as load_err:
+                            invalid_sv_files.append(sv_file.name)
+                            logf.write(f"  ❌ {sv_file.name}: 加载失败 - {str(load_err)}\n")
+                except Exception as e:
+                    invalid_sv_files.append(sv_file.name)
+                    logf.write(f"  ❌ {sv_file.name}: 读取失败 - {str(e)}\n")
+            
+            if len(sv_files) > 10:
+                logf.write(f"  ... 还有 {len(sv_files) - 10} 个文件未检查\n")
+            
+            if invalid_sv_files:
+                logf.write(f"\n⚠️ 发现 {len(invalid_sv_files)} 个无效的SV特征文件\n")
+            
+            logf.write(f"\n{'='*60}\n")
+            if len(sv_files) > 0 and valid_sv_count > 0:
+                logf.write(f"✅ SV特征提取验证通过！\n")
+                logf.write(f"   有效SV特征文件: {valid_sv_count}/{len(sv_files[:10])} (已检查)\n")
+                logf.write(f"   总SV特征文件数: {len(sv_files)}\n")
+                train_tasks[task_id]["message"] = f"说话人特征提取完成：已生成 {len(sv_files)} 个SV特征文件"
+            else:
+                logf.write(f"❌ SV特征提取验证失败！\n")
+                logf.write(f"   有效文件: {valid_sv_count}/{len(sv_files)}\n")
+                train_tasks[task_id]["message"] = f"说话人特征提取完成，但验证失败：{len(invalid_sv_files)} 个文件无效"
+            logf.write(f"{'='*60}\n")
+    
+    # Step 3: 生成 6-name2semantic
+    if version in {"v2Pro", "v2ProPlus"}:
+        s2_config_file = "s2v2Pro.json"
+    else:
+        s2_config_file = "s2.json"
+    s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / s2_config_file
+    if not s2_config_path.exists() and version in {"v2Pro", "v2ProPlus"}:
+        s2_config_path = BASE_DIR / "GPT_SoVITS" / "configs" / "s2.json"
+    
+    pretrained_s2g = _get_versioned_path("pretrained_sovits_name", version, getattr(global_config, "pretrained_sovits_path", _default_pretrained_s2g_path(version)) if global_config else _default_pretrained_s2g_path(version))
+    
+    step3_hit = False
+    if prepare_cache_root is not None:
+        step3_hit = _restore_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
+    if step3_hit:
+        with open(log_file, "a", encoding="utf-8") as logf:
+            logf.write("[预处理缓存] step3 命中，跳过重算。\n")
+    else:
+        _run_prepare_command_with_fallback(
+            "step3: 生成 6-name2semantic",
+            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "prepare_datasets" / "3-get-semantic.py")],
+            {
+                **env_common,
+                "pretrained_s2G": str(pretrained_s2g),
+                "s2config_path": str(s2_config_path),
+            },
+        )
+        if prepare_cache_root is not None:
+            _save_prepare_step_cache(prepare_cache_root, "step3", exp_dir, prepare_specs.get("step3", []))
+    train_tasks[task_id]["progress"] = 50
+    train_tasks[task_id]["message"] = "语义 token 生成完成"
+    
+    # 预处理完成后，进行综合验证和音频特征完整性检查
+    _verify_audio_features_completeness(exp_dir, version, log_file, task_id)
+    
+    # 预处理完成后，进行综合验证
+    with open(log_file, "a", encoding="utf-8") as logf:
+        logf.write(f"\n{'='*60}\n")
+        logf.write(f"[预处理完成验证] 开始验证所有预处理输出...\n")
+        logf.write(f"{'='*60}\n")
+        
+        # 验证各个步骤的输出（优先使用 locate 到的真实文件名，避免 -0 后缀误报）
+        located_phoneme = _locate_prepare_output(exp_dir, "2-name2text", ".txt") or (exp_dir / "2-name2text.txt")
+        located_semantic = _locate_prepare_output(exp_dir, "6-name2semantic", ".tsv") or (exp_dir / "6-name2semantic.tsv")
+        check_items = [
+            (f"2-name2text ({located_phoneme.name})", located_phoneme, "文件"),
+            ("3-bert", exp_dir / "3-bert", "目录"),
+            ("4-cnhubert", exp_dir / "4-cnhubert", "目录"),
+            ("5-wav32k", exp_dir / "5-wav32k", "目录"),
+            (f"6-name2semantic ({located_semantic.name})", located_semantic, "文件"),
+        ]
+        
+        if "Pro" in version:
+            check_items.append(("7-sv_cn", exp_dir / "7-sv_cn", "目录"))
+        
+        all_valid = True
+        for name, path, path_type in check_items:
+            if not path.exists():
+                logf.write(f"❌ {name} ({path_type}): 不存在\n")
+                all_valid = False
+            elif path_type == "目录":
+                files = list(path.glob("*"))
+                if len(files) == 0:
+                    logf.write(f"❌ {name} ({path_type}): 目录为空\n")
+                    all_valid = False
+                else:
+                    total_size = sum(f.stat().st_size for f in files if f.is_file())
+                    logf.write(f"✅ {name} ({path_type}): {len(files)} 个文件, {total_size / 1024 / 1024:.2f} MB\n")
+            else:  # 文件
+                size = path.stat().st_size
+                if size == 0:
+                    logf.write(f"❌ {name} ({path_type}): 文件为空\n")
+                    all_valid = False
+                else:
+                    logf.write(f"✅ {name} ({path_type}): {size / 1024:.2f} KB\n")
+        
+        if all_valid:
+            logf.write(f"\n✅ 所有预处理输出验证通过！\n")
+        else:
+            logf.write(f"\n⚠️ 部分预处理输出验证失败，但将继续训练（如果可能）\n")
+        
+        logf.write(f"{'='*60}\n")
+
+
+def _build_s1_config(
+    task_id: str,
+    exp_name: str,
+    exp_dir: Path,
+    version: str,
+    job_dir: Path,
+    semantic_path: Path,
+    phoneme_path: Path,
+    batch_size: int = 8,
+    epochs: int = 10,
+    learning_rate: float = 1e-5,
+    fast_mode: bool = False,
+    dataset_sample_count: int = 0,
+) -> Path:
+    """构建S1 GPT训练配置"""
+    config_file = "s1longer-v2.yaml" if version != "v1" else "s1longer.yaml"
+    template = BASE_DIR / "GPT_SoVITS" / "configs" / config_file
+    if not template.exists() and version != "v1":
+        template = BASE_DIR / "GPT_SoVITS" / "configs" / "s1longer.yaml"
+    
+    config = yaml.safe_load(template.read_text(encoding="utf-8"))
+    
+    train_block = config.setdefault("train", {})
+    train_block["exp_name"] = exp_name
+    
+    # 检测是否有GPU可用
+    has_gpu = torch.cuda.is_available()
+    
+    # 强制使用官方参数：S1使用15轮，每5轮保存一次，batch_size=8，precision="16-mixed"
+    # 不进行任何动态调整，确保与官方参数完全一致
+    if fast_mode:
+        if has_gpu:
+            # GPU快速模式：更少的epochs，但保持官方batch_size=8
+            effective_epochs = max(3, min(epochs, 5))  # 快速模式最多5轮
+            effective_batch_size = 8  # 强制使用官方值8
+        else:
+            # CPU快速模式：最少epochs，但保持官方batch_size=8（如果OOM则报错）
+            effective_epochs = max(3, min(epochs, 5))
+            effective_batch_size = 8  # 强制使用官方值8
+        # 快速模式：如果epochs>=5，每5轮保存；否则只在最后保存
+        train_block["save_every_n_epoch"] = 5 if effective_epochs >= 5 else effective_epochs
+        train_block["if_save_every_weights"] = True
+    else:
+        # 正常训练模式：强制使用官方参数
+        if has_gpu:
+            # GPU训练：强制使用官方参数
+            effective_epochs = 15  # 官方值：15轮
+            effective_batch_size = 8  # 官方值：batch_size=8（不根据数据集大小调整）
+        else:
+            # CPU训练：也使用官方参数（如果OOM则报错，不自动降级）
+            effective_epochs = 15  # 官方值：15轮
+            effective_batch_size = 8  # 官方值：batch_size=8
+        # 正常模式：每5轮保存一次（官方值）
+        train_block["save_every_n_epoch"] = 5  # 官方值：每5轮保存一次
+        train_block["if_save_every_weights"] = True
+    
+    # 强制使用官方参数，忽略传入的参数（确保与官网完全一致）
+    train_block["batch_size"] = 8  # 官方值：强制使用8
+    train_block["epochs"] = 15 if not fast_mode else max(3, min(epochs, 5))  # 官方值：正常模式15轮，快速模式3-5轮
+
+    tiny_dataset = int(dataset_sample_count or 0) > 0 and int(dataset_sample_count or 0) <= TINY_DATASET_THRESHOLD
+    if tiny_dataset and _env_flag("TRAIN_TINY_SAVE_LAST_ONLY", ENTERPRISE_OPT_DEFAULT_ON):
+        # 小数据集训练时仅保留最终checkpoint，减少保存开销。
+        train_block["save_every_n_epoch"] = max(1, int(train_block["epochs"]))
+        train_block["if_save_latest"] = True
+        logger.info(
+            f"[S1配置] tiny_dataset保存优化已启用: sample_count={dataset_sample_count}, "
+            f"save_every_n_epoch={train_block['save_every_n_epoch']}"
+        )
+    
+    # 记录实际使用的参数（用于调试）
+    logger.info(f"[S1配置] 强制使用官方参数: batch_size=8, epochs={train_block['epochs']} (传入参数: batch_size={batch_size}, epochs={epochs}, fast_mode={fast_mode})")
+    
+    # 设置学习率：始终覆盖模板中的默认值，确保实际使用的是传入的learning_rate
+    # 官方推荐 S1 学习率为 1e-5，这里默认也是 1e-5，如需调整可通过 TrainParams 传入
+    if "lr_init" in train_block:
+        train_block["lr_init"] = learning_rate
+    if "learning_rate" in train_block:
+        train_block["learning_rate"] = learning_rate
+    logger.info(f"[S1配置] 设置学习率: {learning_rate}")
+    
+    # 优化数据加载（CPU训练时减少workers）
+    data_block = config.setdefault("data", {})
+    if not has_gpu:
+        data_block["num_workers"] = 0  # CPU训练时禁用多进程，避免开销
+        # CPU训练时禁用precision混合精度，使用fp32
+        if train_block.get("precision") == "16-mixed":
+            train_block["precision"] = "32-true"  # CPU不支持16位，使用32位
+    else:
+        # GPU训练：优化数据加载性能
+        # 增加num_workers到8（但不超过CPU核心数），提升数据加载速度
+        cpu_count = os.cpu_count() or 4
+        data_block["num_workers"] = min(8, cpu_count)
+        # 启用pin_memory加速CPU到GPU数据传输
+        data_block["pin_memory"] = True
+        # 启用persistent_workers避免每个epoch重新创建worker
+        data_block["persistent_workers"] = True
+        # 设置prefetch_factor，每个worker预取更多数据
+        data_block["prefetch_factor"] = 4
+        # GPU训练时强制使用16-mixed精度（官方值）
+        train_block["precision"] = "16-mixed"  # 官方值：强制使用FP16混合精度
+        # batch_size已经是8，不需要梯度累积
+    
+    # 启用验证以找到最佳模型（根据文档，验证是必要的）
+    # 优化验证频率：每3个epoch验证一次，减少验证时间
+    train_block["val_check_interval"] = None  # 禁用每个epoch内的验证
+    train_block["check_val_every_n_epoch"] = 3  # 每3个epoch验证一次（减少验证时间）
+    
+    gpt_weight_dir = _get_versioned_path("GPT_weight_version2root", version, "GPT_weights_v2Pro")
+    train_block["half_weights_save_dir"] = str(gpt_weight_dir)
+    train_block["if_save_latest"] = True
+    # 确保保存精简格式（weight + config + info），而不是完整的PyTorch Lightning checkpoint
+    train_block["if_save_every_weights"] = True  # 必须为True，才能保存精简格式
+    
+    pretrained_gpt = _get_versioned_path("pretrained_gpt_name", version,
+                                         getattr(global_config, "pretrained_gpt_path", config.get("pretrained_s1") or _default_pretrained_gpt_path(version)) if global_config else (config.get("pretrained_s1") or _default_pretrained_gpt_path(version)))
+    config["pretrained_s1"] = str(pretrained_gpt)
+    config["train_semantic_path"] = str(semantic_path)
+    config["train_phoneme_path"] = str(phoneme_path)
+    config["output_dir"] = str(exp_dir / f"logs_s1_{version}")
+    
+    tmp_path = job_dir / "tmp_s1.yaml"
+    tmp_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    
+    return tmp_path
+
+
+def _build_s2_config(
+    exp_name: str,
+    exp_dir: Path,
+    version: str,
+    job_dir: Path,
+    target_batch_size: int = 1,
+    max_segment_size: int = 20480,  # 官方值：20480
+    max_epochs: int = 8,  # 官方值：8轮
+    fast_mode: bool = False,  # 快速训练模式
+    gpu_numbers: str = "0",  # 与官网一致，写入 train.gpu_numbers
+    dataset_sample_count: int = 0,
+) -> Path:
+    """构建S2 SoVITS训练配置"""
+    if version in {"v2Pro", "v2ProPlus"}:
+        config_file = "s2v2Pro.json"
+    else:
+        config_file = "s2.json"
+    template = BASE_DIR / "GPT_SoVITS" / "configs" / config_file
+    if not template.exists() and version in {"v2Pro", "v2ProPlus"}:
+        template = BASE_DIR / "GPT_SoVITS" / "configs" / "s2.json"
+    
+    data = json.loads(template.read_text(encoding="utf-8"))
+    
+    # name 字段应该在配置文件的顶层，而不是 train 块中（与官方 auto_train_infer.py 一致）
+    data["name"] = exp_name
+    
+    train_block = data.setdefault("train", {})
+    # 写入 gpu_numbers，保持与官方 webui/auto_train_infer 的配置一致
+    # 供 s2_train.py 中 hps.train.gpu_numbers 使用
+    train_block["gpu_numbers"] = str(gpu_numbers)
+    # 强制使用官方参数：batch_size=8，不进行任何动态调整
+    train_block["batch_size"] = 8  # 官方值：强制使用8
+    logger.info(f"[S2配置] 强制使用官方参数: batch_size=8 (传入参数: target_batch_size={target_batch_size}, max_epochs={max_epochs}, fast_mode={fast_mode})")
+    
+    # 强制使用官方参数：S2使用8轮，每4轮保存一次，batch_size=8，fp16_run=True
+    # 不进行任何动态调整，确保与官方参数完全一致
+    if fast_mode:
+        # 快速模式：S2训练3-5轮
+        adjusted_max_epochs = min(max_epochs, 5)
+    else:
+        # 正常模式：强制使用官方值8轮
+        adjusted_max_epochs = 8  # 官方值：强制使用8轮
+    
+    train_block["epochs"] = adjusted_max_epochs
+    total_epochs = int(train_block["epochs"])
+    logger.info(f"[S2配置] 强制使用官方参数: epochs={total_epochs} (传入参数: max_epochs={max_epochs}, fast_mode={fast_mode})")
+    
+    # 添加/覆盖保存相关配置字段（s2_train.py需要这些字段）
+    # 官方值：每4轮保存一次
+    if fast_mode:
+        # 快速模式：如果epochs>=4，每4轮保存；否则只在最后保存
+        train_block["save_every_epoch"] = 4 if total_epochs >= 4 else total_epochs
+        train_block["if_save_latest"] = 1  # 保存最新模型（覆盖式）
+        train_block["if_save_every_weights"] = True  # 必须为True，才能保存精简格式（weight + config + info）
+    else:
+        # 正常模式：每4轮保存一次（官方值）
+        train_block["save_every_epoch"] = 4  # 官方值：每4轮保存一次
+        train_block["if_save_latest"] = 1  # 保存最新模型（覆盖式）
+        train_block["if_save_every_weights"] = True  # 必须为True，才能保存精简格式（weight + config + info）
+    
+    tiny_dataset = int(dataset_sample_count or 0) > 0 and int(dataset_sample_count or 0) <= TINY_DATASET_THRESHOLD
+    if tiny_dataset and _env_flag("TRAIN_TINY_SAVE_LAST_ONLY", ENTERPRISE_OPT_DEFAULT_ON):
+        train_block["save_every_epoch"] = max(1, total_epochs)
+        train_block["if_save_latest"] = 1
+        logger.info(
+            f"[S2配置] tiny_dataset保存优化已启用: sample_count={dataset_sample_count}, "
+            f"save_every_epoch={train_block['save_every_epoch']}"
+        )
+
+    data_block = data.setdefault("data", {})
+    # 确保exp_dir指向processed目录（包含2-name2text.txt等文件）
+    data_block["exp_dir"] = str(exp_dir)
+    # 优化S2数据加载性能（如果使用PyTorch DataLoader）
+    # 注意：S2训练可能使用自定义数据加载，这些参数可能不会直接生效
+    # 但设置它们可以确保如果训练脚本支持，就会使用这些优化
+    if torch.cuda.is_available():
+        # 这些参数会在s2_train.py中通过环境变量或配置传递
+        # 如果训练脚本支持DataLoader，这些参数会生效
+        pass  # S2的数据加载在训练脚本中控制，通过环境变量优化
+    hop_length = int(data_block.get("hop_length", 640) or 640)
+    # 官方值：segment_size=20480
+    official_segment_size = 20480  # 官方值
+    segment_size = int(train_block.get("segment_size", official_segment_size) or official_segment_size)
+    # 使用官方值，但确保是hop_length的倍数
+    segment_size = official_segment_size
+    if segment_size % hop_length != 0:
+        segment_size = segment_size - (segment_size % hop_length)
+    segment_size = max(hop_length, segment_size)
+    train_block["segment_size"] = segment_size
+    
+    pretrained_s2g = _get_versioned_path("pretrained_sovits_name", version, getattr(global_config, "pretrained_sovits_path", train_block.get("pretrained_s2G") or _default_pretrained_s2g_path(version)) if global_config else (train_block.get("pretrained_s2G") or _default_pretrained_s2g_path(version)))
+    train_block["pretrained_s2G"] = str(pretrained_s2g)
+    
+    # 尝试获取 s2D 路径（v2Pro 可能需要）
+    if "Pro" in version:
+        try:
+            s2d_attr = getattr(global_config, "pretrained_sovits_d_path", None) if global_config else None
+            s2d_path = None
+            if isinstance(s2d_attr, dict):
+                s2d_path = s2d_attr.get(version)
+            elif isinstance(s2d_attr, str):
+                s2d_path = s2d_attr
+            if not s2d_path and train_block.get("pretrained_s2G"):
+                # 尝试从 s2G 路径推断 s2D 路径
+                s2g_path = _resolve_path(train_block["pretrained_s2G"])
+                if "s2G" in s2g_path.name:
+                    s2d_candidate = s2g_path.with_name(s2g_path.name.replace("s2G", "s2D", 1))
+                    if s2d_candidate.exists():
+                        s2d_path = str(s2d_candidate)
+            if s2d_path:
+                train_block["pretrained_s2D"] = str(_resolve_path(s2d_path))
+        except Exception:
+            pass  # s2D 不是必需的
+    data["s2_ckpt_dir"] = str(exp_dir / f"logs_s2_{version}")
+    sovits_weight_dir = _get_versioned_path("SoVITS_weight_version2root", version, "SoVITS_weights_v2Pro")
+    data["save_weight_dir"] = str(sovits_weight_dir)
+    data.setdefault("model", {})["version"] = version
+    data["version"] = version
+    
+    # 强制设置fp16_run=True（官方值）
+    train_block["fp16_run"] = True  # 官方值：强制使用FP16训练
+    
+    tmp_path = job_dir / "tmp_s2.json"
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return tmp_path
+
+
+def _validate_gpt_model_file(model_path: Path) -> tuple[bool, str]:
+    """è®­ç»å®æåç GPT æä»¶èªæ£ã"""
+    try:
+        if not model_path.exists():
+            return False, f"GPTæ¨¡åä¸å­å¨: {model_path}"
+        size_mb = model_path.stat().st_size / 1024 / 1024
+        if size_mb < 1.0:
+            return False, f"GPTæ¨¡åæä»¶è¿å°({size_mb:.2f}MB): {model_path}"
+
+        checkpoint = torch.load(str(model_path), map_location="cpu")
+        if not isinstance(checkpoint, dict):
+            return False, f"GPTæ¨¡åç»æå¼å¸¸(type={type(checkpoint)}): {model_path}"
+
+        if "weight" in checkpoint or "state_dict" in checkpoint:
+            return True, f"GPTæ¨¡åæ ¡éªéè¿({size_mb:.2f}MB)"
+        return False, f"GPTæ¨¡åç¼ºå°weight/state_dicté®: {list(checkpoint.keys())[:10]}"
+    except Exception as e:
+        return False, f"GPTæ¨¡åå è½½å¤±è´¥: {e}"
+
+
+def _inspect_sovits_weight_dict(weight_obj) -> tuple[bool, str]:
+    if not isinstance(weight_obj, dict) or not weight_obj:
+        return False, "SoVITS权重为空或非字典"
+
+    keys = list(weight_obj.keys())
+    key_count = len(keys)
+    if key_count < 50:
+        return False, f"SoVITS权重参数数量异常({key_count})"
+
+    has_generator_prefix = any(
+        k.startswith(("enc_p.", "dec.", "flow.", "ref_enc.", "quantizer."))
+        for k in keys
+    )
+    has_discriminator_only = all(k.startswith("discriminators.") for k in keys[: min(64, key_count)])
+
+    if has_discriminator_only and (not has_generator_prefix):
+        return False, "检测到判别器(D_)权重，非可推理生成器模型"
+
+    if not has_generator_prefix:
+        return False, "SoVITS权重缺少生成器关键前缀(enc_p/dec/flow/ref_enc)"
+
+    return True, f"SoVITS生成器权重有效(keys={key_count})"
+
+
+def _validate_sovits_model_file(model_path: Path, version: str = "v2Pro") -> tuple[bool, str]:
+    """校验 SoVITS 模型文件是否可用（严格区分生成器/判别器）。"""
+    try:
+        if not model_path.exists():
+            return False, f"SoVITS模型不存在: {model_path}"
+        size_mb = model_path.stat().st_size / 1024 / 1024
+        if size_mb < 1.0:
+            return False, f"SoVITS模型文件过小({size_mb:.2f}MB): {model_path}"
+
+        try:
+            from GPT_SoVITS.process_ckpt import load_sovits_new
+
+            checkpoint = load_sovits_new(str(model_path))
+            if isinstance(checkpoint, dict):
+                weight_obj = checkpoint.get("weight") or checkpoint.get("model")
+                ok, msg = _inspect_sovits_weight_dict(weight_obj)
+                if ok:
+                    return True, f"SoVITS模型校验通过({size_mb:.2f}MB): {msg}"
+                return False, f"SoVITS模型校验失败({size_mb:.2f}MB): {msg}"
+        except Exception:
+            pass
+
+        checkpoint = torch.load(str(model_path), map_location="cpu")
+        if isinstance(checkpoint, dict):
+            weight_obj = checkpoint.get("weight") or checkpoint.get("model")
+            ok, msg = _inspect_sovits_weight_dict(weight_obj)
+            if ok:
+                return True, f"SoVITS模型兼容校验通过({size_mb:.2f}MB): {msg}"
+            return False, f"SoVITS模型结构不符合生成器要求: {msg}"
+        return False, f"SoVITS模型结构异常: {type(checkpoint)}"
+    except Exception as e:
+        return False, f"SoVITS模型加载失败: {e}"
+
+
+def _collect_registered_sovits_paths_for_user(user_id: str) -> set[str]:
+    """读取声音库，收集该用户已注册并应保留的 SoVITS 权重路径。"""
+    user_key = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(user_id or "").strip())
+    if not user_key:
+        return set()
+
+    library_path = BASE_DIR / "voice_library.json"
+    if not library_path.exists():
+        return set()
+
+    keep_paths: set[str] = set()
+    try:
+        with open(library_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return set()
+
+        prefix = f"voice_{user_key}_"
+        for info in data.values():
+            if not isinstance(info, dict):
+                continue
+            sovits_path = str(info.get("sovits_path") or "").strip()
+            if not sovits_path:
+                continue
+            sovits_abs = os.path.abspath(sovits_path)
+            base_name = os.path.basename(sovits_abs)
+            if base_name.startswith(prefix) and base_name.endswith(".pth"):
+                keep_paths.add(sovits_abs)
+    except Exception as e:
+        logger.warning(f"[SoVITS清理] 读取 voice_library.json 失败，将只保留当前产物: {e}")
+
+    return keep_paths
+
+
+def _cleanup_user_stale_sovits_weights(
+    user_id: str,
+    version: str,
+    keep_paths: Optional[set[str]] = None,
+    current_task_id: Optional[str] = None,
+    log_path: Optional[str] = None,
+    remove_only_invalid: bool = False,
+):
+    """清理用户旧的 SoVITS 权重文件。"""
+    keep_abs = {os.path.abspath(p) for p in (keep_paths or set())}
+    removed = []
+
+    def _should_remove(p: Path) -> tuple[bool, str]:
+        p_abs = os.path.abspath(str(p))
+        if p_abs in keep_abs:
+            return False, "in_keep_set"
+        if remove_only_invalid:
+            ok, msg = _validate_sovits_model_file(p, version=version)
+            return (not ok), msg
+        return True, "stale_file"
+
+    def _log(msg: str):
+        if not log_path:
+            logger.info(msg)
+            return
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(msg + "\n")
+        except Exception:
+            logger.info(msg)
+
+    user_key = re.sub(r"[^a-zA-Z0-9_\-]", "_", str(user_id or "").strip())
+    if not user_key:
+        return
+
+    try:
+        sovits_weight_dir = _get_versioned_path("SoVITS_weight_version2root", version, "SoVITS_weights_v2Pro")
+    except Exception:
+        sovits_weight_dir = BASE_DIR / "SoVITS_weights_v2Pro"
+
+    if sovits_weight_dir.exists():
+        for p in sovits_weight_dir.glob(f"voice_{user_key}_*.pth"):
+            try:
+                rm, why = _should_remove(p)
+                if rm:
+                    p.unlink(missing_ok=True)
+                    removed.append(str(p))
+                    _log(f"[SoVITS清理] 已移除全局权重: {p} (原因: {why})")
+            except Exception as e:
+                _log(f"[SoVITS清理] 移除失败: {p}, err={e}")
+
+    user_root = Path(TRAIN_OUTPUT_DIR) / user_key
+    if user_root.exists() and user_root.is_dir():
+        for task_dir in user_root.iterdir():
+            if not task_dir.is_dir():
+                continue
+            s2_dir = task_dir / "processed" / f"logs_s2_{version}"
+            if not s2_dir.exists():
+                continue
+            for p in s2_dir.glob("*.pth"):
+                try:
+                    rm, why = _should_remove(p)
+                    if rm:
+                        p.unlink(missing_ok=True)
+                        removed.append(str(p))
+                        _log(f"[SoVITS清理] 已移除任务权重: {p} (原因: {why})")
+                except Exception as e:
+                    _log(f"[SoVITS清理] 移除失败: {p}, err={e}")
+
+    if removed:
+        _log(f"[SoVITS清理] 本次共移除 {len(removed)} 个文件")
+
+def run_training(task_id: str, dataset_path: str, output_path: str, log_path: str, params: TrainParams):
+    """后台执行真实训练流程"""
+    set_high_priority()
+    
+    # 初始化损失监控器
+    loss_monitor = None
+    try:
+        from training_loss_monitor import monitor_training_loss
+        loss_file = Path(log_path).parent / f"{Path(log_path).stem}_losses.json"
+        loss_monitor = monitor_training_loss(Path(log_path), loss_file)
+        logger.info(f"[损失监控] 已启动损失监控，数据将保存到: {loss_file}")
+    except Exception as e:
+        logger.warning(f"[损失监控] 启动损失监控失败: {e}，将继续训练但不监控损失")
+    
+    try:
+        if TrainPhaseRecorder is not None:
+            _tp_path = Path(log_path).parent / f"{Path(log_path).stem}_phases.jsonl"
+            _train_phase_set(TrainPhaseRecorder(_tp_path))
+            _train_phase_get().emit(
+                "run_start",
+                0.0,
+                task_id=task_id,
+                dataset_path=str(dataset_path),
+                output_path=str(output_path),
+                fast_mode=bool(getattr(params, "fast_mode", False)),
+                model_version=str(params.model_version),
+                phases_jsonl=str(_tp_path),
+            )
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"开始训练：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            # 兼容Pydantic v1和v2
+            try:
+                params_dict = params.model_dump() if hasattr(params, 'model_dump') else params.dict()
+            except:
+                params_dict = {"user_id": params.user_id, "model_version": params.model_version, 
+                              "epochs": params.epochs, "batch_size": params.batch_size,
+                              "learning_rate": params.learning_rate, "language": params.language,
+                              "fast_mode": getattr(params, "fast_mode", False)}
+            f.write(f"参数：{params_dict}\n")
+            f.write(f"模型版本：{params.model_version}\n")
+
+        # 创建实验目录
+        # 确保exp_name包含user_id，使每个用户的模型权重分开保存
+        exp_name = f"voice_{params.user_id}_{task_id[:8]}"
+        exp_dir = Path(output_path) / "processed"
+        job_dir = Path(output_path)
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        # 先清理该用户最近异常/损坏的 SoVITS 产物，避免重训时混入坏权重。
+        _t_cleanup0 = time.perf_counter()
+        try:
+            _cleanup_user_stale_sovits_weights(
+                user_id=params.user_id,
+                version=params.model_version,
+                keep_paths=set(),
+                current_task_id=task_id,
+                log_path=log_path,
+                remove_only_invalid=True,
+            )
+        except Exception as cleanup_pre_err:
+            logger.warning(f"[SoVITS清理] 预清理异常文件失败: {cleanup_pre_err}")
+        _rec_c = _train_phase_get()
+        if _rec_c is not None:
+            _rec_c.emit("sovit_cleanup_precheck", time.perf_counter() - _t_cleanup0)
+        
+        train_tasks[task_id]["progress"] = 5
+        train_tasks[task_id]["message"] = "创建数据集列表..."
+        
+        # 音频降噪除杂预处理（在创建数据集列表之前）
+        _t_pur_all = time.perf_counter()
+        if AUDIO_PURIFICATION_AVAILABLE:
+            train_tasks[task_id]["message"] = "正在进行音频降噪除杂..."
+            train_tasks[task_id]["progress"] = 3
+            try:
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"\n{'='*60}\n")
+                    logf.write(f"[音频降噪除杂] 开始处理数据集音频文件...\n")
+                    logf.write(f"{'='*60}\n")
+                
+                # 查找所有音频文件
+                audio_files = list(Path(dataset_path).glob("*.wav"))
+                # 只处理前 N 句（按 sentence_{idx}.wav 排序），避免提纯步骤处理过多文件
+                try:
+                    import re
+                    sent = []
+                    other = []
+                    for p in audio_files:
+                        m = re.match(r"^sentence_(\d+)\.wav$", p.name)
+                        if m:
+                            sent.append((int(m.group(1)), p))
+                        else:
+                            other.append(p)
+                    if sent:
+                        sent.sort(key=lambda x: x[0])
+                        audio_files = [p for _, p in sent[:MAX_DATASET_SENTENCES]]
+                    else:
+                        audio_files = sorted(other)[:MAX_DATASET_SENTENCES]
+                except Exception:
+                    audio_files = audio_files[:MAX_DATASET_SENTENCES]
+                total_files = len(audio_files)
+                
+                if total_files > 0:
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"找到 {total_files} 个音频文件，开始降噪除杂处理...\n")
+                    
+                    # 创建临时目录存储提纯后的音频
+                    purified_dir = Path(dataset_path) / "_purified_temp"
+                    purified_dir.mkdir(exist_ok=True)
+                    
+                    success_count = 0
+                    failed_count = 0
+                    
+                    purify_strategy = os.environ.get("TRAIN_AUDIO_PURIFY_STRATEGY", "deepfilternet3_wpe")
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"音频清洗策略: {purify_strategy} (去噪+去混响默认开启)\n")
+                    for idx, audio_file in enumerate(audio_files):
+                        try:
+                            # 更新进度
+                            progress = 3 + int((idx + 1) / total_files * 2)  # 3-5%
+                            train_tasks[task_id]["progress"] = progress
+                            train_tasks[task_id]["message"] = f"音频降噪除杂 ({idx + 1}/{total_files})..."
+                            
+                            # 提纯音频（默认开启去噪+去混响；失败时自动回退且不中断训练）
+                            purified_file = purified_dir / audio_file.name
+                            _t_one = time.perf_counter()
+                            purify_meta = purify_audio_file(
+                                str(audio_file),
+                                str(purified_file),
+                                enable_vocal_separation=False,
+                                vocal_model="HP5",
+                                enable_denoise=True,
+                                enable_dereverb=True,
+                                enable_deecho=False,  # 禁用去回声
+                                verbose=False,  # 不显示详细日志
+                            )
+                            _rec_pf = _train_phase_get()
+                            if _rec_pf is not None:
+                                _rec_pf.emit(
+                                    "audio_purify_file",
+                                    time.perf_counter() - _t_one,
+                                    file=str(audio_file.name),
+                                    index=int(idx),
+                                )
+                            
+                            # 替换原文件
+                            shutil.move(str(purified_file), str(audio_file))
+                            success_count += 1
+                            with open(log_path, "a", encoding="utf-8") as logf:
+                                logf.write(
+                                    f"  - {audio_file.name}: denoise={purify_meta.get('denoise_engine', 'unknown')}, "
+                                    f"dereverb={purify_meta.get('dereverb_engine', 'unknown')}, "
+                                    f"spectral={purify_meta.get('spectral_gate_engine', 'none')}, "
+                                    f"trim={purify_meta.get('silence_trim', 'none')}, "
+                                    f"trim_sec={purify_meta.get('silence_trim_src_sec', 'na')}->{purify_meta.get('silence_trim_dst_sec', 'na')}\n"
+                                )
+                            
+                        except Exception as e:
+                            failed_count += 1
+                            with open(log_path, "a", encoding="utf-8") as logf:
+                                logf.write(f"⚠️ 音频文件 {audio_file.name} 处理失败: {str(e)}\n")
+                            # 如果提纯失败，继续使用原文件
+                            continue
+                    
+                    # 清理临时目录
+                    try:
+                        if purified_dir.exists():
+                            shutil.rmtree(purified_dir)
+                    except:
+                        pass
+                    
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"\n音频降噪除杂完成: 成功 {success_count}/{total_files}, 失败 {failed_count}/{total_files}\n")
+                        logf.write(f"{'='*60}\n")
+                else:
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"未找到音频文件，跳过降噪除杂步骤\n")
+                        logf.write(f"{'='*60}\n")
+                        
+            except Exception as e:
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"⚠️ 音频降噪除杂过程出错: {str(e)}\n")
+                    logf.write(f"将继续使用原始音频文件进行训练\n")
+                    logf.write(f"{'='*60}\n")
+                logger.warning(f"音频降噪除杂失败: {e}，将继续使用原始音频")
+        else:
+            with open(log_path, "a", encoding="utf-8") as logf:
+                logf.write("\n[音频降噪除杂] 模块不可用，跳过\n")
+        _rec_pu = _train_phase_get()
+        if _rec_pu is not None:
+            _rec_pu.emit(
+                "audio_purification_section_total",
+                time.perf_counter() - _t_pur_all,
+                purification_module_available=bool(AUDIO_PURIFICATION_AVAILABLE),
+            )
+        
+        train_tasks[task_id]["progress"] = 5
+        train_tasks[task_id]["message"] = "创建数据集列表..."
+        
+        # 创建数据集列表（使用训练参数中的语言设置）
+        _t_ds = time.perf_counter()
+        dataset_list_path = _create_dataset_list(dataset_path, str(job_dir), params.language)
+        _rec_ds = _train_phase_get()
+        if _rec_ds is not None:
+            _rec_ds.emit("create_dataset_list", time.perf_counter() - _t_ds, list_path=str(dataset_list_path))
+
+        dataset_sample_count = _count_dataset_samples(dataset_list_path)
+        visible_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        s1_target_gpu_count, s2_target_gpu_count, gpu_policy_tag = _decide_training_gpu_counts(
+            dataset_sample_count,
+            torch.cuda.is_available(),
+            max_visible_gpus=visible_gpu_count,
+        )
+
+        if _env_flag("TRAIN_USE_ALL_IDLE_GPU", ENTERPRISE_OPT_DEFAULT_ON) and visible_gpu_count > 0 and dataset_sample_count > TINY_DATASET_THRESHOLD:
+            # 企业模式默认允许使用全部空闲卡（由 _find_free_gpus 实际筛出），以追求训练吞吐。
+            s1_target_gpu_count = max(1, visible_gpu_count)
+            s2_target_gpu_count = max(1, visible_gpu_count)
+            gpu_policy_tag = f"{gpu_policy_tag}+all_idle"
+
+        train_tasks[task_id]["dataset_sample_count"] = dataset_sample_count
+        train_tasks[task_id]["gpu_policy"] = gpu_policy_tag
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"\n[训练资源策略] sample_count={dataset_sample_count}, policy={gpu_policy_tag}, "
+                f"s1_gpus={s1_target_gpu_count}, s2_gpus={s2_target_gpu_count}\n"
+            )
+      
+        # 数据预处理
+        train_tasks[task_id]["message"] = "开始数据预处理..."
+        _t_prep = time.perf_counter()
+        _run_prepare_steps(
+            task_id=task_id,
+            dataset_list_path=dataset_list_path,
+            exp_dir=exp_dir,
+            exp_name=exp_name,
+            version=params.model_version,
+            log_file=log_path,
+        )
+        _rec_pr = _train_phase_get()
+        if _rec_pr is not None:
+            _rec_pr.emit("prepare_steps_total_wall", time.perf_counter() - _t_prep)
+        
+        # 查找预处理输出文件
+        _t_post0 = time.perf_counter()
+        semantic_path = _locate_prepare_output(exp_dir, "6-name2semantic", ".tsv")
+        phoneme_path = _locate_prepare_output(exp_dir, "2-name2text", ".txt")
+        if not semantic_path or not phoneme_path:
+            raise FileNotFoundError("预处理输出缺失，请检查音频/文本质量")
+        
+        # 验证语义数据不为空
+        try:
+            import pandas as pd
+            semantic_df = pd.read_csv(semantic_path, sep="\t", header=None, names=["name", "semantic"])
+            if len(semantic_df) == 0:
+                # 检查32k音频文件是否存在
+                wav32k_dir = exp_dir / "5-wav32k"
+                wav32k_files = list(wav32k_dir.glob("*.wav")) if wav32k_dir.exists() else []
+                
+                # 检查HuBERT特征文件是否存在
+                hubert_dir = exp_dir / "4-cnhubert"
+                hubert_files = list(hubert_dir.glob("*.pt")) if hubert_dir.exists() else []
+                
+                error_msg = (
+                    f"语义数据为空！文件 {semantic_path} 中没有有效数据。\n"
+                    f"\n诊断信息：\n"
+                    f"- 32k音频文件数量: {len(wav32k_files)}\n"
+                    f"- HuBERT特征文件数量: {len(hubert_files)}\n"
+                    f"\n可能的原因：\n"
+                )
+                
+                if len(wav32k_files) == 0:
+                    error_msg += (
+                        f"1. ❌ 所有32k音频文件缺失（5-wav32k目录为空）\n"
+                        f"   - 这通常意味着HuBERT特征提取步骤中所有音频文件都被过滤掉了\n"
+                        f"   - 检查日志中的 'nan filtered' 警告\n"
+                        f"   - 可能原因：音频文件损坏、格式问题、或包含无效数据\n"
+                    )
+                elif len(hubert_files) == 0:
+                    error_msg += (
+                        f"2. ❌ HuBERT特征文件缺失（4-cnhubert目录为空）\n"
+                        f"   - 虽然32k音频文件存在，但HuBERT特征提取失败\n"
+                    )
+                else:
+                    error_msg += (
+                        f"3. ❌ 语义token提取失败\n"
+                        f"   - 32k音频和HuBERT特征都存在，但语义token提取失败\n"
+                    )
+                
+                error_msg += (
+                    f"\n建议：\n"
+                    f"- 检查原始音频文件是否有效（格式、时长、质量）\n"
+                    f"- 查看预处理日志中的详细错误信息\n"
+                    f"- 确保至少有一些音频文件能够成功处理\n"
+                )
+                
+                raise ValueError(error_msg)
+            train_tasks[task_id]["message"] = f"数据验证通过：语义数据 {len(semantic_df)} 条"
+        except Exception as e:
+            if isinstance(e, ValueError) and "语义数据为空" in str(e):
+                raise  # 重新抛出语义数据为空的错误
+            logger.warning(f"验证语义数据时出错（继续训练）: {e}")
+        
+        # 确保文件有正确的表头
+        canonical_semantic = exp_dir / "6-name2semantic.tsv"
+        canonical_phoneme = exp_dir / "2-name2text.txt"
+        if semantic_path != canonical_semantic:
+            shutil.copyfile(semantic_path, canonical_semantic)
+            semantic_path = canonical_semantic
+        if phoneme_path != canonical_phoneme:
+            shutil.copyfile(phoneme_path, canonical_phoneme)
+            phoneme_path = canonical_phoneme
+        _ensure_header(semantic_path, "name\tsemantic")
+        _ensure_header(phoneme_path, "name\tphoneme\ttones\ttext")
+        _rec_po = _train_phase_get()
+        if _rec_po is not None:
+            _rec_po.emit("post_prepare_locate_validate_header", time.perf_counter() - _t_post0)
+        
+        # S1 GPT 训练
+        train_tasks[task_id]["progress"] = 65  # 确保超过60%，避免被清理缓存
+        mode_text = "快速模式" if params.fast_mode else "正常模式"
+        train_tasks[task_id]["message"] = f"开始 GPT 模型训练 ({mode_text})..."
+        
+        # 记录训练配置信息
+        has_gpu = torch.cuda.is_available()
+        gpu_info = f"GPU: {torch.cuda.get_device_name(0)}" if has_gpu else "CPU"
+        
+        # 强制使用官方参数，不进行任何显存优化
+        # S1官方参数：batch_size=8, epochs=15
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n训练模式: {mode_text}\n")
+            f.write(f"硬件: {gpu_info}\n")
+            f.write(f"使用官方参数: batch_size=8, epochs=15 (S1)\n")
+            f.write(f"注意: 已禁用显存优化，强制使用官方参数以确保与官网一致\n")
+        
+        s1_config_path = _build_s1_config(
+            task_id=task_id,
+            exp_name=exp_name,
+            exp_dir=exp_dir,
+            version=params.model_version,
+            job_dir=job_dir,
+            semantic_path=semantic_path,
+            phoneme_path=phoneme_path,
+            batch_size=8,  # 强制使用官方值
+            epochs=15,  # 强制使用官方值
+            learning_rate=params.learning_rate,
+            fast_mode=params.fast_mode,
+            dataset_sample_count=dataset_sample_count,
+        )
+        
+        # 验证配置文件（确保使用官方参数）
+        config_check = yaml.safe_load(Path(s1_config_path).read_text(encoding="utf-8"))
+        actual_batch_size = config_check['train']['batch_size']
+        actual_epochs = config_check['train']['epochs']
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[S1配置验证] 实际使用的训练参数:\n")
+            f.write(f"  batch_size: {actual_batch_size} (官方值: 8)\n")
+            f.write(f"  epochs: {actual_epochs} (官方值: 15)\n")
+            f.write(f"  save_every_n_epoch: {config_check['train'].get('save_every_n_epoch', 'N/A')} (官方值: 5)\n")
+            f.write(f"  precision: {config_check['train'].get('precision', 'N/A')} (官方值: 16-mixed)\n")
+            if actual_batch_size != 8:
+                f.write(f"  ⚠️ 警告: batch_size不是官方值8！\n")
+            if actual_epochs != 15 and not params.fast_mode:
+                f.write(f"  ⚠️ 警告: epochs不是官方值15！\n")
+            f.write(f"{'='*60}\n")
+        
+        # 记录S1训练开始时间
+        s1_start_time = time.time()
+        
+        # 确定用于S1训练的GPU编号（多卡训练：使用2张卡）
+        # 如果环境变量中已设置，则使用；否则自动选择空闲GPU
+        s1_gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if s1_gpu_env is None:
+            # 自动选择空闲GPU（至少需要2张GPU，每张至少8GB空闲显存用于GPT训练）
+            if torch.cuda.is_available():
+                free_gpus = _find_free_gpus(min_free_memory_mb=8192, num_gpus=s1_target_gpu_count)
+                if free_gpus:
+                    # 转换为逗号分隔的格式（用于CUDA_VISIBLE_DEVICES）
+                    s1_gpu_env = ",".join(map(str, free_gpus))
+                else:
+                    s1_gpu_env = "0"  # 默认使用GPU 0
+            else:
+                s1_gpu_env = "0"
+        
+        s1_env = {
+            "CUDA_VISIBLE_DEVICES": s1_gpu_env,
+        }
+        
+        with open(log_path, "a", encoding="utf-8") as f:
+            gpu_count = len(s1_gpu_env.split(",")) if s1_gpu_env else 1
+            f.write(f"\n[S1训练] 使用 {gpu_count} 张GPU: {s1_gpu_env}\n")
+        
+        _run_command(
+            task_id,
+            "GPT (s1) 训练",
+            [PYTHON_EXEC, "-s", str(BASE_DIR / "GPT_SoVITS" / "s1_train.py"), "--config_file", str(s1_config_path)],
+            log_path,
+            s1_env,
+        )
+        train_tasks[task_id]["progress"] = 75
+        train_tasks[task_id]["message"] = "GPT 训练完成，准备 SoVITS 训练..."
+        
+        # 记录S1训练完成时间
+        s1_duration = time.time() - s1_start_time
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[S1训练] GPT模型训练完成，耗时: {s1_duration/60:.2f} 分钟\n")
+        
+        # S2 SoVITS 训练
+        # 强制使用官方参数，不进行任何显存优化
+        # S2官方参数：batch_size=8, epochs=8
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n使用官方参数: batch_size=8, epochs=8 (S2)\n")
+            f.write(f"注意: 已禁用显存优化，强制使用官方参数以确保与官网一致\n")
+        
+        # 确定用于S2训练的GPU编号（多卡训练：使用4张卡）
+        # 如果环境变量中已设置，则使用；否则自动选择空闲GPU
+        gpu_env = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if gpu_env is None:
+            # 自动选择空闲GPU（至少需要4张GPU，每张至少4GB空闲显存用于SoVITS训练）
+            if torch.cuda.is_available():
+                free_gpus = _find_free_gpus(min_free_memory_mb=4096, num_gpus=s2_target_gpu_count)
+                if free_gpus:
+                    # 转换为逗号分隔的格式（用于CUDA_VISIBLE_DEVICES）
+                    gpu_env = ",".join(map(str, free_gpus))
+                else:
+                    gpu_env = "0"  # 默认使用GPU 0
+            else:
+                gpu_env = "0"
+        # 将逗号分隔的格式转换为配置文件需要的格式（用"-"连接，如"0-1-2-3"）
+        s2_gpu_numbers = str(gpu_env).replace(",", "-")
+        
+        s2_config_path = _build_s2_config(
+            exp_name=exp_name,
+            exp_dir=exp_dir,
+            version=params.model_version,
+            job_dir=job_dir,
+            target_batch_size=8,  # 强制使用官方值
+            max_segment_size=20480,  # 官方值：20480
+            max_epochs=8,  # 强制使用官方值8轮
+            fast_mode=params.fast_mode,
+            gpu_numbers=s2_gpu_numbers,
+            dataset_sample_count=dataset_sample_count,
+        )
+        train_tasks[task_id]["progress"] = 80
+        train_tasks[task_id]["message"] = f"开始 SoVITS 模型训练... (batch_size=8, epochs=8)"
+        
+        # 记录S2训练开始时间
+        s2_start_time = time.time()
+        
+        # 验证SoVITS训练所需的数据文件（增强版调试信息）
+        try:
+            s2_data_check = {
+                "2-name2text.txt": exp_dir / "2-name2text.txt",
+                "4-cnhubert": exp_dir / "4-cnhubert",
+                "5-wav32k": exp_dir / "5-wav32k",
+            }
+            if params.model_version in {"v2Pro", "v2ProPlus"}:
+                s2_data_check["7-sv_cn"] = exp_dir / "7-sv_cn"
+            
+            # 详细的验证和诊断信息
+            missing_files = []
+            empty_dirs = []
+            detailed_info = []
+            
+            with open(log_path, "a", encoding="utf-8") as logf:
+                logf.write(f"\n{'='*60}\n")
+                logf.write(f"[SoVITS数据验证] 开始验证训练数据...\n")
+                logf.write(f"实验目录: {exp_dir}\n")
+                logf.write(f"模型版本: {params.model_version}\n")
+                logf.write(f"{'='*60}\n")
+            
+            for name, path in s2_data_check.items():
+                detailed_info_item = {"name": name, "path": str(path), "exists": False, "is_dir": False, "file_count": 0, "total_size": 0, "files": []}
+                
+                if not path.exists():
+                    missing_files.append(name)
+                    detailed_info_item["error"] = "文件/目录不存在"
+                    with open(log_path, "a", encoding="utf-8") as logf:
+                        logf.write(f"[验证失败] {name}: 不存在 ({path})\n")
+                elif path.is_dir():
+                    detailed_info_item["exists"] = True
+                    detailed_info_item["is_dir"] = True
+                    files = list(path.glob("*"))
+                    detailed_info_item["file_count"] = len(files)
+                    
+                    if len(files) == 0:
+                        empty_dirs.append(name)
+                        detailed_info_item["error"] = "目录为空"
+                        with open(log_path, "a", encoding="utf-8") as logf:
+                            logf.write(f"[验证失败] {name}: 目录为空 ({path})\n")
+                    else:
+                        # 统计文件大小和列出文件
+                        total_size = 0
+                        file_list = []
+                        for f in files:
+                            try:
+                                size = f.stat().st_size
+                                total_size += size
+                                file_list.append({"name": f.name, "size": size})
+                            except Exception as e:
+                                file_list.append({"name": f.name, "error": str(e)})
+                        
+                        detailed_info_item["total_size"] = total_size
+                        detailed_info_item["files"] = file_list[:10]  # 只保存前10个文件信息
+                        
+                        with open(log_path, "a", encoding="utf-8") as logf:
+                            logf.write(f"[验证成功] {name}: {len(files)} 个文件, 总大小: {total_size / 1024 / 1024:.2f} MB ({path})\n")
+                            # 列出前5个文件
+                            for f_info in file_list[:5]:
+                                if "error" in f_info:
+                                    logf.write(f"  - {f_info['name']}: 读取错误 - {f_info['error']}\n")
+                                else:
+                                    logf.write(f"  - {f_info['name']}: {f_info['size'] / 1024:.2f} KB\n")
+                            if len(file_list) > 5:
+                                logf.write(f"  ... 还有 {len(file_list) - 5} 个文件\n")
+                elif path.is_file():
+                    detailed_info_item["exists"] = True
+                    detailed_info_item["is_dir"] = False
+                    try:
+                        size = path.stat().st_size
+                        detailed_info_item["total_size"] = size
+                        detailed_info_item["file_count"] = 1
+                        
+                        if size == 0:
+                            empty_dirs.append(name)
+                            detailed_info_item["error"] = "文件为空"
+                            with open(log_path, "a", encoding="utf-8") as logf:
+                                logf.write(f"[验证失败] {name}: 文件为空 ({path}, 0 字节)\n")
+                        else:
+                            # 尝试读取文件前几行验证文件可读性
+                            try:
+                                with open(path, "r", encoding="utf-8") as f:
+                                    first_lines = [f.readline().strip() for _ in range(3)]
+                                detailed_info_item["preview"] = first_lines
+                                with open(log_path, "a", encoding="utf-8") as logf:
+                                    logf.write(f"[验证成功] {name}: {size / 1024:.2f} KB ({path})\n")
+                                    logf.write(f"  文件预览（前3行）:\n")
+                                    for i, line in enumerate(first_lines, 1):
+                                        preview = line[:50] + "..." if len(line) > 50 else line
+                                        logf.write(f"    {i}. {preview}\n")
+                            except Exception as e:
+                                detailed_info_item["error"] = f"文件读取失败: {str(e)}"
+                                with open(log_path, "a", encoding="utf-8") as logf:
+                                    logf.write(f"[验证警告] {name}: 文件存在但读取失败 - {str(e)}\n")
+                    except Exception as e:
+                        detailed_info_item["error"] = f"文件信息获取失败: {str(e)}"
+                        with open(log_path, "a", encoding="utf-8") as logf:
+                            logf.write(f"[验证错误] {name}: 无法获取文件信息 - {str(e)}\n")
+                
+                detailed_info.append(detailed_info_item)
+            
+            # 检查数据一致性
+            with open(log_path, "a", encoding="utf-8") as logf:
+                logf.write(f"\n[数据一致性检查]\n")
+                
+                # 检查各个目录的文件数量是否匹配
+                wav32k_dir = exp_dir / "5-wav32k"
+                hubert_dir = exp_dir / "4-cnhubert"
+                sv_dir = exp_dir / "7-sv_cn" if params.model_version in {"v2Pro", "v2ProPlus"} else None
+                
+                wav32k_files = list(wav32k_dir.glob("*.wav")) if wav32k_dir.exists() else []
+                hubert_files = list(hubert_dir.glob("*.pt")) if hubert_dir.exists() else []
+                sv_files = list(sv_dir.glob("*.pt")) if sv_dir and sv_dir.exists() else []
+                
+                logf.write(f"  32k音频文件数量: {len(wav32k_files)}\n")
+                logf.write(f"  HuBERT特征文件数量: {len(hubert_files)}\n")
+                if sv_dir:
+                    logf.write(f"  SV特征文件数量: {len(sv_files)}\n")
+                
+                # 检查文件数量是否匹配
+                if len(wav32k_files) != len(hubert_files):
+                    logf.write(f"  ⚠️ 警告: 32k音频文件({len(wav32k_files)})与HuBERT特征文件({len(hubert_files)})数量不匹配！\n")
+                if sv_dir and len(wav32k_files) != len(sv_files):
+                    logf.write(f"  ⚠️ 警告: 32k音频文件({len(wav32k_files)})与SV特征文件({len(sv_files)})数量不匹配！\n")
+                
+                # 检查文件名是否对应
+                wav32k_names = {f.stem for f in wav32k_files}
+                hubert_names = {f.stem for f in hubert_files}
+                sv_names = {f.stem for f in sv_files} if sv_dir else set()
+                
+                missing_hubert = wav32k_names - hubert_names
+                missing_sv = wav32k_names - sv_names if sv_dir else set()
+                
+                if missing_hubert:
+                    logf.write(f"  ⚠️ 警告: 以下音频文件缺少HuBERT特征: {list(missing_hubert)[:5]}\n")
+                if missing_sv:
+                    logf.write(f"  ⚠️ 警告: 以下音频文件缺少SV特征: {list(missing_sv)[:5]}\n")
+            
+            if missing_files or empty_dirs:
+                error_msg = "SoVITS训练数据验证失败：\n\n"
+                if missing_files:
+                    error_msg += f"❌ 缺失文件/目录 ({len(missing_files)} 个):\n"
+                    for name in missing_files:
+                        error_msg += f"   - {name}: {s2_data_check[name]}\n"
+                    error_msg += "\n"
+                
+                if empty_dirs:
+                    error_msg += f"❌ 空文件/目录 ({len(empty_dirs)} 个):\n"
+                    for name in empty_dirs:
+                        path = s2_data_check[name]
+                        error_msg += f"   - {name}: {path}\n"
+                        # 添加详细信息
+                        for info in detailed_info:
+                            if info["name"] == name and "error" in info:
+                                error_msg += f"     原因: {info['error']}\n"
+                    error_msg += "\n"
+                
+                error_msg += "📋 详细诊断信息：\n"
+                error_msg += f"   实验目录: {exp_dir}\n"
+                error_msg += f"   模型版本: {params.model_version}\n"
+                error_msg += f"   日志文件: {log_path}\n\n"
+                
+                error_msg += "🔍 可能原因：\n"
+                error_msg += "   1. 预处理阶段所有文件都被过滤掉了（检查日志中的'nan filtered'警告）\n"
+                error_msg += "   2. 文件路径配置错误\n"
+                error_msg += "   3. 数据文件损坏或格式不正确\n"
+                error_msg += "   4. SV模型路径不正确或模型加载失败（针对7-sv_cn目录）\n"
+                error_msg += "   5. 音频文件质量问题（采样率、时长、格式等）\n\n"
+                
+                error_msg += "💡 建议操作：\n"
+                error_msg += "   1. 检查预处理日志文件，查找错误和警告信息\n"
+                error_msg += "   2. 验证原始音频文件是否有效（使用音频播放器测试）\n"
+                error_msg += "   3. 确保至少有一些音频文件能够成功处理\n"
+                if "7-sv_cn" in empty_dirs or "7-sv_cn" in missing_files:
+                    error_msg += "   4. 检查SV模型路径是否正确，模型文件是否存在\n"
+                    error_msg += "   5. 查看预处理日志中SV特征提取步骤的错误信息\n"
+                
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"\n{'='*60}\n")
+                    logf.write(f"[验证失败] {error_msg}\n")
+                    logf.write(f"{'='*60}\n")
+                
+                raise ValueError(error_msg)
+            
+            # 检查2-name2text.txt是否有有效数据
+            text_file = s2_data_check["2-name2text.txt"]
+            with open(text_file, "r", encoding="utf-8") as f:
+                text_lines = [line.strip() for line in f if line.strip()]
+            
+            if len(text_lines) == 0:
+                error_msg = (
+                    f"SoVITS训练数据为空！文件 {text_file} 中没有有效数据。\n"
+                    f"请检查预处理阶段是否成功生成了文本特征。\n"
+                    f"文件路径: {text_file}\n"
+                    f"文件大小: {text_file.stat().st_size if text_file.exists() else 0} 字节"
+                )
+                with open(log_path, "a", encoding="utf-8") as logf:
+                    logf.write(f"\n[验证失败] {error_msg}\n")
+                raise ValueError(error_msg)
+            
+            # 验证通过，输出总结
+            with open(log_path, "a", encoding="utf-8") as logf:
+                logf.write(f"\n{'='*60}\n")
+                logf.write(f"[验证通过] SoVITS训练数据验证成功！\n")
+                logf.write(f"  文本数据: {len(text_lines)} 条\n")
+                logf.write(f"  32k音频文件: {len(wav32k_files)} 个\n")
+                logf.write(f"  HuBERT特征文件: {len(hubert_files)} 个\n")
+                if sv_dir:
+                    logf.write(f"  SV特征文件: {len(sv_files)} 个\n")
+                logf.write(f"{'='*60}\n")
+            
+            train_tasks[task_id]["message"] = f"数据验证通过：{len(text_lines)} 条文本数据，{len(wav32k_files)} 个音频文件，开始 SoVITS 模型训练..."
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise  # 重新抛出数据验证错误
+            logger.warning(f"验证SoVITS训练数据时出错（继续训练）: {e}")
+        
+        # 验证S2配置文件（确保使用官方参数）
+        s2_config_check = json.loads(s2_config_path.read_text(encoding="utf-8"))
+        s2_actual_batch_size = s2_config_check['train']['batch_size']
+        s2_actual_epochs = s2_config_check['train']['epochs']
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[S2配置验证] 实际使用的训练参数:\n")
+            f.write(f"  batch_size: {s2_actual_batch_size} (官方值: 8)\n")
+            f.write(f"  epochs: {s2_actual_epochs} (官方值: 8)\n")
+            f.write(f"  save_every_epoch: {s2_config_check['train'].get('save_every_epoch', 'N/A')} (官方值: 4)\n")
+            f.write(f"  fp16_run: {s2_config_check['train'].get('fp16_run', 'N/A')} (官方值: True)\n")
+            f.write(f"  segment_size: {s2_config_check['train'].get('segment_size', 'N/A')} (官方值: 20480)\n")
+            if s2_actual_batch_size != 8:
+                f.write(f"  ⚠️ 警告: batch_size不是官方值8！\n")
+            if s2_actual_epochs != 8 and not params.fast_mode:
+                f.write(f"  ⚠️ 警告: epochs不是官方值8！\n")
+            f.write(f"{'='*60}\n")
+        
+        s2_script = BASE_DIR / "GPT_SoVITS" / "s2_train.py"
+        # 使用之前设置的gpu_env（多卡格式，如"0,1,2,3"），如果没有则从环境变量获取
+        # 注意：gpu_env在1834-1847行已经设置，这里直接使用
+        cuda_device = gpu_env  # 使用之前设置的gpu_env（已经是多卡格式）
+        # 用于日志记录的第一个GPU索引
+        gpu_index = str(cuda_device).split(",")[0] if "," in str(cuda_device) else str(cuda_device).split("-")[0]
+        
+        # 优化配置：利用RTX 4090的24GB显存，提升训练速度
+        # 检查GPU显存是否充足（至少16GB空闲才使用优化配置）
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            use_optimized = False
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        parts = line.split(', ')
+                        if len(parts) >= 3:
+                            gpu_idx = int(parts[0])
+                            mem_used = int(parts[1])
+                            mem_total = int(parts[2])
+                            if gpu_idx == int(gpu_index):
+                                mem_free = mem_total - mem_used
+                                # 如果空闲显存 >= 16GB，使用优化配置
+                                use_optimized = mem_free >= 16384
+                                break
+        except:
+            use_optimized = False
+        
+        # 强制使用官方参数：batch_size=8，不进行任何动态调整
+        # 确保日志显示的参数与实际训练参数完全一致
+        official_batch_size = 8  # 官方值：batch_size=8
+        actual_batch_size = official_batch_size  # 强制使用官方值，不根据显存调整
+        
+        # 训练开始前检查GPU显存（仅用于日志记录，不用于调整参数）
+        actual_gpu_mem_free = 0
+        actual_gpu_mem_total = 0
+        actual_gpu_mem_used = 0
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        parts = line.split(', ')
+                        if len(parts) >= 3:
+                            gpu_idx = int(parts[0])
+                            mem_used = int(parts[1])
+                            mem_total = int(parts[2])
+                            if gpu_idx == int(gpu_index):
+                                actual_gpu_mem_free = mem_total - mem_used
+                                actual_gpu_mem_total = mem_total
+                                actual_gpu_mem_used = mem_used
+                                break
+        except:
+            pass
+        
+        # 记录显存信息（仅用于日志，不用于调整参数）
+        with open(log_path, "a", encoding="utf-8") as f:
+            if actual_gpu_mem_total > 0:
+                f.write(f"\n[训练前显存检查] GPU {gpu_index}: 总显存={actual_gpu_mem_total/1024:.2f}GB, "
+                       f"已用={actual_gpu_mem_used/1024:.2f}GB, 空闲={actual_gpu_mem_free/1024:.2f}GB\n")
+            else:
+                f.write(f"\n[训练前显存检查] GPU {gpu_index}: 无法获取显存信息\n")
+            f.write(f"[训练参数] 强制使用官方参数: batch_size={actual_batch_size}（不根据显存调整）\n")
+        
+        # 验证配置文件中的batch_size是否为官方值8
+        try:
+            s2_config = json.loads(s2_config_path.read_text(encoding="utf-8"))
+            config_batch_size = s2_config.get("train", {}).get("batch_size", official_batch_size)
+            if config_batch_size != official_batch_size:
+                # 如果配置文件中的batch_size不是官方值，强制更新为官方值
+                s2_config["train"]["batch_size"] = official_batch_size
+                s2_config_path.write_text(json.dumps(s2_config, ensure_ascii=False, indent=2), encoding="utf-8")
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"✅ 已强制更新配置文件batch_size: {config_batch_size} -> {official_batch_size}（官方值）\n")
+            else:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"✅ 配置文件batch_size={official_batch_size}（官方值，无需更新）\n")
+        except Exception as e:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"⚠️ 读取配置文件失败: {e}，将使用官方值batch_size={official_batch_size}\n")
+        
+        # 使用官方参数：batch_size=8，不根据显存调整
+        # 环境变量仅用于兼容性，实际batch_size由配置文件决定
+        # 使用多卡格式（逗号分隔，如"0,1,2,3"）
+        gpu_env_str = str(cuda_device).replace("-", ",")  # 确保是逗号分隔格式
+        conservative_env = {
+            "CUDA_VISIBLE_DEVICES": gpu_env_str,
+            "S2_SINGLE_PROCESS": "1",
+            "S2_DATA_WORKERS": "4" if use_optimized else "0",  # 显存充足时使用多线程
+            "S2_PREFETCH": "4" if use_optimized else "1",
+            "S2_BATCH": str(official_batch_size),  # 强制使用官方值8
+            "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:32,expandable_segments:True",
+            "S2_MIN_SAMPLES": "10",
+            "S2_SAMPLE_LIMIT": "15",
+        }
+        
+        # 记录使用的GPU信息
+        gpu_count = len(gpu_env_str.split(","))
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[S2训练] 使用 {gpu_count} 张GPU: {gpu_env_str}\n")
+        if use_optimized:
+            # 优化配置：增加workers和prefetch，提升数据加载速度
+            conservative_env["S2_DATA_WORKERS"] = str(min(8, os.cpu_count() or 4))  # 增加到8个workers
+            conservative_env["S2_PREFETCH"] = "8"  # 增加prefetch到8
+            print(f"[优化配置] SoVITS训练使用优化配置: batch_size={official_batch_size}（官方值）, workers={conservative_env['S2_DATA_WORKERS']}, prefetch={conservative_env['S2_PREFETCH']}")
+        else:
+            print(f"[保守配置] SoVITS训练使用保守配置: batch_size={official_batch_size}（官方值）, workers=0, prefetch=1")
+        
+        # 训练脚本启动前，清理GPU缓存（不调整参数）
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"✅ 已清理GPU缓存\n")
+        except Exception as e:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"⚠️ GPU缓存清理失败: {e}，将继续训练\n")
+        
+        # S2训练：使用官方参数，如果OOM则直接失败（不降低batch_size）
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[开始训练] 使用官方参数: batch_size={official_batch_size}, epochs=8\n")
+            f.write("注意: 如果出现OOM错误，请检查GPU显存是否充足（至少需要4GB空闲显存）\n")
+                
+        # 确保配置文件中的batch_size为官方值
+        try:
+            s2_config = json.loads(s2_config_path.read_text(encoding="utf-8"))
+            s2_config["train"]["batch_size"] = official_batch_size
+            s2_config_path.write_text(
+                json.dumps(s2_config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            conservative_env["S2_BATCH"] = str(official_batch_size)
+        except Exception as e:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"⚠️ 更新配置失败: {e}\n")
+                
+        # 直接执行训练，不进行重试（保持官方参数）
+        s2_base_cmd = [PYTHON_EXEC, "-s", str(s2_script), "--config", str(s2_config_path)]
+        s2_base_env = {
+            **conservative_env,
+            "S2_OUTDIR": str(exp_dir / f"logs_s2_{params.model_version}"),
+            "S2_SAVE_WEIGHT_DIR": str(
+                _get_versioned_path(
+                    "SoVITS_weight_version2root",
+                    params.model_version,
+                    "SoVITS_weights_v2Pro",
+                )
+            ),
+            "S2_NAME": exp_name,
+            # 默认走更快模式；若命中特定DDP未使用参数错误再自动兼容重试。
+            "S2_DDP_FIND_UNUSED_PARAMETERS": "0",
+        }
+
+        try:
+            _run_command(
+                task_id,
+                "SoVITS (s2) 训练",
+                s2_base_cmd,
+                log_path,
+                s2_base_env,
+            )
+        except RuntimeError as s2_err:
+            s2_err_text = str(s2_err)
+            retryable_unused_param_error = (
+                "Expected to have finished reduction in the prior iteration" in s2_err_text
+                or "find_unused_parameters=True" in s2_err_text
+            )
+            if not retryable_unused_param_error:
+                raise
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n[S2回退] 命中DDP未使用参数冲突，自动切换 find_unused_parameters=True 重试一次\n")
+
+            if task_id in train_tasks:
+                train_tasks[task_id]["status"] = "running"
+                train_tasks[task_id]["message"] = "SoVITS训练检测到DDP参数冲突，正在启用兼容模式重试..."
+
+            s2_retry_env = {**s2_base_env, "S2_DDP_FIND_UNUSED_PARAMETERS": "1"}
+            _run_command(
+                task_id,
+                "SoVITS (s2) 训练(兼容重试)",
+                s2_base_cmd,
+                log_path,
+                s2_retry_env,
+            )
+        # 记录S2训练完成时间
+        s2_duration = time.time() - s2_start_time
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[S2训练] SoVITS模型训练完成，耗时: {s2_duration/60:.2f} 分钟\n")
+
+        train_tasks[task_id]["progress"] = 95
+        train_tasks[task_id]["message"] = "训练完成，提取参考音频和文本..."
+        
+        # 从训练数据中提取参考音频与短提示词（用于推理）
+        ref_audio_path = None
+        ref_text = None
+        ref_language = params.language
+        try:
+            dataset_path_obj = Path(dataset_path)
+            text_files = [f for f in os.listdir(dataset_path) if f.endswith(".txt")]
+            text_files = _limit_sentence_txt_files(text_files, MAX_DATASET_SENTENCES)
+
+            candidates = []
+            import librosa
+            for txt_file in sorted(text_files):
+                try:
+                    txt_path = dataset_path_obj / txt_file
+                    text = txt_path.read_text(encoding="utf-8").strip()
+                    if not text:
+                        continue
+                    audio_file = os.path.splitext(txt_file)[0] + ".wav"
+                    audio_path = dataset_path_obj / audio_file
+                    if not audio_path.exists():
+                        continue
+
+                    audio, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+                    duration = len(audio) / max(1, sr)
+                    rms = float(np.sqrt(float(np.mean(np.square(audio))) + 1e-12))
+                    snippet = _pick_ref_text_snippet(text, max_chars=48)
+                    if not snippet:
+                        continue
+                    # 过滤近静音参考，避免训练后推理“有文件但没声音”。
+                    if rms < 0.0012:
+                        continue
+
+                    # 评分：优先 4-8 秒 + 10-40 字稳态提示词 + 较高RMS
+                    score = 0.0
+                    if 4.0 <= duration <= 8.0:
+                        score += 3.0
+                    elif 3.0 <= duration <= 10.0:
+                        score += 2.0
+                    elif 2.0 <= duration <= 12.0:
+                        score += 1.0
+
+                    n = len(snippet)
+                    if 10 <= n <= 40:
+                        score += 3.0
+                    elif 8 <= n <= 48:
+                        score += 2.0
+                    else:
+                        score += 1.0
+
+                    candidates.append((score, rms, abs(duration - 6.0), str(audio_path.resolve()), snippet))
+                except Exception as e:
+                    logger.warning(f"处理参考样本失败 {txt_file}: {str(e)}")
+
+            if candidates:
+                candidates.sort(key=lambda x: (x[0], x[1], -x[2]), reverse=True)
+                _score, _rms, _d, ref_audio_path, ref_text = candidates[0]
+            elif text_files:
+                # 兜底：使用第一条，但提示词强制裁短
+                txt_file = sorted(text_files)[0]
+                txt_path = dataset_path_obj / txt_file
+                raw_text = txt_path.read_text(encoding="utf-8").strip()
+                audio_file = os.path.splitext(txt_file)[0] + ".wav"
+                audio_path = dataset_path_obj / audio_file
+                if audio_path.exists():
+                    ref_audio_path = str(audio_path.resolve())
+                    ref_text = _pick_ref_text_snippet(raw_text, max_chars=40) or raw_text[:40]
+
+            if ref_audio_path and ref_text:
+                train_tasks[task_id]["ref_audio_path"] = ref_audio_path
+                train_tasks[task_id]["ref_text"] = ref_text
+                train_tasks[task_id]["ref_language"] = ref_language
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n参考音频已提取: {ref_audio_path}\n")
+                    f.write(f"参考文本(稳态短提示): {ref_text}\n")
+            else:
+                logger.warning("未能从训练数据中提取参考音频和文本")
+        except Exception as e:
+            logger.warning(f"提取参考音频和文本失败: {str(e)}")
+            import traceback
+            logger.warning(traceback.format_exc())
+
+        train_tasks[task_id]["progress"] = 96
+        train_tasks[task_id]["message"] = "训练完成，查找模型文件..."
+        
+        # 优先在训练输出目录中查找模型文件（user_models下的实际训练输出）
+        # 如果找不到，再回退到全局目录（用于预训练模型的快速体验）
+        # exp_dir 已经是 output_path/processed，避免重复拼接 processed/processed
+        s1_output_dir = exp_dir / f"logs_s1_{params.model_version}"
+        s2_output_dir = exp_dir / f"logs_s2_{params.model_version}"
+        
+        gpt_path = None
+        sovits_path = None
+        
+        # 查找GPT模型：优先在训练输出目录中查找
+        if s1_output_dir.exists():
+            ckpt_dir = s1_output_dir / "ckpt"
+            if ckpt_dir.exists():
+                all_ckpts = list(ckpt_dir.glob("*.ckpt"))
+                if all_ckpts:
+                    # 选择最新的ckpt文件
+                    gpt_path = max(all_ckpts, key=lambda p: p.stat().st_mtime)
+                    logger.info(f"[查找模型] 在训练输出目录找到GPT模型: {gpt_path}")
+        
+        # 如果训练输出目录中没找到，回退到全局目录
+        if gpt_path is None:
+            gpt_weight_dir = _get_versioned_path("GPT_weight_version2root", params.model_version, "GPT_weights_v2Pro")
+            try:
+                gpt_path = _find_latest_weight(gpt_weight_dir, f"{exp_name}*.ckpt", "GPT 权重")
+                logger.info(f"[查找模型] 在全局目录找到GPT模型: {gpt_path}")
+            except FileNotFoundError:
+                # 如果找不到，尝试查找所有ckpt文件
+                all_ckpts = list(gpt_weight_dir.glob("*.ckpt"))
+                if all_ckpts:
+                    gpt_path = max(all_ckpts, key=lambda p: p.stat().st_mtime)
+                    logger.info(f"[查找模型] 在全局目录找到GPT模型（备用）: {gpt_path}")
+                else:
+                    raise FileNotFoundError(f"未找到GPT模型文件，已检查: {s1_output_dir} 和 {gpt_weight_dir}")
+        
+        # 查找SoVITS模型：优先在训练输出目录中查找
+        if s2_output_dir.exists():
+            # SoVITS模型文件直接保存在s2_output_dir下，文件名格式为 G_*.pth 和 D_*.pth
+            # 推理时只需要G_*.pth（生成器模型）
+            all_pths = list(s2_output_dir.glob("G_*.pth"))
+            if all_pths:
+                # 选择最新的G_*.pth文件
+                sovits_path = max(all_pths, key=lambda p: p.stat().st_mtime)
+                logger.info(f"[查找模型] 在训练输出目录找到SoVITS模型: {sovits_path}")
+        
+        # 如果训练输出目录中没找到，回退到全局目录
+        if sovits_path is None:
+            sovits_weight_dir = _get_versioned_path("SoVITS_weight_version2root", params.model_version, "SoVITS_weights_v2Pro")
+            named_candidates = list(sovits_weight_dir.glob(f"{exp_name}*.pth"))
+            named_best = _pick_latest_sovits_generator_checkpoint(named_candidates)
+            if named_best is not None:
+                sovits_path = named_best
+                logger.info(f"[查找模型] 在全局目录找到SoVITS模型: {sovits_path}")
+            else:
+                # 如果找不到同名生成器权重，尝试全局选择最新的生成器权重（排除 D_* 判别器）。
+                all_pths = list(sovits_weight_dir.glob("*.pth"))
+                backup_best = _pick_latest_sovits_generator_checkpoint(all_pths)
+                if backup_best is not None:
+                    sovits_path = backup_best
+                    logger.info(f"[查找模型] 在全局目录找到SoVITS模型（备用）: {sovits_path}")
+                else:
+                    raise FileNotFoundError(f"未找到可推理的SoVITS生成器模型，已检查: {s2_output_dir} 和 {sovits_weight_dir}")
+        
+        # 检查GPT模型格式，如果是PyTorch Lightning checkpoint，转换为精简格式
+        try:
+            # 尝试加载模型，如果文件损坏或格式不对，跳过转换
+            gpt_checkpoint = None
+            try:
+                gpt_checkpoint = torch.load(str(gpt_path), map_location="cpu", weights_only=False)
+            except Exception as load_error:
+                logger.warning(
+                    f"[模型转换] GPT模型文件加载失败（可能已为精简格式或文件损坏）: {str(load_error)}，跳过转换"
+                )
+
+            # 检查是否是PyTorch Lightning checkpoint（包含state_dict而不是weight）
+            if gpt_checkpoint and "state_dict" in gpt_checkpoint and "weight" not in gpt_checkpoint:
+                logger.info("[模型转换] 检测到PyTorch Lightning checkpoint，转换为精简格式...")
+                # 提取weight和config
+                from collections import OrderedDict
+                converted_gpt = OrderedDict()
+                converted_gpt["weight"] = OrderedDict()
+                
+                # 从state_dict中提取模型权重（去掉"model."前缀）
+                state_dict = gpt_checkpoint["state_dict"]
+                for key, value in state_dict.items():
+                    # PyTorch Lightning会在key前加上"model."前缀，需要去掉
+                    if key.startswith("model."):
+                        new_key = key[6:]  # 去掉"model."前缀
+                    else:
+                        new_key = key
+                    # 转换为half精度以匹配官方格式
+                    if value.dtype == torch.float32:
+                        converted_gpt["weight"][new_key] = value.half()
+                    else:
+                        converted_gpt["weight"][new_key] = value
+                
+                # 提取config（从hyper_parameters中）
+                if "hyper_parameters" in gpt_checkpoint:
+                    converted_gpt["config"] = gpt_checkpoint["hyper_parameters"]
+                else:
+                    # 如果没有hyper_parameters，尝试从其他地方获取config
+                    logger.warning("[模型转换] 未找到config，使用默认配置")
+                    converted_gpt["config"] = {}
+                
+                # 添加info
+                epoch = gpt_checkpoint.get("epoch", 0)
+                converted_gpt["info"] = f"GPT-e{int(epoch) + 1}"
+                
+                # 保存转换后的模型（覆盖原文件）
+                from GPT_SoVITS.process_ckpt import my_save
+                my_save(converted_gpt, str(gpt_path))
+                logger.info(f"[模型转换] GPT模型已转换为精简格式: {gpt_path}")
+                
+                # 更新文件大小信息
+                new_size = gpt_path.stat().st_size / 1024 / 1024
+                logger.info(f"[模型转换] 转换后文件大小: {new_size:.2f} MB")
+        except Exception as e:
+            logger.warning(f"[模型转换] GPT模型转换失败: {str(e)}，将使用原始格式")
+            import traceback
+            logger.warning(traceback.format_exc())
+        
+        # 检查SoVITS模型格式，如果是完整checkpoint，转换为精简格式
+        try:
+            # 尝试加载模型，如果文件损坏或格式不对，跳过转换
+            sovits_checkpoint = None
+            try:
+                sovits_checkpoint = torch.load(str(sovits_path), map_location="cpu", weights_only=False)
+            except Exception as load_error:
+                logger.warning(
+                    f"[模型转换] SoVITS模型文件加载失败（可能已为精简格式或文件损坏）: {str(load_error)}，跳过转换"
+                )
+
+            # 检查是否是完整checkpoint（包含model而不是weight）
+            if sovits_checkpoint and "model" in sovits_checkpoint and "weight" not in sovits_checkpoint:
+                logger.info("[模型转换] 检测到完整SoVITS checkpoint，转换为精简格式...")
+                # 提取weight和config
+                from collections import OrderedDict
+                converted_sovits = OrderedDict()
+                converted_sovits["weight"] = OrderedDict()
+                
+                # 从model中提取模型权重
+                model_state = sovits_checkpoint["model"]
+                for key, value in model_state.items():
+                    # 跳过enc_q（量化器），与官方格式保持一致
+                    if "enc_q" in key:
+                        continue
+                    # 转换为half精度以匹配官方格式
+                    if value.dtype == torch.float32:
+                        converted_sovits["weight"][key] = value.half()
+                    else:
+                        converted_sovits["weight"][key] = value
+                
+                # 提取config（需要从训练配置中获取）
+                # 尝试从s2_config_path读取配置
+                s2_config_path = exp_dir / "tmp_s2.json"
+                if s2_config_path.exists():
+                    with open(s2_config_path, "r", encoding="utf-8") as f:
+                        s2_config = json.load(f)
+                    converted_sovits["config"] = s2_config
+                else:
+                    logger.warning("[模型转换] 未找到s2_config，使用默认配置")
+                    converted_sovits["config"] = {}
+                
+                # 添加info
+                iteration = sovits_checkpoint.get("iteration", 0)
+                epoch = sovits_checkpoint.get("epoch", 0)
+                converted_sovits["info"] = f"{int(epoch)}epoch_{int(iteration)}iteration"
+                
+                # 保存转换后的模型（覆盖原文件）
+                from GPT_SoVITS.process_ckpt import my_save2
+                my_save2(converted_sovits, str(sovits_path), params.model_version)
+                logger.info(f"[模型转换] SoVITS模型已转换为精简格式: {sovits_path}")
+                
+                # 更新文件大小信息
+                new_size = sovits_path.stat().st_size / 1024 / 1024
+                logger.info(f"[模型转换] 转换后文件大小: {new_size:.2f} MB")
+        except Exception as e:
+            logger.warning(f"[模型转换] SoVITS模型转换失败: {str(e)}，将使用原始格式")
+            import traceback
+            logger.warning(traceback.format_exc())
+        
+        train_tasks[task_id]["model_path"] = str(exp_dir)
+        train_tasks[task_id]["gpt_path"] = str(gpt_path)
+        train_tasks[task_id]["sovits_path"] = str(sovits_path)
+        train_tasks[task_id]["version"] = params.model_version
+        
+        # 验证生成的模型文件
+        # torch已在文件顶部导入，直接使用即可
+        
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[模型验证] 开始验证训练生成的模型文件...\n")
+            f.write(f"{'='*60}\n")
+            
+            # 验证GPT模型
+            gpt_valid = False
+            if gpt_path.exists():
+                gpt_size = gpt_path.stat().st_size
+                f.write(f"✅ GPT模型文件存在: {gpt_path}\n")
+                f.write(f"   文件大小: {gpt_size / 1024 / 1024:.2f} MB\n")
+                
+                # 尝试加载模型验证
+                try:
+                    checkpoint = torch.load(str(gpt_path), map_location="cpu", weights_only=False)
+                    if isinstance(checkpoint, dict) and "weight" in checkpoint and "config" in checkpoint:
+                        f.write(f"   ✅ 模型结构验证通过（包含weight和config）\n")
+                        gpt_valid = True
+                    else:
+                        f.write(f"   ⚠️ 警告: 模型文件结构不完整（缺少weight或config）\n")
+                        if isinstance(checkpoint, dict):
+                            f.write(f"   检查点键: {list(checkpoint.keys())[:10]}\n")
+                        else:
+                            f.write(f"   检查点类型: {type(checkpoint)}\n")
+                except Exception as e:
+                    f.write(f"   ❌ 模型加载失败: {str(e)}\n")
+                    import traceback
+                    f.write(f"   错误详情: {traceback.format_exc()}\n")
+            else:
+                f.write(f"❌ GPT模型文件不存在: {gpt_path}\n")
+            
+            # 验证SoVITS模型
+            sovits_valid = False
+            if sovits_path.exists():
+                # 使用正确的加载方式验证SoVITS模型（v2Pro使用特殊格式）
+                sovits_checkpoint = None
+                try:
+                    from GPT_SoVITS.process_ckpt import load_sovits_new
+                    sovits_checkpoint = load_sovits_new(str(sovits_path))
+                    if not isinstance(sovits_checkpoint, dict) or "weight" not in sovits_checkpoint:
+                        raise ValueError("SoVITS模型结构不正确：缺少weight键")
+                    sovits_size = sovits_path.stat().st_size
+                    f.write(f"✅ SoVITS模型文件存在: {sovits_path}\n")
+                    f.write(f"   文件大小: {sovits_size / 1024 / 1024:.2f} MB\n")
+                    
+                    # 验证模型结构
+                    weight_count = len(sovits_checkpoint["weight"])
+                    f.write(f"   ✅ 模型结构验证通过（包含{weight_count}个权重参数）\n")
+                    if "config" in sovits_checkpoint:
+                        f.write(f"   ✅ 模型配置存在\n")
+                    if "info" in sovits_checkpoint:
+                        f.write(f"   ✅ 训练信息: {sovits_checkpoint.get('info', 'N/A')}\n")
+                    sovits_valid = True
+                except Exception as e:
+                    f.write(f"   ❌ 模型加载失败: {str(e)}\n")
+                    import traceback
+                    f.write(f"   错误详情: {traceback.format_exc()}\n")
+                    sovits_valid = False
+            else:
+                f.write(f"❌ SoVITS模型文件不存在: {sovits_path}\n")
+            
+            f.write(f"\n{'='*60}\n")
+            if gpt_valid and sovits_valid:
+                f.write(f"✅ 模型验证通过！GPT和SoVITS模型文件均有效。\n")
+                f.write(f"{'='*60}\n")
+            else:
+                f.write(f"⚠️ 模型验证警告：\n")
+                if not gpt_valid:
+                    f.write(f"   - GPT模型文件无效或无法加载\n")
+                if not sovits_valid:
+                    f.write(f"   - SoVITS模型文件无效或无法加载\n")
+                f.write(f"{'='*60}\n")
+        
+        # 停止损失监控并生成分析报告
+        if loss_monitor:
+            try:
+                loss_monitor.stop_monitoring()
+                from training_loss_monitor import analyze_training_loss
+                loss_analysis = analyze_training_loss(loss_monitor.loss_file)
+                
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"[训练损失分析报告]\n")
+                    f.write(f"{'='*60}\n")
+                    f.write(f"损失数据文件: {loss_monitor.loss_file}\n")
+                    
+                    if "S2训练损失" in loss_analysis:
+                        s2_info = loss_analysis["S2训练损失"]
+                        f.write(f"\nS2 (SoVITS) 训练损失:\n")
+                        f.write(f"  总记录数: {s2_info.get('总记录数', 0)}\n")
+                        f.write(f"  训练轮次: {s2_info.get('训练轮次', 0)}\n")
+                        f.write(f"  Epochs: {s2_info.get('epochs', 0)}\n")
+                        
+                        if "趋势" in s2_info:
+                            trend = s2_info["趋势"]
+                            f.write(f"\n损失趋势:\n")
+                            f.write(f"  Generator Loss: {trend['g_loss']['初始']:.4f} -> {trend['g_loss']['最终']:.4f} ({trend['g_loss']['趋势']})\n")
+                            f.write(f"  Mel Loss: {trend['mel_loss']['初始']:.4f} -> {trend['mel_loss']['最终']:.4f} ({trend['mel_loss']['趋势']})\n")
+                        
+                        if "epoch_summaries" in s2_info and s2_info["epoch_summaries"]:
+                            f.write(f"\n各Epoch平均损失:\n")
+                            for epoch_summary in s2_info["epoch_summaries"][:10]:  # 只显示前10个epoch
+                                f.write(f"  Epoch {epoch_summary['epoch']:2d}: G={epoch_summary['avg_g_loss']:.4f}, "
+                                       f"Mel={epoch_summary['avg_mel_loss']:.4f}, D={epoch_summary['avg_d_loss']:.4f}\n")
+                    
+                    f.write(f"{'='*60}\n")
+                    f.write(f"提示: 使用以下命令查看详细损失分析:\n")
+                    f.write(f"  python training_loss_monitor.py analyze {loss_monitor.loss_file}\n")
+                    f.write(f"{'='*60}\n")
+                
+                logger.info(f"[损失监控] 训练损失分析完成: {loss_monitor.loss_file}")
+            except Exception as e:
+                logger.warning(f"[损失监控] 生成损失分析报告失败: {e}")
+        # 训练后强制自检：不通过则判定失败，并且不注册到声音库。
+        gpt_self_ok, gpt_self_msg = _validate_gpt_model_file(gpt_path)
+        sovits_self_ok, sovits_self_msg = _validate_sovits_model_file(sovits_path, version=params.model_version)
+        ref_self_ok = bool(ref_audio_path and os.path.exists(str(ref_audio_path)) and str(ref_text or "").strip())
+        ref_self_msg = "参考信息通过"
+        if not ref_self_ok:
+            ref_self_msg = "参考音频或参考文本无效，注册后可能无法正常推理"
+
+        self_check_passed = bool(gpt_self_ok and sovits_self_ok and ref_self_ok)
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[训练后自检] GPT: {'通过' if gpt_self_ok else '失败'} - {gpt_self_msg}\n")
+            f.write(f"[训练后自检] SoVITS: {'通过' if sovits_self_ok else '失败'} - {sovits_self_msg}\n")
+            f.write(f"[训练后自检] 参考信息: {'通过' if ref_self_ok else '失败'} - {ref_self_msg}\n")
+
+        train_tasks[task_id]["self_check_passed"] = self_check_passed
+
+        if not self_check_passed:
+            train_tasks[task_id]["status"] = "failed"
+            train_tasks[task_id]["progress"] = 100
+            train_tasks[task_id]["message"] = "训练未通过模型自检，未注册音色，请重试训练。"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n[训练后自检] 未通过，已阻止注册到声音库。\n")
+
+            # 自检失败时删除本次异常 SoVITS 产物，避免出现在后续流程中。
+            try:
+                _cleanup_user_stale_sovits_weights(
+                    user_id=params.user_id,
+                    version=params.model_version,
+                    keep_paths=set(),
+                    current_task_id=task_id,
+                    log_path=log_path,
+                    remove_only_invalid=False,
+                )
+            except Exception as cleanup_err:
+                logger.warning(f"[SoVITS清理] 自检失败后清理异常产物失败: {cleanup_err}")
+            return
+
+        train_tasks[task_id]["status"] = "running"
+        train_tasks[task_id]["progress"] = 99
+        train_tasks[task_id]["message"] = "训练完成，正在注册音色..."
+
+        # 注册模型到 VOICE_LIBRARY（使用延迟导入避免循环依赖）
+        registration_ok = False
+        registration_error = ""
+        _skip_reg = os.environ.get("TRAIN_SKIP_VOICE_REGISTRATION", "").strip().lower() in ("1", "true", "yes")
+        if _skip_reg:
+            registration_ok = True
+            train_tasks[task_id]["status"] = "completed"
+            train_tasks[task_id]["progress"] = 100
+            train_tasks[task_id]["message"] = "训练完成（已跳过音色注册，TRAIN_SKIP_VOICE_REGISTRATION=1）。"
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n[TRAIN_SKIP_VOICE_REGISTRATION] 已跳过 wx_api 音色注册（CLI/性能测试用）。\n")
+        if not _skip_reg:
+            try:
+                # 延迟导入，避免循环依赖
+                import importlib
+                # 从 wx_api 模块导入，而不是 api 模块
+                try:
+                    wx_api_module = importlib.import_module('modules.tts_backend.wx_api')
+                except Exception:
+                    wx_api_module = importlib.import_module('wx_api')
+                register_voice_model = wx_api_module.register_voice_model
+                generate_voice_id = wx_api_module.generate_voice_id
+
+                # 生成 voice_id
+                model_name = train_tasks[task_id].get("model_name", f"voice_{task_id[:8]}")
+                voice_id = generate_voice_id()
+
+                # 获取场景和情感信息
+                scene = train_tasks[task_id].get("scene", "")
+                emotion = train_tasks[task_id].get("emotion", "")
+
+                # 获取参考音频和文本（从训练任务中）
+                ref_audio_path = train_tasks[task_id].get("ref_audio_path")
+                ref_text = train_tasks[task_id].get("ref_text")
+                ref_language = train_tasks[task_id].get("ref_language", params.language)
+
+                # 注册模型（包含参考音频和文本）
+                registered = register_voice_model(
+                    voice_id=voice_id,
+                    model_name=model_name,
+                    gpt_path=str(gpt_path),
+                    sovits_path=str(sovits_path),
+                    scene=scene,
+                    emotion=emotion,
+                    trained_at=time.strftime('%Y-%m-%dT%H:%M:%S'),
+                    ref_audio_path=ref_audio_path,
+                    ref_text=ref_text,
+                    ref_language=ref_language,
+                    model_type="user_trained",
+                    owner_user_id=params.user_id,
+                )
+
+                if registered:
+                    registration_ok = True
+                    train_tasks[task_id]["voice_id"] = voice_id
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n模型已注册：voice_id={voice_id}, name={model_name}\n")
+
+                    # 只保留本次有效训练产物，清理该用户历史 SoVITS 权重。
+                    try:
+                        keep_paths = {str(sovits_path)} | _collect_registered_sovits_paths_for_user(params.user_id)
+                        _cleanup_user_stale_sovits_weights(
+                            user_id=params.user_id,
+                            version=params.model_version,
+                            keep_paths=keep_paths,
+                            current_task_id=task_id,
+                            log_path=log_path,
+                            remove_only_invalid=False,
+                        )
+                    except Exception as cleanup_keep_err:
+                        logger.warning(f"[SoVITS清理] 保留本次产物时清理旧文件失败: {cleanup_keep_err}")
+                else:
+                    registration_error = "模型注册失败"
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n警告：模型注册失败\n")
+            except Exception as e:
+                import traceback
+                registration_error = str(e)
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n警告：注册模型时出错：{str(e)}\n")
+                    f.write(f"错误详情：{traceback.format_exc()}\n")
+                print(f"[WARNING] 注册模型失败: {str(e)}")
+
+        if registration_ok:
+            train_tasks[task_id]["status"] = "completed"
+            train_tasks[task_id]["progress"] = 100
+            if not _skip_reg:
+                train_tasks[task_id]["message"] = "训练完成！模型已注册，可直接应用。"
+        else:
+            train_tasks[task_id]["status"] = "failed"
+            train_tasks[task_id]["progress"] = 100
+            train_tasks[task_id]["message"] = f"训练完成但注册失败: {registration_error or '未知错误'}"
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n训练完成：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"GPT模型：{gpt_path}\n")
+            f.write(f"SoVITS模型：{sovits_path}\n")
+        
+    except Exception as e:
+        error_msg = str(e)
+        train_tasks[task_id]["status"] = "failed"
+        train_tasks[task_id]["message"] = f"训练失败: {error_msg}"
+        train_tasks[task_id]["progress"] = train_tasks[task_id].get("progress", 0)
+        
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n训练失败：{error_msg}\n")
+            try:
+                # 确保traceback可用
+                import traceback as tb
+                f.write(f"错误详情：{tb.format_exc()}\n")
+            except Exception as tb_err:
+                f.write(f"错误类型：{type(e).__name__}\n")
+                f.write(f"错误信息：{str(e)}\n")
+                f.write(f"无法获取详细堆栈：{str(tb_err)}\n")
+        
+        # 清理训练失败的缓存文件（仅在预处理阶段失败时清理）
+        # 如果已经进入GPT或SoVITS训练阶段，说明预处理成功，不应该清理
+        try:
+            if 'exp_dir' in locals() and exp_dir:
+                # 检查是否已经进入GPT训练阶段（通过检查是否有GPT权重目录）
+                gpt_weight_dir = _get_versioned_path("GPT_weight_version2root", train_tasks[task_id].get("version", "v2Pro"), "GPT_weights_v2Pro")
+                gpt_trained = False
+                if gpt_weight_dir.exists():
+                    # 检查是否有训练好的GPT模型
+                    gpt_files = list(gpt_weight_dir.glob(f"{exp_name}*.ckpt"))
+                    if gpt_files:
+                        gpt_trained = True
+                
+                # 只有在预处理阶段失败时才清理缓存
+                # 如果GPT或SoVITS训练失败，保留预处理结果以便重新训练
+                current_progress = train_tasks[task_id].get("progress", 0)
+                # 预处理阶段：0-60%（BERT、HuBERT、SV、Semantic提取）
+                # GPT训练阶段：60-80%
+                # SoVITS训练阶段：80-100%
+                if current_progress < 60:  # 预处理阶段失败
+                    _cleanup_failed_training_cache(exp_dir, keep_logs=True)
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n已清理训练失败的缓存文件（预处理阶段失败，progress={current_progress}%）\n")
+                else:  # GPT或SoVITS训练失败
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n保留预处理结果（GPT/SoVITS训练失败，progress={current_progress}%，可重新训练）\n")
+        except Exception as cleanup_err:
+            print(f"清理缓存失败: {cleanup_err}")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"清理缓存失败: {cleanup_err}\n")
+        
+        print(f"[ERROR] 训练任务 {task_id} 失败: {error_msg}")
+    finally:
+        _r_fin = _train_phase_get()
+        if _r_fin is not None:
+            try:
+                _st = train_tasks.get(task_id, {}).get("status", "")
+            except Exception:
+                _st = ""
+            _r_fin.emit("run_finished_wall", _r_fin.elapsed(), final_task_status=_st)
+        _train_phase_set(None)
+
+
+# ==================== 缓存清理函数 ====================
+def _cleanup_failed_training_cache(exp_dir: Path, keep_logs: bool = True):
+    """清理训练失败时的缓存文件
+    
+    Args:
+        exp_dir: 实验目录路径（processed目录）
+        keep_logs: 是否保留日志文件（默认True）
+    """
+    if not exp_dir or not exp_dir.exists():
+        return
+    
+    cleanup_dirs = [
+        "1-bert",           # BERT特征
+        "2-name2text",      # 文本特征目录
+        "3-bert",           # BERT特征（另一个目录）
+        "4-cnhubert",       # HuBERT特征
+        "5-wav32k",         # 32k音频
+        "6-name2semantic",  # 语义token
+    ]
+    
+    cleanup_files = [
+        "2-name2text.txt",
+        "6-name2semantic.tsv",
+        "6-name2semantic-0.tsv",
+    ]
+    
+    print(f"清理训练失败缓存: {exp_dir}")
+    
+    # 清理目录
+    for dir_name in cleanup_dirs:
+        dir_path = exp_dir / dir_name
+        if dir_path.exists():
+            try:
+                shutil.rmtree(dir_path)
+                print(f"  已删除目录: {dir_name}")
+            except Exception as e:
+                print(f"  删除目录失败 {dir_name}: {e}")
+    
+    # 清理文件
+    for file_name in cleanup_files:
+        file_path = exp_dir / file_name
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                print(f"  已删除文件: {file_name}")
+            except Exception as e:
+                print(f"  删除文件失败 {file_name}: {e}")
+    
+    # 保留日志文件
+    if keep_logs:
+        log_files = list(exp_dir.glob("*.log"))
+        for log_file in log_files:
+            print(f"  保留日志文件: {log_file.name}")
+
+
+# ==================== 进程清理函数 ====================
+def cleanup_all_processes():
+    """清理所有活跃的训练进程，释放GPU资源"""
+    print("正在清理所有训练进程...")
+    killed_count = 0
+    
+    # 清理注册的进程
+    for task_id, process in list(active_processes.items()):
+        try:
+            if process.poll() is None:  # 进程还在运行
+                print(f"  终止任务 {task_id} 的进程 (PID: {process.pid})")
+                try:
+                    process.terminate()
+                    time.sleep(1)
+                    if process.poll() is None:
+                        process.kill()  # 强制终止
+                    killed_count += 1
+                except Exception as e:
+                    print(f"    终止进程失败: {e}")
+        except Exception as e:
+            print(f"  检查进程状态失败 {task_id}: {e}")
+    
+    # 清空进程列表
+    active_processes.clear()
+    
+    # 清理所有训练相关的Python进程（包括子进程）
+    try:
+        import psutil
+        current_pid = os.getpid()
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                if cmdline and any('prepare_datasets' in str(c) or 's1_train.py' in str(c) or 's2_train.py' in str(c) for c in cmdline):
+                    if proc.info['pid'] != current_pid:
+                        print(f"  终止训练子进程 (PID: {proc.info['pid']})")
+                        proc.terminate()
+                        time.sleep(0.5)
+                        if proc.is_running():
+                            proc.kill()
+                        killed_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+    except ImportError:
+        # 如果没有psutil，使用subprocess查找
+        try:
+            result = subprocess.run(
+                ['pgrep', '-f', 'prepare_datasets|s1_train.py|s2_train.py'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                for pid_str in result.stdout.strip().split('\n'):
+                    if pid_str:
+                        try:
+                            pid = int(pid_str)
+                            if pid != os.getpid():
+                                print(f"  终止训练子进程 (PID: {pid})")
+                                os.kill(pid, 15)  # SIGTERM
+                                time.sleep(0.5)
+                                try:
+                                    os.kill(pid, 9)  # SIGKILL if still running
+                                except:
+                                    pass
+                                killed_count += 1
+                        except (ValueError, ProcessLookupError, PermissionError):
+                            pass
+        except:
+            pass
+    
+    # 清理GPU缓存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("  GPU缓存已清理")
+    
+    print(f"清理完成，共终止 {killed_count} 个进程")
+    return killed_count
+
+# ==================== 导出列表 ====================
+# 确保所有需要的函数和变量都可以被 api.py 导入
+__all__ = [
+    "train_tasks",
+    "TrainParams",
+    "model_versions",
+    "get_dict_language",
+    "run_training",
+    "DATASET_DIR",
+    "TRAIN_OUTPUT_DIR",
+    "TRAIN_LOG_DIR",
+    "BASE_DIR",
+    "PYTHON_EXEC",
+    "_create_dataset_list",
+    "_run_prepare_steps",
+    "_build_s1_config",
+    "_build_s2_config",
+    "cleanup_all_processes",
+    "active_processes",
+]

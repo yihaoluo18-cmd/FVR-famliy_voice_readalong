@@ -10,8 +10,8 @@ from typing import Any, Dict, Optional, Tuple
 
 BASE_URL = os.environ.get("QA_BASE_URL", "http://127.0.0.1:9880").rstrip("/")
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-VOICE_LIBRARY_PATH = os.path.join(ROOT_DIR, "modules", "tts_backend", "data", "voice_library.json")
-REPORT_DIR = os.path.join(ROOT_DIR, "train", "runtime", "qa_reports")
+VOICE_LIBRARY_PATH = os.path.join(ROOT_DIR, "voice_library.json")
+REPORT_DIR = os.path.join(ROOT_DIR, "runtime", "qa_reports")
 NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 

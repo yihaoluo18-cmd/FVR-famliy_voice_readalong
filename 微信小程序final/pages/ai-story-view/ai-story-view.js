@@ -1,4 +1,5 @@
 const app = getApp();
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 Page({
   data: {
@@ -164,7 +165,7 @@ Page({
     const t = String(text || '').trim();
     if (!t) return '';
 
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880';
+    const base = resolveApiBase(app);
     const voiceId = String(resolvedVoiceId || this._resolveVoiceId() || 'voice_001').trim();
     const q = [
       `voice_id=${encodeURIComponent(voiceId)}`,

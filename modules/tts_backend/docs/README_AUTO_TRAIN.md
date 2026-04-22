@@ -77,7 +77,11 @@ python modules/tts_backend/training/auto_train_infer.py \
 #### 方式二：使用API
 
 ```bash
-./modules/tts_backend/scripts/start_api_v2.sh
+# 推荐：使用根目录唯一的一键启动脚本启动后端（含静态资源/训练/推理等整合逻辑）
+./start_wx_api.sh --wx-only
+
+# 兼容：仅启动 api_v2（旧封装入口）
+# ./env/start_api.sh
 ```
 
 然后通过API接口调用推理功能。
@@ -255,7 +259,11 @@ GPT_weights_v2Pro/
 
 2. **API方式**（适合集成）：
    ```bash
-   ./modules/tts_backend/scripts/start_api_v2.sh
+   # 推荐：使用根目录唯一的一键启动脚本
+   ./start_wx_api.sh --wx-only
+
+   # 兼容：仅启动 api_v2（旧封装入口）
+   # ./env/start_api.sh
    ```
    然后通过HTTP API调用推理功能。
 

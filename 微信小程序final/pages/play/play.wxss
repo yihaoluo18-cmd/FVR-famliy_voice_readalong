@@ -143,6 +143,54 @@
   margin: 0 auto;
 }
 
+.ride-notes-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.ride-note {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44rpx;
+  height: 44rpx;
+  margin-left: -22rpx;
+  margin-top: -22rpx;
+  opacity: 0;
+  transform: rotate(calc(var(--a) + var(--ferris))) translateY(calc(-1 * var(--r))) translateY(0);
+  transform-origin: center center;
+  animation: rideNoteFlicker 3.2s ease-in-out infinite;
+  animation-delay: var(--delay);
+  filter: drop-shadow(0 12rpx 18rpx rgba(232, 121, 169, 0.18));
+  will-change: transform, opacity;
+}
+
+.ride-note-glyph {
+  display: block;
+  font-size: var(--size);
+  line-height: 44rpx;
+  text-align: center;
+  color: rgba(232, 121, 169, 0.72);
+  transform: translateY(calc(-1 * var(--drift)));
+  animation: rideNoteDrift 1.9s ease-in-out infinite;
+  animation-delay: calc(var(--delay) + 120ms);
+}
+
+@keyframes rideNoteFlicker {
+  0% { opacity: 0; }
+  15% { opacity: 0.22; }
+  38% { opacity: 0.58; }
+  68% { opacity: 0.18; }
+  100% { opacity: 0; }
+}
+
+@keyframes rideNoteDrift {
+  0%, 100% { transform: translateY(calc(-1 * var(--drift))) translateX(0) rotate(-6deg); }
+  50% { transform: translateY(calc(-1 * (var(--drift) + 10rpx))) translateX(10rpx) rotate(6deg); }
+}
+
 .ride-shimmer {
   position: absolute;
   left: 50%;
@@ -355,6 +403,44 @@
     0 8rpx 14rpx rgba(161, 98, 7, 0.3);
 }
 
+/* 每舱下方的牵引绳 + 挂载星星 */
+.ferris-cabin-tether {
+  width: 4rpx;
+  height: 14rpx;
+  margin-top: 2rpx;
+  border-radius: 2rpx;
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.95), rgba(100, 116, 139, 0.95));
+  box-shadow: 0 2rpx 6rpx rgba(15, 23, 42, 0.14);
+}
+
+.ferris-cabin-hanging {
+  margin-top: 2rpx;
+  width: 28rpx;
+  height: 28rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2rpx solid rgba(252, 231, 243, 0.95);
+  box-shadow:
+    0 10rpx 18rpx rgba(232, 121, 169, 0.18),
+    inset 0 2rpx 6rpx rgba(255, 255, 255, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: top center;
+  animation: cabinHangSway 1.6s ease-in-out infinite;
+}
+
+.ferris-cabin-hanging-star {
+  font-size: 18rpx;
+  line-height: 1;
+  transform: translateY(-0.5rpx);
+}
+
+@keyframes cabinHangSway {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+}
+
 .ferris-cabin-window {
   position: absolute;
   top: 12rpx;
@@ -470,6 +556,94 @@
   box-shadow: 0 8rpx 20rpx rgba(157, 62, 110, 0.25);
 }
 
+/* 地面：承接掉落星星 */
+.ride-ground {
+  position: relative;
+  width: 520rpx;
+  height: 120rpx;
+  margin: 10rpx auto 0;
+  z-index: 2;
+}
+
+.ride-ground-deck {
+  position: absolute;
+  left: 50%;
+  bottom: 26rpx;
+  width: 520rpx;
+  height: 44rpx;
+  margin-left: -260rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(180deg, rgba(252, 231, 243, 0.95), rgba(244, 194, 212, 0.95));
+  border: 2rpx solid rgba(255, 255, 255, 0.85);
+  box-shadow:
+    0 16rpx 32rpx rgba(190, 24, 93, 0.14),
+    inset 0 2rpx 8rpx rgba(255, 255, 255, 0.75);
+}
+
+.ride-ground-shadow {
+  position: absolute;
+  left: 50%;
+  bottom: 14rpx;
+  width: 460rpx;
+  height: 22rpx;
+  margin-left: -230rpx;
+  border-radius: 50%;
+  background: rgba(244, 194, 212, 0.26);
+  filter: blur(10rpx);
+}
+
+.ride-ground-stars {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: auto;
+}
+
+.ground-star {
+  position: absolute;
+  bottom: 54rpx;
+  width: 56rpx;
+  height: 56rpx;
+  margin-left: -28rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.86);
+  border: 2rpx solid rgba(252, 231, 243, 0.95);
+  box-shadow:
+    0 10rpx 18rpx rgba(232, 121, 169, 0.16),
+    inset 0 2rpx 6rpx rgba(255, 255, 255, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-140rpx) scale(0.92);
+  opacity: 0;
+  animation: groundStarDrop 720ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.ground-star-icon {
+  font-size: 34rpx;
+  line-height: 1;
+  transform: translateY(-1rpx);
+}
+
+.ground-star:active {
+  transform: translateY(0) scale(0.96);
+}
+
+.ground-star.is-picked {
+  opacity: 0 !important;
+  pointer-events: none;
+  transform: translateY(0) scale(0.8) !important;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+@keyframes groundStarDrop {
+  0% { opacity: 0; transform: translateY(-160rpx) scale(0.86); }
+  65% { opacity: 1; transform: translateY(6rpx) scale(1.02); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 
 /* 头部 */
 .header {
@@ -583,6 +757,41 @@
   margin-bottom: 20rpx;
 }
 
+.ap-head-stars {
+  height: 44rpx;
+  padding: 0 12rpx;
+  height: 44rpx;
+  border-radius: 999rpx;
+  background: rgba(255, 255, 255, 0.9);
+  border: 2rpx solid rgba(252, 231, 243, 0.95);
+  box-shadow: 0 8rpx 18rpx rgba(244, 194, 212, 0.16);
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.ap-head-stars-num {
+  font-size: 26rpx;
+  font-weight: 900;
+  color: #db2777;
+  font-variant-numeric: tabular-nums;
+}
+
+.ap-head-stars-unit {
+  font-size: 24rpx;
+  line-height: 1;
+  transform: translateY(-1rpx);
+}
+
+.ap-head-stars-text {
+  font-size: 20rpx;
+  font-weight: 800;
+  color: rgba(107, 114, 128, 0.9);
+  margin-left: 6rpx;
+}
+
 .ap-head-icon {
   font-size: 44rpx;
   line-height: 1;
@@ -645,12 +854,14 @@
 }
 
 .ap-node-bubble {
-  width: 76rpx;
+  width: 78rpx;
   padding: 10rpx 6rpx 8rpx;
   border-radius: 999rpx;
-  border: 4rpx solid #d6d6db;
-  background: linear-gradient(180deg, #f9fafb 0%, #ececf0 100%);
+  border: 3rpx solid rgba(209, 213, 219, 0.9);
+  background: rgba(255, 255, 255, 0.78);
   box-shadow: 0 4rpx 12rpx rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(8rpx);
+  -webkit-backdrop-filter: blur(8rpx);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -664,6 +875,35 @@
   box-shadow:
     0 0 0 2rpx rgba(244, 114, 182, 0.35),
     0 6rpx 16rpx rgba(244, 114, 182, 0.2);
+}
+
+/* 飞星动画：从进度卡飞入舱位 */
+.fly-star {
+  position: fixed;
+  z-index: 3000;
+  width: 42rpx;
+  height: 42rpx;
+  margin-left: -21rpx;
+  margin-top: -21rpx;
+  pointer-events: none;
+  transform: translate(0, 0) scale(0.92);
+  opacity: 0;
+  transition:
+    transform 560ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 160ms ease;
+  filter: drop-shadow(0 10rpx 18rpx rgba(232, 121, 169, 0.25));
+}
+
+.fly-star.is-go {
+  opacity: 1;
+  transform: translate(var(--dx), var(--dy)) scale(1.12);
+}
+
+.fly-star-icon {
+  font-size: 40rpx;
+  line-height: 42rpx;
+  display: block;
+  text-align: center;
 }
 
 /* 堆叠星：最多 3 颗，数量用下方数字表示 */
@@ -838,23 +1078,30 @@
 .game-icon-box {
   padding: 32rpx;
   border-radius: 32rpx;
-  box-shadow: 0 2rpx 8rpx rgba(0, 0, 0, 0.05);
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
+  box-shadow:
+    0 6rpx 14rpx rgba(15, 23, 42, 0.07),
+    0 1rpx 2rpx rgba(15, 23, 42, 0.05),
+    inset 0 1rpx 2rpx rgba(255, 255, 255, 0.9);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  backdrop-filter: blur(2rpx);
+  -webkit-backdrop-filter: blur(2rpx);
   flex-shrink: 0;
 }
 
 .icon-speaker {
-  background: linear-gradient(145deg, #fef3c7 0%, #fde68a 100%);
-  border: 2rpx solid rgba(251, 207, 232, 0.55);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
 }
 
 .icon-color {
-  background: linear-gradient(145deg, #fce7f3 0%, #fbcfe8 100%);
-  border: 2rpx solid rgba(244, 194, 212, 0.45);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
 }
 
 .icon-petEggGarden {
-  background: linear-gradient(145deg, #fde68a 0%, #fcd34d 100%);
-  border: 2rpx solid rgba(251, 191, 36, 0.35);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
 }
 
 .icon-story {
@@ -868,6 +1115,12 @@
 .game-icon {
   font-size: 60rpx;
   text-shadow: 0 2rpx 10rpx rgba(244, 194, 212, 0.35);
+}
+
+.game-icon-img {
+  width: 58rpx;
+  height: 58rpx;
+  display: block;
 }
 
 /* Emoji 在不同机型上颜色不一，略偏暖以贴近粉黄主题 */
@@ -894,12 +1147,23 @@
   min-width: 0;
 }
 
+.game-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  margin-bottom: 4rpx;
+}
+
+.game-title-row .game-title {
+  flex: 1;
+  min-width: 0;
+}
+
 .game-title {
   color: #6b4c5a;
   font-size: 32rpx;
   font-weight: 900;
   letter-spacing: 1rpx;
-  margin-bottom: 4rpx;
 }
 
 .game-desc {
@@ -913,26 +1177,48 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8rpx;
+  gap: 10rpx;
   flex-shrink: 0;
+  min-width: 118rpx;
+  position: relative;
 }
 
-.game-emoji {
-  font-size: 48rpx;
+.game-sticker-img {
+  width: 72rpx;
+  height: 72rpx;
+  opacity: 0.92;
+  filter: drop-shadow(0 6rpx 12rpx rgba(0, 0, 0, 0.12));
+  transform: translateY(2rpx);
+}
+
+.game-status-sticker-img {
+  width: 96rpx;
+  height: 96rpx;
+  opacity: 0.96;
+  filter: drop-shadow(0 12rpx 22rpx rgba(232, 121, 169, 0.24));
+  transform: translateY(6rpx);
 }
 
 .game-stars-badge {
-  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
-  padding: 8rpx 16rpx;
-  border-radius: 48rpx;
-  border: 2rpx solid rgba(253, 224, 71, 0.75);
-  box-shadow: 0 2rpx 8rpx rgba(250, 204, 21, 0.15);
+  min-width: 96rpx;
+  height: 46rpx;
+  padding: 0 16rpx;
+  border-radius: 999rpx;
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
+  box-shadow:
+    0 4rpx 10rpx rgba(15, 23, 42, 0.06),
+    inset 0 1rpx 2rpx rgba(255, 255, 255, 0.92);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .stars-text {
-  color: #b45309;
-  font-size: 22rpx;
-  font-weight: 900;
+  color: #71717a;
+  font-size: 24rpx;
+  font-weight: 800;
+  line-height: 1;
 }
 
 /* 锁定遮罩 */
@@ -982,8 +1268,8 @@
 }
 
 .icon-companion {
-  background: linear-gradient(145deg, #fbcfe8 0%, #fde68a 100%);
-  border: 2rpx solid rgba(244, 194, 212, 0.5);
+  background: linear-gradient(160deg, #ffffff, #f6f7f9);
+  border: 2rpx solid rgba(221, 226, 233, 0.95);
 }
 
 .companion-mask {

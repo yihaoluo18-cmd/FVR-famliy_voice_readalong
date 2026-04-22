@@ -1,15 +1,8 @@
 const app = getApp();
-const FRONTEND_HIDDEN_VOICE_IDS = new Set(['voice_003']);
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 function getApiBase() {
-  // 优先使用全局配置 / 本地存储的 apiBaseUrl，避免真机跑到 127.0.0.1
-  try {
-    if (app && typeof app.getApiBaseUrl === "function") return app.getApiBaseUrl();
-    if (app && app.globalData && app.globalData.apiBaseUrl) return app.globalData.apiBaseUrl;
-    const stored = wx.getStorageSync("apiBaseUrl");
-    if (stored) return stored;
-  } catch (e) {}
-  return 'http://127.0.0.1:9880';
+  return resolveApiBase(app);
 }
 
 Page({
@@ -53,8 +46,7 @@ Page({
       url: `${base}/voices`,
       method: 'GET',
       success: (res) => {
-        const raw = (res && res.data && Array.isArray(res.data.voices)) ? res.data.voices : [];
-        const list = raw.filter((v) => !FRONTEND_HIDDEN_VOICE_IDS.has(String((v && v.voice_id) || '').trim()));
+        const list = (res && res.data && Array.isArray(res.data.voices)) ? res.data.voices : [];
         this.setData({ voiceList: list, loading: false });
       },
       fail: () => this.setData({ loading: false }),

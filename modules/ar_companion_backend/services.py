@@ -36,6 +36,41 @@ def _post_json(
     return json.loads(raw)
 
 
+def _classify_provider_account_issue(err_text: str) -> str:
+    lower = str(err_text or "").lower()
+    if not lower:
+        return ""
+    if any(k in lower for k in ["provider_arrearage", "arrearage", "insufficient_balance", "quota", "欠费", "余额不足"]):
+        return "provider_arrearage"
+    if any(
+        k in lower
+        for k in [
+            "provider_auth_error",
+            "invalid api key",
+            "api key",
+            "apikey",
+            "unauthorized",
+            "authentication",
+            "forbidden",
+            "鉴权",
+            "密钥",
+            "accesskey",
+        ]
+    ):
+        return "provider_auth_error"
+    return ""
+
+
+def _raise_companion_llm_error(err_text: str):
+    raw = str(err_text or "").strip()
+    reason = _classify_provider_account_issue(raw)
+    if reason == "provider_arrearage":
+        raise RuntimeError(f"provider_arrearage: companion llm provider account issue: {raw[:360]}")
+    if reason == "provider_auth_error":
+        raise RuntimeError(f"provider_auth_error: companion llm provider auth issue: {raw[:360]}")
+    raise RuntimeError(f"companion_llm_unavailable: {raw[:360] or 'unknown error'}")
+
+
 @dataclass
 class SessionMemory:
     session_id: str
@@ -55,46 +90,8 @@ class CompanionEngine:
     def __init__(self) -> None:
         self._sessions: Dict[str, SessionMemory] = {}
         self._project_root = Path(__file__).resolve().parents[2]
-        # 兼容两种存储位置：
-        # 1) 根目录（你现在手动贴入的文件）
-        # 2) output/（历史版本默认位置）
-        data_dir = self._project_root / "modules" / "ar_companion_backend" / "data"
-        data_scene_tuning = data_dir / "ar_companion_scene_tuning_store.json"
-        data_tuning = data_dir / "ar_companion_tuning_store.json"
-
-        legacy_scene_candidates = [
-            self._project_root / "ar_companion_scene_tuning_store.json",
-            self._project_root / "output" / "ar_companion_scene_tuning_store.json",
-        ]
-        legacy_tuning_candidates = [
-            self._project_root / "ar_companion_tuning_store.json",
-            self._project_root / "output" / "ar_companion_tuning_store.json",
-        ]
-
-        # 目标：两份 tuning 都集中放到 modules/ar_companion_backend/data/
-        self._scene_tuning_store_path = data_scene_tuning
-        self._tuning_store_path = data_tuning
-
-        # 若 data/ 下缺文件，则从旧位置迁移一份（只迁移一次，不覆盖现有）
-        if not self._scene_tuning_store_path.exists():
-            for legacy_path in legacy_scene_candidates:
-                if legacy_path.exists():
-                    try:
-                        self._scene_tuning_store_path.parent.mkdir(parents=True, exist_ok=True)
-                        self._scene_tuning_store_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
-                    except Exception:
-                        pass
-                    break
-
-        if not self._tuning_store_path.exists():
-            for legacy_path in legacy_tuning_candidates:
-                if legacy_path.exists():
-                    try:
-                        self._tuning_store_path.parent.mkdir(parents=True, exist_ok=True)
-                        self._tuning_store_path.write_text(legacy_path.read_text(encoding="utf-8"), encoding="utf-8")
-                    except Exception:
-                        pass
-                    break
+        self._tuning_store_path = self._project_root / "output" / "ar_companion_tuning_store.json"
+        self._scene_tuning_store_path = self._project_root / "output" / "ar_companion_scene_tuning_store.json"
         self._user_tuning_store: Dict[str, Dict[str, float]] = self._load_tuning_store()
         self._user_scene_tuning_store: Dict[str, Dict[str, float]] = self._load_scene_tuning_store()
         self._persona_catalog = {
@@ -106,13 +103,12 @@ class CompanionEngine:
             },
             "cute_chick": {
                 "display_name": "嘎嘎小黄",
-                # 资源包当前仅包含 shiba/fox 的 glb，其他物种先复用可用模型避免 404
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%202.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_dino": {
-                "display_name": "小羊咩咩",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "display_name": "恐龙小绿",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%202.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_fox": {
@@ -122,32 +118,32 @@ class CompanionEngine:
             },
             "cute_cat": {
                 "display_name": "小猫咪咪",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%201.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_bunny": {
                 "display_name": "兔兔小白",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%201.glb",
                 "camera_preset": {"camDistMul": 0.85, "targetSize": 5.5, "fov": 38, "lookAtHeightMul": 0.18, "liftMul": 0.12},
             },
             "cute_squirrel": {
                 "display_name": "松鼠栗栗",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/fox/fox%20level%202.glb",
                 "camera_preset": {"camDistMul": 0.95, "targetSize": 3.0, "fov": 40, "lookAtHeightMul": 0.15},
             },
             "cute_panda": {
                 "display_name": "熊猫萌萌",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%201.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_koala": {
-                "display_name": "仓鼠团团",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "display_name": "考拉困困",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%201.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.9, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "cute_penguin": {
                 "display_name": "企鹅摇摇",
-                "model_url": "/ar_companion/assets/shiba/shiba%20level%203.glb",
+                "model_url": "/ar_companion/assets/shiba/shiba%20level%202.glb",
                 "camera_preset": {"camDistMul": 1.0, "targetSize": 2.8, "fov": 42, "lookAtHeightMul": 0.14},
             },
             "warm_big_sister": {
@@ -180,27 +176,27 @@ class CompanionEngine:
             raise ValueError("text is empty")
 
         memory.state = CompanionState.thinking
-        assistant_text = self._llm_chat(memory, clean_text)
+        try:
+            assistant_text = self._llm_chat(memory, clean_text)
 
-        tts_audio_url = None
-        if use_tts:
-            memory.state = CompanionState.speaking
-            tts_audio_url = self._tts_synthesize(memory, assistant_text)
-        else:
+            tts_audio_url = None
+            if use_tts:
+                memory.state = CompanionState.speaking
+                tts_audio_url = self._tts_synthesize(memory, assistant_text)
+
+            memory.history.append({"role": "user", "content": clean_text})
+            memory.history.append({"role": "assistant", "content": assistant_text})
+            memory.history = memory.history[-20:]
+
+            return {
+                "user_text": clean_text,
+                "assistant_text": assistant_text,
+                "tts_audio_url": tts_audio_url,
+                "state": CompanionState.idle,
+                "history": memory.history,
+            }
+        finally:
             memory.state = CompanionState.idle
-
-        memory.history.append({"role": "user", "content": clean_text})
-        memory.history.append({"role": "assistant", "content": assistant_text})
-        memory.history = memory.history[-20:]
-        memory.state = CompanionState.idle
-
-        return {
-            "user_text": clean_text,
-            "assistant_text": assistant_text,
-            "tts_audio_url": tts_audio_url,
-            "state": memory.state,
-            "history": memory.history,
-        }
 
     def chat_by_voice_url(self, session_id: str, audio_url: str, audio_format: str, use_tts: bool = True) -> dict:
         memory = self._must_get(session_id)
@@ -257,20 +253,6 @@ class CompanionEngine:
     def _tuning_key(self, user_id: str, persona_id: str) -> str:
         return f"{user_id.strip()}::{persona_id.strip()}"
 
-    def _candidate_user_ids(self, user_id: str) -> List[str]:
-        """
-        兼容动态 uid：
-        - 精确匹配：wx_child_user_1775xxx
-        - 前缀回退：wx_child_user
-        """
-        uid = str(user_id or "").strip()
-        if not uid:
-            return [""]
-        out = [uid]
-        if uid.startswith("wx_child_user_"):
-            out.append("wx_child_user")
-        return out
-
     def _load_tuning_store(self) -> Dict[str, Dict[str, float]]:
         try:
             if not self._tuning_store_path.exists():
@@ -325,12 +307,8 @@ class CompanionEngine:
         self._save_tuning_store()
 
     def get_user_tuning(self, user_id: str, persona_id: str) -> Optional[Dict[str, float]]:
-        for uid in self._candidate_user_ids(user_id):
-            key = self._tuning_key(user_id=uid, persona_id=persona_id)
-            got = self._user_tuning_store.get(key)
-            if got:
-                return got
-        return None
+        key = self._tuning_key(user_id=user_id, persona_id=persona_id)
+        return self._user_tuning_store.get(key)
 
     def save_user_scene_tuning(self, user_id: str, persona_id: str, scene_key: str, tuning: Dict[str, float]) -> None:
         key = self._scene_tuning_key(user_id=user_id, persona_id=persona_id, scene_key=scene_key)
@@ -339,12 +317,8 @@ class CompanionEngine:
         self._save_scene_tuning_store()
 
     def get_user_scene_tuning(self, user_id: str, persona_id: str, scene_key: str) -> Optional[Dict[str, float]]:
-        for uid in self._candidate_user_ids(user_id):
-            key = self._scene_tuning_key(user_id=uid, persona_id=persona_id, scene_key=scene_key)
-            got = self._user_scene_tuning_store.get(key)
-            if got:
-                return got
-        return None
+        key = self._scene_tuning_key(user_id=user_id, persona_id=persona_id, scene_key=scene_key)
+        return self._user_scene_tuning_store.get(key)
 
     def _must_get(self, session_id: str) -> SessionMemory:
         memory = self.get_session(session_id)
@@ -419,14 +393,16 @@ class CompanionEngine:
                 body = e.read().decode("utf-8", errors="ignore")
             except Exception:
                 body = ""
-            raise RuntimeError(f"LLM HTTP {e.code}: {body[:500]}")
+            _raise_companion_llm_error(f"LLM HTTP {e.code}: {body[:500]}")
+        except Exception as e:
+            _raise_companion_llm_error(f"LLM request failed: {e}")
 
         if not raw:
-            return ""
+            _raise_companion_llm_error("LLM empty response body")
         obj = json.loads(raw)
         text = (((obj.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
         if not text:
-            return ""
+            _raise_companion_llm_error("LLM choices empty")
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text).strip()
         text = re.sub(r"\s*```$", "", text).strip()
         return text
@@ -458,10 +434,14 @@ class CompanionEngine:
                 "system_prompt": system_prompt,
                 "messages": memory.history + [{"role": "user", "content": user_text}],
             }
-            resp = _post_json(llm_url, payload)
-            text = str(resp.get("text", "")).strip()
-            if text:
-                return text
+            try:
+                resp = _post_json(llm_url, payload)
+                text = str(resp.get("text", "")).strip()
+                if text:
+                    return text
+                _raise_companion_llm_error("custom llm url empty text")
+            except Exception as e:
+                _raise_companion_llm_error(f"custom llm url failed: {e}")
 
         use_builtin = os.getenv("AR_COMPANION_USE_BUILTIN_QWEN", "").strip().lower() in {"1", "true", "yes"}
         if not use_builtin and not llm_url:
@@ -480,10 +460,11 @@ class CompanionEngine:
                 )
                 if out:
                     return out
-            except Exception:
-                pass
+                _raise_companion_llm_error("builtin llm empty output")
+            except Exception as e:
+                _raise_companion_llm_error(str(e))
 
-        return f"我在呢，我们可以继续聊「{user_text[:12]}」哦。"
+        _raise_companion_llm_error("no llm backend configured")
 
     def _tts_synthesize(self, memory: SessionMemory, text: str) -> Optional[str]:
         tts_url = os.getenv("AR_COMPANION_TTS_URL", "").strip()

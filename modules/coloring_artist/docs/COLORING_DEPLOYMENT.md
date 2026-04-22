@@ -214,8 +214,8 @@ curl http://127.0.0.1:9880/coloring/health
 # 1. 确保环境配置
 # - VOLC_ACCESSKEY、VOLC_SECRETKEY 在 wx_api.env
 
-# 2. 运行生成脚本
-cd /home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604
+# 2. 进入项目根目录（test1）
+cd /path/to/test1
 python modules/coloring_artist/practice/generate_coloring_lineart.py
 
 # 3. 等待完成 (30-60 分钟)

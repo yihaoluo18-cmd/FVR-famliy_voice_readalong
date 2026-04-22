@@ -51,6 +51,62 @@ UPLOAD_DIR = PROJECT_ROOT / "output" / "ar_companion_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _classify_provider_account_issue(err_text: str) -> str:
+    lower = str(err_text or "").lower()
+    if not lower:
+        return ""
+    if any(k in lower for k in ["provider_arrearage", "arrearage", "insufficient_balance", "quota", "欠费", "余额不足"]):
+        return "provider_arrearage"
+    if any(
+        k in lower
+        for k in [
+            "provider_auth_error",
+            "invalid api key",
+            "api key",
+            "apikey",
+            "unauthorized",
+            "authentication",
+            "forbidden",
+            "鉴权",
+            "密钥",
+            "accesskey",
+        ]
+    ):
+        return "provider_auth_error"
+    return ""
+
+
+def _build_companion_chat_error(exc: Exception):
+    raw = str(exc or "").strip()
+    lower = raw.lower()
+    reason = ""
+    if "provider_arrearage" in lower:
+        reason = "provider_arrearage"
+    elif "provider_auth_error" in lower:
+        reason = "provider_auth_error"
+    else:
+        reason = _classify_provider_account_issue(raw)
+
+    if reason == "provider_arrearage":
+        return 503, {
+            "reason": "provider_arrearage",
+            "message": "当前 AI 服务账号欠费，伴宠暂时无法回复，请充值后重试。",
+            "detail": raw[:320],
+        }
+    if reason == "provider_auth_error":
+        return 503, {
+            "reason": "provider_auth_error",
+            "message": "当前 AI 服务密钥或鉴权异常，伴宠暂时无法回复，请检查配置。",
+            "detail": raw[:320],
+        }
+
+    return 503, {
+        "reason": "companion_llm_unavailable",
+        "message": "伴宠 AI 暂时不可用，请稍后重试。",
+        "detail": raw[:320] or "unknown",
+    }
+
+
 @router.get("/health")
 async def health() -> dict:
     return {"ok": True, "module": "ar_companion", "status": "healthy"}
@@ -88,6 +144,9 @@ async def chat_text(body: TextChatRequest) -> ChatResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status, detail = _build_companion_chat_error(exc)
+        raise HTTPException(status_code=status, detail=detail) from exc
     return ChatResponse(
         session_id=body.session_id,
         state=result["state"],
@@ -113,6 +172,9 @@ async def chat_voice_url(body: VoiceChatRequest) -> ChatResponse:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status, detail = _build_companion_chat_error(exc)
+        raise HTTPException(status_code=status, detail=detail) from exc
     return ChatResponse(
         session_id=body.session_id,
         state=result["state"],
@@ -357,8 +419,7 @@ async def companion_assets(asset_path: str):
     if safe_path.is_absolute() or ".." in safe_path.parts:
         raise HTTPException(status_code=400, detail="invalid asset path")
 
-    # 资源已统一迁移到 assets/animal
-    asset_root = PROJECT_ROOT / "assets" / "animal"
+    asset_root = PROJECT_ROOT / "animal"
     file_path = (asset_root / safe_path).resolve()
     if not str(file_path).startswith(str(asset_root.resolve())):
         raise HTTPException(status_code=400, detail="invalid asset path")
@@ -409,6 +470,9 @@ async def chat_voice_upload(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        status, detail = _build_companion_chat_error(exc)
+        raise HTTPException(status_code=status, detail=detail) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"voice upload failed: {exc}") from exc
 

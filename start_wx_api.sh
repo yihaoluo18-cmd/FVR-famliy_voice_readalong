@@ -20,12 +20,8 @@ READALONG_HOST="${READALONG_HOST:-127.0.0.1}"
 READALONG_HEALTH_WAIT_SEC="${READALONG_HEALTH_WAIT_SEC:-12}"
 FORCE_KILL_PORTS="${FORCE_KILL_PORTS:-1}"
 
-if [[ -f "$PROJECT_ROOT/venv/Scripts/python.exe" ]]; then
-  PYTHON_BIN="$PROJECT_ROOT/venv/Scripts/python"
-else
-  PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
-fi
-RUNTIME_DIR="$PROJECT_ROOT/train/runtime"
+PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
+RUNTIME_DIR="$PROJECT_ROOT/runtime"
 mkdir -p "$RUNTIME_DIR"
 
 LOG_WX="$RUNTIME_DIR/wx_api_${WX_PORT}.log"
@@ -230,24 +226,24 @@ if [ "$DOCS_ONLY" = "1" ]; then
   exit 0
 fi
 
-# 项目根目录必须入路径，否则 `from modules.*` 无法解析；eres2net 为 GPT-SoVITS 子模块。
-export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/GPT_SoVITS/eres2net:${PYTHONPATH:-}"
-# Windows 控制台编码：与 wx_api 内 stdout 重配一致，减少 GBK 下 Unicode 输出异常
-export PYTHONUTF8="${PYTHONUTF8:-1}"
-export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
+export PYTHONPATH="$PROJECT_ROOT/GPT_SoVITS/eres2net:${PYTHONPATH:-}"
 
-if [ -f "$PROJECT_ROOT/env/wx_api.env" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$PROJECT_ROOT/env/wx_api.env"
-  set +a
-elif [ -f "$PROJECT_ROOT/env/wx_api.env.example" ]; then
-  # 仅在未提供 wx_api.env 时才加载 example，避免示例覆盖真实配置
-  set -a
-  # shellcheck disable=SC1090
-  . "$PROJECT_ROOT/env/wx_api.env.example"
-  set +a
-fi
+ENV_CANDIDATES=(
+  "$PROJECT_ROOT/wx_api.env"
+  "$PROJECT_ROOT/env/wx_api.env"
+  "$PROJECT_ROOT/wx_api.env.example"
+  "$PROJECT_ROOT/env/wx_api.env.example"
+)
+for env_file in "${ENV_CANDIDATES[@]}"; do
+  if [ -f "$env_file" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file"
+    set +a
+    echo "[env] loaded: $env_file"
+    break
+  fi
+done
 
 pick_free_gpu() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -257,29 +253,149 @@ pick_free_gpu() {
   echo "0"
 }
 
+pick_secondary_gpu() {
+  local primary="$1"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local secondary
+    secondary=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null | awk -F',' -v p="$primary" '{gsub(/ /, "", $1); gsub(/ /, "", $2); if ($1 != p) print $1 "," $2}' | sort -t',' -k2,2n | head -n 1 | cut -d',' -f1)
+    if [ -n "$secondary" ]; then
+      echo "$secondary"
+      return 0
+    fi
+  fi
+  echo "$primary"
+}
+
+pick_n_free_gpus() {
+  local need="${1:-2}"
+  local exclude_csv="${2:-}"
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "0"
+    return 0
+  fi
+
+  local picked
+  picked=$(
+    nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
+      | awk -F',' -v ex="$exclude_csv" '
+          BEGIN{
+            split(ex, arr, ",");
+            for(i in arr){
+              gsub(/ /, "", arr[i]);
+              if(arr[i]!=""){ excl[arr[i]]=1; }
+            }
+          }
+          {
+            gsub(/ /, "", $1); gsub(/ /, "", $2);
+            if(!($1 in excl)){ print $1 "," $2; }
+          }' \
+      | sort -t',' -k2,2nr \
+      | head -n "$need" \
+      | cut -d',' -f1 \
+      | paste -sd, -
+  )
+  if [ -z "$picked" ]; then
+    picked="$(pick_free_gpu)"
+  fi
+  echo "$picked"
+}
+
+WX_PROCESS_CUDA_VISIBLE_DEVICES=""
+READALONG_PROCESS_CUDA_VISIBLE_DEVICES=""
+
+# 支持外部直接传 CUDA_VISIBLE_DEVICES，不被脚本 auto 选择覆盖。
+if [ -z "${WX_API_CUDA_VISIBLE_DEVICES:-}" ] && [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+  WX_API_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+fi
+
 case "${WX_API_CUDA_VISIBLE_DEVICES:-auto}" in
   auto|AUTO|Auto)
-    export CUDA_VISIBLE_DEVICES="$(pick_free_gpu)"
+    WX_PROCESS_CUDA_VISIBLE_DEVICES="$(pick_free_gpu)"
+    if [ -n "${READALONG_CUDA_VISIBLE_DEVICES:-}" ]; then
+      READALONG_PROCESS_CUDA_VISIBLE_DEVICES="${READALONG_CUDA_VISIBLE_DEVICES}"
+    else
+      READALONG_PROCESS_CUDA_VISIBLE_DEVICES="$(pick_secondary_gpu "${WX_PROCESS_CUDA_VISIBLE_DEVICES}")"
+    fi
     ;;
   *)
-    export CUDA_VISIBLE_DEVICES="${WX_API_CUDA_VISIBLE_DEVICES}"
+    WX_PROCESS_CUDA_VISIBLE_DEVICES="${WX_API_CUDA_VISIBLE_DEVICES}"
+    READALONG_PROCESS_CUDA_VISIBLE_DEVICES="${READALONG_CUDA_VISIBLE_DEVICES:-${WX_PROCESS_CUDA_VISIBLE_DEVICES}}"
     ;;
 esac
 
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+[ -n "${WX_PROCESS_CUDA_VISIBLE_DEVICES}" ] || WX_PROCESS_CUDA_VISIBLE_DEVICES="0"
+[ -n "${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}" ] || READALONG_PROCESS_CUDA_VISIBLE_DEVICES="${WX_PROCESS_CUDA_VISIBLE_DEVICES}"
 
-echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+# 兼容脚本内其他依赖该变量的逻辑。
+export CUDA_VISIBLE_DEVICES="${WX_PROCESS_CUDA_VISIBLE_DEVICES}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+# 在 CUDA_VISIBLE_DEVICES 子集映射下固定逻辑设备号，避免进程内按全局序号选卡触发 invalid device ordinal。
+export INFER_DEVICE="${INFER_DEVICE:-cuda:0}"
+
+# 训练优化默认参数（可被外部环境变量覆盖）：
+# - 自动开启预处理并行
+# - 自动探测可用卡用于 prepare 并行和 S2
+# - v2Pro 默认启用 DDP find_unused 兼容项
+export TRAIN_PREP_PARALLEL="${TRAIN_PREP_PARALLEL:-1}"
+export TRAIN_PREP_CACHE="${TRAIN_PREP_CACHE:-0}"
+export TRAIN_PREP_TINY_PARALLEL_STEPS="${TRAIN_PREP_TINY_PARALLEL_STEPS:-step2,step2b,step3}"
+export TRAIN_PREP_COMBINE_2_2B_3="${TRAIN_PREP_COMBINE_2_2B_3:-1}"
+export TRAIN_PREP_STEP1_FORCE_SINGLE_GPU="${TRAIN_PREP_STEP1_FORCE_SINGLE_GPU:-1}"
+# 默认复用预处理 GPU 列表中的第一个 GPU 给 step1（也可外部覆盖）
+export TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES="${TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES:-}"
+if [ -z "${TRAIN_PREP_CUDA_VISIBLE_DEVICES:-}" ]; then
+  TRAIN_PREP_CUDA_VISIBLE_DEVICES="$(pick_n_free_gpus 2 "${WX_PROCESS_CUDA_VISIBLE_DEVICES},${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}")"
+fi
+if [ -z "${TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES:-}" ]; then
+  TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES="$(echo "${TRAIN_PREP_CUDA_VISIBLE_DEVICES}" | awk -F',' '{print $1}')"
+fi
+if [ -z "${TRAIN_S1_CUDA_VISIBLE_DEVICES:-}" ]; then
+  TRAIN_S1_CUDA_VISIBLE_DEVICES="$(pick_n_free_gpus 2 "${WX_PROCESS_CUDA_VISIBLE_DEVICES},${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}")"
+fi
+if [ -z "${TRAIN_S2_CUDA_VISIBLE_DEVICES:-}" ]; then
+  TRAIN_S2_CUDA_VISIBLE_DEVICES="$(pick_n_free_gpus 2 "${WX_PROCESS_CUDA_VISIBLE_DEVICES},${READALONG_PROCESS_CUDA_VISIBLE_DEVICES},${TRAIN_S1_CUDA_VISIBLE_DEVICES}")"
+fi
+export TRAIN_PREP_CUDA_VISIBLE_DEVICES
+export TRAIN_S1_CUDA_VISIBLE_DEVICES
+export TRAIN_S2_CUDA_VISIBLE_DEVICES
+export S2_FIND_UNUSED_PARAMETERS="${S2_FIND_UNUSED_PARAMETERS:-1}"
+# S1 默认参数（可被外部覆盖）
+export TRAIN_S1_BATCH_SIZE="${TRAIN_S1_BATCH_SIZE:-32}"
+export TRAIN_S1_MAX_EPOCHS="${TRAIN_S1_MAX_EPOCHS:-15}"
+export TRAIN_PARALLEL_S1_S2="${TRAIN_PARALLEL_S1_S2:-1}"
+export TRAIN_FORCE_SERIAL_SAME_GPU_PAIR="${TRAIN_FORCE_SERIAL_SAME_GPU_PAIR:-0}"
+export TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB="${TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB:-8192}"
+export TRAIN_SERIAL_GPU_GUARD_TIMEOUT_SEC="${TRAIN_SERIAL_GPU_GUARD_TIMEOUT_SEC:-120}"
+# S2 精调默认（当前默认：batch=16, epochs=6，双卡见 TRAIN_S2_CUDA_VISIBLE_DEVICES；可被外部环境变量覆盖）
+export TRAIN_S2_BATCH_SIZE="${TRAIN_S2_BATCH_SIZE:-16}"
+export TRAIN_S2_MAX_EPOCHS="${TRAIN_S2_MAX_EPOCHS:-6}"
+
+echo "[gpu] WX CUDA_VISIBLE_DEVICES=${WX_PROCESS_CUDA_VISIBLE_DEVICES}"
+echo "[gpu] READALONG CUDA_VISIBLE_DEVICES=${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}"
 echo "[gpu] PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}"
+echo "[train-opt] TRAIN_PREP_PARALLEL=${TRAIN_PREP_PARALLEL}"
+echo "[train-opt] TRAIN_PREP_CACHE=${TRAIN_PREP_CACHE}"
+echo "[train-opt] TRAIN_PREP_TINY_PARALLEL_STEPS=${TRAIN_PREP_TINY_PARALLEL_STEPS}"
+echo "[train-opt] TRAIN_PREP_COMBINE_2_2B_3=${TRAIN_PREP_COMBINE_2_2B_3}"
+echo "[train-opt] TRAIN_PREP_STEP1_FORCE_SINGLE_GPU=${TRAIN_PREP_STEP1_FORCE_SINGLE_GPU}"
+echo "[train-opt] TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES=${TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES}"
+echo "[train-opt] TRAIN_PREP_CUDA_VISIBLE_DEVICES=${TRAIN_PREP_CUDA_VISIBLE_DEVICES}"
+echo "[train-opt] TRAIN_S1_CUDA_VISIBLE_DEVICES=${TRAIN_S1_CUDA_VISIBLE_DEVICES}"
+echo "[train-opt] TRAIN_S2_CUDA_VISIBLE_DEVICES=${TRAIN_S2_CUDA_VISIBLE_DEVICES}"
+echo "[train-opt] TRAIN_S1_BATCH_SIZE=${TRAIN_S1_BATCH_SIZE}"
+echo "[train-opt] TRAIN_S1_MAX_EPOCHS=${TRAIN_S1_MAX_EPOCHS}"
+echo "[train-opt] TRAIN_PARALLEL_S1_S2=${TRAIN_PARALLEL_S1_S2}"
+echo "[train-opt] TRAIN_FORCE_SERIAL_SAME_GPU_PAIR=${TRAIN_FORCE_SERIAL_SAME_GPU_PAIR}"
+echo "[train-opt] TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB=${TRAIN_SERIAL_GPU_GUARD_MIN_FREE_MB}"
+echo "[train-opt] TRAIN_SERIAL_GPU_GUARD_TIMEOUT_SEC=${TRAIN_SERIAL_GPU_GUARD_TIMEOUT_SEC}"
+echo "[train-opt] TRAIN_S2_BATCH_SIZE=${TRAIN_S2_BATCH_SIZE}"
+echo "[train-opt] TRAIN_S2_MAX_EPOCHS=${TRAIN_S2_MAX_EPOCHS}"
+echo "[train-opt] S2_FIND_UNUSED_PARAMETERS=${S2_FIND_UNUSED_PARAMETERS}"
 
 port_listening() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${port}$"
-    return $?
-  fi
-  # Windows（Git Bash）：无 ss，用 netstat 判断是否 LISTEN
-  if command -v netstat >/dev/null 2>&1; then
-    netstat -ano 2>/dev/null | grep LISTENING | grep -E ":${port}[[:space:]]" | grep -q .
     return $?
   fi
   return 1
@@ -290,29 +406,36 @@ kill_port_pids() {
   if [ "${FORCE_KILL_PORTS}" != "1" ]; then
     return 0
   fi
-  local pids
-  if command -v ss >/dev/null 2>&1; then
-    pids=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
-  elif command -v netstat >/dev/null 2>&1; then
-    # Windows：如果没有监听匹配，grep 会返回 1；配合 pipefail + set -e 会导致脚本直接退出
-    # 因此末尾补 `|| true`，让“无匹配”视为 pids 为空即可。
-    pids=$(netstat -ano 2>/dev/null | grep LISTENING | grep -E ":${port}[[:space:]]" | awk '{print $NF}' | sort -u || true)
-  else
+  if ! command -v ss >/dev/null 2>&1; then
     return 0
   fi
+  local pids
+  pids=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
   if [ -n "$pids" ]; then
     echo ">>> 发现占用端口 ${port} 的进程，正在关闭..."
     for pid in $pids; do
-      [ -z "$pid" ] || [ "$pid" = "0" ] && continue
-      if command -v ss >/dev/null 2>&1; then
-        kill "$pid" 2>/dev/null || true
-      elif command -v taskkill >/dev/null 2>&1; then
-        taskkill //PID "$pid" //F 2>/dev/null || true
-      else
-        kill -9 "$pid" 2>/dev/null || true
-      fi
+      kill "$pid" 2>/dev/null || true
     done
-    sleep 1
+    # 模型进程退出可能需要几秒，避免 1 秒后误判“端口仍占用”。
+    local wait_round
+    for wait_round in 1 2 3 4 5 6; do
+      if ! port_listening "$port"; then
+        break
+      fi
+      sleep 1
+    done
+
+    if port_listening "$port"; then
+      local force_pids
+      force_pids=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $NF}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u)
+      if [ -n "$force_pids" ]; then
+        echo ">>> 端口 ${port} 仍被占用，升级强制关闭..."
+        for pid in $force_pids; do
+          kill -9 "$pid" 2>/dev/null || true
+        done
+        sleep 1
+      fi
+    fi
   fi
 }
 
@@ -407,7 +530,7 @@ start_readalong_bg() {
 
   echo ">>> 启动 readalong (后台) ..."
   : > "$LOG_READALONG"
-  "$PYTHON_BIN" -m uvicorn modules.speaker_game.readalong_api:app --host "$READALONG_HOST" --port "$READALONG_PORT" --log-level info >> "$LOG_READALONG" 2>&1 &
+  CUDA_VISIBLE_DEVICES="${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}" "$PYTHON_BIN" -m uvicorn modules.speaker_game.readalong_api:app --host "$READALONG_HOST" --port "$READALONG_PORT" --log-level info >> "$LOG_READALONG" 2>&1 &
   local launched_pid="$!"
   echo "$launched_pid" > "$PID_READALONG"
   STARTED_READALONG=1
@@ -444,7 +567,7 @@ start_readalong_fg() {
   fi
 
   echo ">>> 启动 readalong (前台) ..."
-  "$PYTHON_BIN" -m uvicorn modules.speaker_game.readalong_api:app --host "$READALONG_HOST" --port "$READALONG_PORT" --log-level info
+  CUDA_VISIBLE_DEVICES="${READALONG_PROCESS_CUDA_VISIBLE_DEVICES}" "$PYTHON_BIN" -m uvicorn modules.speaker_game.readalong_api:app --host "$READALONG_HOST" --port "$READALONG_PORT" --log-level info
 }
 
 start_wx_fg() {
@@ -459,7 +582,7 @@ start_wx_fg() {
 
   echo ">>> 启动 wx_api.py（封装入口）(前台) ..."
   : > "$LOG_WX"
-  "$PYTHON_BIN" -u modules/tts_backend/wx_api.py -a "$WX_HOST" -p "$WX_PORT" 2>&1 | tee -a "$LOG_WX"
+  CUDA_VISIBLE_DEVICES="${WX_PROCESS_CUDA_VISIBLE_DEVICES}" "$PYTHON_BIN" -u modules/tts_backend/wx_api.py -a "$WX_HOST" -p "$WX_PORT" 2>&1 | tee -a "$LOG_WX"
 }
 
 start_wx_bg_for_lineart() {
@@ -474,7 +597,7 @@ start_wx_bg_for_lineart() {
 
   echo ">>> 启动 wx_api.py（封装入口）(后台) ..."
   : > "$LOG_WX"
-  "$PYTHON_BIN" -u modules/tts_backend/wx_api.py -a "$WX_HOST" -p "$WX_PORT" >> "$LOG_WX" 2>&1 &
+  CUDA_VISIBLE_DEVICES="${WX_PROCESS_CUDA_VISIBLE_DEVICES}" "$PYTHON_BIN" -u modules/tts_backend/wx_api.py -a "$WX_HOST" -p "$WX_PORT" >> "$LOG_WX" 2>&1 &
   WX_PID=$!
   echo $! > "$RUNTIME_DIR/wx_api_lineart.pid"
   

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在新主机上从 requirements-lock.txt 重建与本机一致的 Python 虚拟环境（不随包分发 venv）。
+# 在新主机上从 env/requirements.txt（pip freeze）重建与本机一致的 Python 虚拟环境（不随包分发 venv）。
 # 依赖：建议 Python 3.10.x（与当前开发环境一致）；Linux 下 GPU 可选见下方环境变量。
 #
 # 用法：
@@ -66,14 +66,9 @@ if [[ -z "$PYTHON_CMD" ]]; then
   exit 1
 fi
 
-LOCK_FILE=""
-if [[ -f "$PROJECT_ROOT/requirements-lock.txt" ]]; then
-  LOCK_FILE="$PROJECT_ROOT/requirements-lock.txt"
-elif [[ -f "$PROJECT_ROOT/env/requirements.txt" ]]; then
-  LOCK_FILE="$PROJECT_ROOT/env/requirements.txt"
-  echo "提示：未找到 requirements-lock.txt，将使用 env/requirements.txt（版本可能与原发布环境不完全一致）。" >&2
-else
-  echo "错误：未找到 requirements-lock.txt 或 requirements.txt。" >&2
+LOCK_FILE="$PROJECT_ROOT/env/requirements.txt"
+if [[ ! -f "$LOCK_FILE" ]]; then
+  echo "错误：未找到 env/requirements.txt（请在发布前用运行环境执行 pip freeze > env/requirements.txt）。" >&2
   exit 1
 fi
 
@@ -99,14 +94,16 @@ fi
 # torch 2.x 要求 setuptools<82；与 pip 升级一并约束，避免反复升降级。
 "$PIP" install -U pip wheel "setuptools<82"
 
-# 与 requirements-lock.txt 中版本一致；先装 CUDA wheel 可避免仅从 PyPI 拉到 CPU 版 torch。
+# 先装 CUDA wheel 可避免仅从 PyPI 拉到 CPU 版 torch（仅 Linux 场景）。
 if [[ "${CUDA_PIP:-}" == "1" ]]; then
   echo "预装 PyTorch（CUDA 12.4 官方 wheel）…"
+  # 仅将 torch/torchaudio/triton 指向 PyTorch 官方 cu124 索引，其它依赖仍从默认 PyPI 镜像解析，避免网络不通导致卡死。
   "$PIP" install torch==2.6.0 torchaudio==2.6.0 triton==3.2.0 \
-    --index-url https://download.pytorch.org/whl/cu124
+    --index-url https://download.pytorch.org/whl/cu124 \
+    --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
 fi
 
-echo "安装依赖（来自 requirements-lock.txt）…"
+echo "安装依赖（来自 env/requirements.txt）…"
 "$PIP" install -r "$LOCK_FILE"
 
 echo

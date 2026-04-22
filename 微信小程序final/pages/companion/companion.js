@@ -1,5 +1,5 @@
 const app = getApp();
-const DEFAULT_BASE_URL = "http://127.0.0.1:9880";
+const { resolveApiBase } = require("../../utils/api-base.js");
 const COMPANION_SCENE_KEY = "companion";
 const {
   getUserId: getCompanionScopeUserId,
@@ -9,19 +9,8 @@ const {
   postCompanionSetDisplayForm,
   postCompanionSetViewTuning,
 } = require("../../utils/pet-growth.js");
-const {
-  getPetById,
-  getPetCoverUrl,
-  getPetFormPosterUrls,
-  getFormTierModelUrl,
-  getStaticEggModelUrl,
-  getEggModelUrl,
-} = require("../../utils/pets-catalog.js");
+const { getPetById, getFormTierModelUrl, getStaticEggModelUrl, getEggModelUrl } = require("../../utils/pets-catalog.js");
 const { toMiniprogramAssetUrl } = require("../../utils/asset-url.js");
-const {
-  unwrapCompanionStateBody,
-  mergeCompanionPageFormViewTuningFromStateBody,
-} = require("../../utils/companion-view-tuning.js");
 const { reportAmusementParkTaskDone } = require("../../utils/amusement-park-stars.js");
 let createScopedThreejs = null;
 let registerGLTFLoader = null;
@@ -42,14 +31,7 @@ function resolveModelUrl(rel) {
 }
 
 function getApiBaseUrl() {
-  // 优先使用全局配置 / 本地存储的 apiBaseUrl，避免真机跑到 127.0.0.1 导致 503
-  try {
-    if (app && typeof app.getApiBaseUrl === "function") return app.getApiBaseUrl();
-    if (app && app.globalData && app.globalData.apiBaseUrl) return app.globalData.apiBaseUrl;
-    const stored = wx.getStorageSync("apiBaseUrl");
-    if (stored) return stored;
-  } catch (e) {}
-  return DEFAULT_BASE_URL;
+  return resolveApiBase(app);
 }
 
 function getWindowMetrics() {
@@ -121,35 +103,134 @@ function buildWelcomeText(companionName) {
   return `嗨，我是${n}～你可以按住说话，或者打字、点下面小按钮跟我聊哦。`;
 }
 
+function classifyCompanionErrorReason(text) {
+  const lower = String(text || "").toLowerCase();
+  if (!lower) return "";
+  if (
+    lower.includes("provider_arrearage") ||
+    lower.includes("arrearage") ||
+    lower.includes("insufficient_balance") ||
+    lower.includes("quota") ||
+    lower.includes("欠费") ||
+    lower.includes("余额不足")
+  ) {
+    return "provider_arrearage";
+  }
+  if (
+    lower.includes("provider_auth_error") ||
+    lower.includes("invalid api key") ||
+    lower.includes("apikey") ||
+    lower.includes("api key") ||
+    lower.includes("unauthorized") ||
+    lower.includes("authentication") ||
+    lower.includes("forbidden") ||
+    lower.includes("鉴权") ||
+    lower.includes("密钥")
+  ) {
+    return "provider_auth_error";
+  }
+  return "";
+}
+
+function parseCompanionBackendError(payload, statusCode, networkFail = false) {
+  if (networkFail) {
+    return { reason: "network_error", message: "网络有点忙，请稍后重试。", raw: "" };
+  }
+
+  const data = payload && typeof payload === "object" ? payload : {};
+  const detail = data.detail;
+  let reason = "";
+  let message = "";
+  let raw = "";
+
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    reason = String(detail.reason || "").trim();
+    message = String(detail.message || "").trim();
+    raw = String(detail.detail || detail.raw || "").trim();
+  } else if (typeof detail === "string") {
+    raw = detail.trim();
+  }
+
+  if (!message && typeof data.message === "string") message = data.message.trim();
+  if (!raw && typeof data.error === "string") raw = data.error.trim();
+
+  const merged = [reason, message, raw].filter(Boolean).join(" ");
+  if (!reason) reason = classifyCompanionErrorReason(merged);
+
+  if (!message) {
+    if (reason === "provider_arrearage") {
+      message = "当前 AI 服务账号欠费，伴宠暂时无法回复。";
+    } else if (reason === "provider_auth_error") {
+      message = "当前 AI 服务密钥或鉴权异常，伴宠暂时无法回复。";
+    } else if (Number(statusCode || 0) >= 500) {
+      message = "伴宠 AI 暂时不可用，请稍后重试。";
+    } else {
+      message = raw || "请求失败，请稍后重试。";
+    }
+  }
+
+  return { reason, message, raw };
+}
+
+function buildCompanionErrorUi(reason, message) {
+  if (reason === "provider_arrearage") {
+    return {
+      bubble: "我现在连不上云端大脑啦：AI 服务账号欠费。请联系管理员处理后，我们马上继续聊～",
+      hint: "AI账号欠费，待处理",
+      toast: "AI欠费",
+    };
+  }
+  if (reason === "provider_auth_error") {
+    return {
+      bubble: "我这边的 AI 鉴权配置出了点问题，暂时不能正常陪聊。请联系管理员检查密钥配置。",
+      hint: "AI鉴权异常",
+      toast: "密钥异常",
+    };
+  }
+  if (reason === "network_error") {
+    return {
+      bubble: "网络有点忙，我们稍后再试一次吧～",
+      hint: "网络有点忙，再试试",
+      toast: "网络繁忙",
+    };
+  }
+  return {
+    bubble: message || "伴宠 AI 暂时不可用，我们稍后再试一次吧～",
+    hint: "伴宠AI暂不可用",
+    toast: "AI暂不可用",
+  };
+}
+
+
 const AVATAR_OPTIONS = [
   { personaId: "default", label: "柴柴小星", emoji: "🐕" },
   { personaId: "cute_chick", label: "嘎嘎小黄", emoji: "🐥" },
 ];
 
 const MASCOT_TO_PERSONA = {
-  "cute-dog": { personaId: "default", displayName: "柴柴小星", emoji: "🐶", wallpaper: getPetCoverUrl("cute-dog") },
-  "cute-fox": { personaId: "cute_fox", displayName: "狐狸小橙", emoji: "🦊", wallpaper: getPetCoverUrl("cute-fox") },
-  "cute-dino": { personaId: "cute_dino", displayName: "小羊咩咩", emoji: "🐑", wallpaper: getPetCoverUrl("cute-dino") },
-  "cute-cat": { personaId: "cute_cat", displayName: "小猫咪咪", emoji: "🐱", wallpaper: getPetCoverUrl("cute-cat") },
-  "cute-bunny": { personaId: "cute_bunny", displayName: "兔兔小白", emoji: "🐰", wallpaper: getPetCoverUrl("cute-bunny") },
-  "cute-squirrel": { personaId: "cute_squirrel", displayName: "松鼠栗栗", emoji: "🐿️", wallpaper: getPetCoverUrl("cute-squirrel") },
-  "cute-chick": { personaId: "cute_chick", displayName: "嘎嘎小黄", emoji: "🐥", wallpaper: getPetCoverUrl("cute-chick") },
-  "cute-panda": { personaId: "cute_panda", displayName: "熊猫萌萌", emoji: "🐼", wallpaper: getPetCoverUrl("cute-panda") },
-  "cute-koala": { personaId: "cute_koala", displayName: "仓鼠团团", emoji: "🐹", wallpaper: getPetCoverUrl("cute-koala") },
-  "cute-penguin": { personaId: "cute_penguin", displayName: "企鹅摇摇", emoji: "🐧", wallpaper: getPetCoverUrl("cute-penguin") },
+  "cute-dog": { personaId: "default", displayName: "柴柴小星", emoji: "🐶", wallpaper: "/assets/images/小狗.png" },
+  "cute-fox": { personaId: "cute_fox", displayName: "狐狸小橙", emoji: "🦊", wallpaper: "/assets/images/狐狸.png" },
+  "cute-dino": { personaId: "cute_dino", displayName: "恐龙小绿", emoji: "🦕", wallpaper: "/assets/images/恐龙.png" },
+  "cute-cat": { personaId: "cute_cat", displayName: "小猫咪咪", emoji: "🐱", wallpaper: "/assets/images/小猫.png" },
+  "cute-bunny": { personaId: "cute_bunny", displayName: "兔兔小白", emoji: "🐰", wallpaper: "/assets/images/小兔.png" },
+  "cute-squirrel": { personaId: "cute_squirrel", displayName: "松鼠栗栗", emoji: "🐿️", wallpaper: "/assets/images/松鼠.png" },
+  "cute-chick": { personaId: "cute_chick", displayName: "嘎嘎小黄", emoji: "🐥", wallpaper: "/assets/images/小狗.png" },
+  "cute-panda": { personaId: "cute_panda", displayName: "熊猫萌萌", emoji: "🐼", wallpaper: "/assets/images/小狗.png" },
+  "cute-koala": { personaId: "cute_koala", displayName: "考拉困困", emoji: "🐨", wallpaper: "/assets/images/小狗.png" },
+  "cute-penguin": { personaId: "cute_penguin", displayName: "企鹅摇摇", emoji: "🐧", wallpaper: "/assets/images/小狗.png" },
 };
 
 const MASCOT_AVATARS_ALL = [
-  { id: "cute-dog", name: "柴小汪", url: getPetCoverUrl("cute-dog"), emoji: "🐶" },
-  { id: "cute-fox", name: "小狐狸", url: getPetCoverUrl("cute-fox"), emoji: "🦊" },
-  { id: "cute-dino", name: "小绵羊", url: getPetCoverUrl("cute-dino"), emoji: "🐑" },
-  { id: "cute-cat", name: "猫小咪", url: getPetCoverUrl("cute-cat"), emoji: "🐱" },
-  { id: "cute-bunny", name: "兔小白", url: getPetCoverUrl("cute-bunny"), emoji: "🐰" },
-  { id: "cute-squirrel", name: "小松鼠", url: getPetCoverUrl("cute-squirrel"), emoji: "🐿️" },
-  { id: "cute-chick", name: "鸭嘎嘎", url: getPetCoverUrl("cute-chick"), emoji: "🐥" },
-  { id: "cute-panda", name: "熊墩墩", url: getPetCoverUrl("cute-panda"), emoji: "🐼" },
-  { id: "cute-koala", name: "小仓鼠", url: getPetCoverUrl("cute-koala"), emoji: "🐹" },
-  { id: "cute-penguin", name: "企鹅", url: getPetCoverUrl("cute-penguin"), emoji: "🐧" },
+  { id: "cute-dog", name: "柴小汪", url: "/assets/images/柴犬封面.png", emoji: "🐶" },
+  { id: "cute-fox", name: "小狐狸", url: "/assets/images/狐狸.png", emoji: "🦊" },
+  { id: "cute-dino", name: "恐龙", url: "/assets/images/恐龙.png", emoji: "🦕" },
+  { id: "cute-cat", name: "猫小咪", url: "/assets/images/小猫封面.png", emoji: "🐱" },
+  { id: "cute-bunny", name: "兔小白", url: "/assets/images/兔子封面.png", emoji: "🐰" },
+  { id: "cute-squirrel", name: "小松鼠", url: "/assets/images/松鼠封面.png", emoji: "🐿️" },
+  { id: "cute-chick", name: "鸭嘎嘎", url: "/assets/images/小鸭封面.png", emoji: "🐥" },
+  { id: "cute-panda", name: "熊墩墩", url: "/assets/images/熊猫封面.png", emoji: "🐼" },
+  { id: "cute-koala", name: "考拉", url: "/assets/images/小狗.png", emoji: "🐨" },
+  { id: "cute-penguin", name: "企鹅", url: "/assets/images/企鹅封面.png", emoji: "🐧" },
 ];
 
 function mapAvatarsWithLock(unlockedList) {
@@ -218,7 +299,7 @@ Page({
     selectedPersonaId: "default",
     selectedMascotId: "cute-dog",
     currentMascotEmoji: "🐶",
-    mascotWallpaperUrl: toMiniprogramAssetUrl(getPetCoverUrl("cute-dog")),
+    mascotWallpaperUrl: toMiniprogramAssetUrl("/assets/images/小狗.png"),
 
     // 首页同款 3D 调参（开发用）
     showTuning: false,
@@ -233,11 +314,10 @@ Page({
     companionSwitchStep: "menu",
     mascotAvatarsForSwitch: [],
     companionUnlockedFormTiers: [1],
-    companionFormPosterUrls: [],
     companionSwitchPosterMascot: {
       id: "cute-dog",
       name: "柴小汪",
-      url: toMiniprogramAssetUrl(getPetCoverUrl("cute-dog")),
+      url: toMiniprogramAssetUrl("/assets/images/柴犬封面.png"),
     },
     companionThreeSwitching: false,
     /** 当前 3D 形态键，与后端 form_key（egg / tier1–3）一致；保存调参依赖此字段 */
@@ -287,7 +367,12 @@ Page({
     }
     requestCompanionState("cute-dog")
       .then((state) => {
-        const d = unwrapCompanionStateBody(state);
+        const d =
+          state && typeof state === "object"
+            ? state.data && typeof state.data === "object"
+              ? state.data
+              : state
+            : {};
         if (d.egg_model_active) {
           wx.showToast({ title: "请先孵化蛋蛋后再来找小伙伴哦", icon: "none", duration: 2200 });
           setTimeout(() => {
@@ -365,9 +450,23 @@ Page({
     this.setData({ companionThreeSwitching: true });
     requestCompanionState(mascotId)
       .then((state) => {
-        const d = unwrapCompanionStateBody(state);
-        // 与 @仓库/微信小程序final 一致：合并规则见 utils/companion-view-tuning.js
-        this._companionServerFormViewTuning = mergeCompanionPageFormViewTuningFromStateBody(d);
+        const d = state && typeof state === "object" ? (state.data && typeof state.data === "object" ? state.data : state) : {};
+        const rawPet =
+          d.form_view_tuning && typeof d.form_view_tuning === "object" && !Array.isArray(d.form_view_tuning)
+            ? d.form_view_tuning
+            : {};
+        const rawHome =
+          d.form_view_tuning_home && typeof d.form_view_tuning_home === "object" && !Array.isArray(d.form_view_tuning_home)
+            ? d.form_view_tuning_home
+            : {};
+        const rawCmp =
+          d.form_view_tuning_companion &&
+          typeof d.form_view_tuning_companion === "object" &&
+          !Array.isArray(d.form_view_tuning_companion)
+            ? d.form_view_tuning_companion
+            : {};
+        // 伴读专用条目不设时，依次回退 home / pet_detail，便于首次升级前后观感连续；保存只写 companion
+        this._companionServerFormViewTuning = { ...rawPet, ...rawHome, ...rawCmp };
         let eggActive = !!d.egg_model_active;
         let displayTier = Math.max(1, Math.min(3, Number(d.display_form_tier || 1) || 1));
         const guestUid = isGuestCompanionUserId(getCompanionScopeUserId());
@@ -417,7 +516,6 @@ Page({
           modelHint: `形象: ${mascotId} · ${formKey}`,
           modelUrl,
           companionUnlockedFormTiers: unlocked,
-          companionFormPosterUrls: getPetFormPosterUrls(mascotId).map((u) => toMiniprogramAssetUrl(u)),
           companionSwitchPosterMascot: { id: av.id, name: av.name, url: toMiniprogramAssetUrl(av.url) },
           companionFormKey: formKey,
         };
@@ -464,7 +562,6 @@ Page({
     this.setData({
       companionSwitchStep: "form",
       companionSwitchPosterMascot: { id: av.id, name: av.name, url: toMiniprogramAssetUrl(av.url) },
-      companionFormPosterUrls: getPetFormPosterUrls(mid).map((u) => toMiniprogramAssetUrl(u)),
     });
   },
 
@@ -536,11 +633,18 @@ Page({
       method: "POST",
       data: { user_id: getCompanionScopeUserId(), persona_id: personaId },
       success: (res) => {
+        const statusCode = Number(res?.statusCode || 0);
+        if (statusCode < 200 || statusCode >= 300) {
+          wx.showToast({ title: "陪伴服务异常", icon: "none" });
+          return;
+        }
         const sid = res?.data?.session_id || "";
         if (sid) {
           this.setData({ companionSessionId: sid });
           this.wakeupCompanion();
+          return;
         }
+        wx.showToast({ title: "会话创建失败", icon: "none" });
       },
       fail: () => wx.showToast({ title: "陪伴服务连接失败", icon: "none" }),
     });
@@ -1150,7 +1254,7 @@ Page({
       companionName: displayName,
       welcomeText: welcome,
       currentMascotEmoji: hit.emoji || "🐶",
-      mascotWallpaperUrl: toMiniprogramAssetUrl(hit.wallpaper || getPetCoverUrl("cute-dog")),
+      mascotWallpaperUrl: toMiniprogramAssetUrl(hit.wallpaper || "/assets/images/小狗.png"),
     };
     if (prevPid !== hit.personaId) {
       this._hasUserMessagedThisChat = false;
@@ -1279,6 +1383,12 @@ Page({
       method: "POST",
       data: { session_id: sid, text, use_tts: true },
       success: (res) => {
+        const statusCode = Number(res?.statusCode || 0);
+        if (statusCode < 200 || statusCode >= 300) {
+          this._handleCompanionBackendChatError(parseCompanionBackendError(res?.data || {}, statusCode));
+          return;
+        }
+
         const reply = res?.data?.assistant_text || "我听到啦，我们继续聊～";
         const audioUrl = res?.data?.tts_audio_url || "";
         this.typeAssistantReply(reply, () => {
@@ -1292,12 +1402,25 @@ Page({
         });
       },
       fail: () => {
-        const list = this.data.chatList.concat([{ role: "assistant", text: "网络有点忙，我们再试一次吧～" }]);
-        this.setData({ chatList: list, chatLoading: false, speechHint: "网络有点忙，我们再试试～" }, () =>
-          this._scrollChatToBottom()
-        );
+        this._handleCompanionBackendChatError(parseCompanionBackendError({}, 0, true));
       },
     });
+  },
+
+  _handleCompanionBackendChatError(errInfo) {
+    const ui = buildCompanionErrorUi(errInfo?.reason || "", errInfo?.message || "");
+    const list = (this.data.chatList || []).concat([{ role: "assistant", text: ui.bubble }]);
+    this.setData(
+      {
+        chatList: list,
+        chatLoading: false,
+        speechHint: ui.hint,
+        isTypingReply: false,
+        typingReplyText: "",
+      },
+      () => this._scrollChatToBottom()
+    );
+    wx.showToast({ title: ui.toast || "请求失败", icon: "none" });
   },
 
   playTts(audioUrl) {
@@ -1393,6 +1516,13 @@ Page({
         } catch (e) {
           body = {};
         }
+
+        const statusCode = Number(res?.statusCode || 0);
+        if (statusCode < 200 || statusCode >= 300) {
+          this._handleCompanionBackendChatError(parseCompanionBackendError(body, statusCode));
+          return;
+        }
+
         const userText = body.user_text || "（语音已发送）";
         const reply = body.assistant_text || "我听到啦，我们继续聊～";
         const replaced = this.data.chatList.slice(0, -1).concat([{ role: "user", text: userText }]);
@@ -1409,8 +1539,7 @@ Page({
       },
       fail: () => {
         this.setInteractionActive(false);
-        const list = this.data.chatList.concat([{ role: "assistant", text: "语音上传失败了，我们再试一次吧～" }]);
-        this.setData({ chatList: list, chatLoading: false, speechHint: "语音好像跑丢了，再试试～" }, () => this._scrollChatToBottom());
+        this._handleCompanionBackendChatError(parseCompanionBackendError({}, 0, true));
       },
     });
   },

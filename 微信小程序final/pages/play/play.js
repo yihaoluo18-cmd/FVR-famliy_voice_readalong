@@ -1,4 +1,4 @@
-const { getAmusementParkProgress } = require("../../utils/amusement-park-stars.js");
+const { getAmusementParkProgress, buildAmusementParkHint } = require("../../utils/amusement-park-stars.js");
 const { isMainDone, markMainDone } = require("../../utils/guide-flow.js");
 const { getUserId, isGuestCompanionUserId, requestEggState } = require("../../utils/pet-growth.js");
 
@@ -10,7 +10,8 @@ const BASE_GAMES = [
     id: "speaker",
     title: "小小演说家",
     desc: "看图说话得奖励",
-    iconEmoji: "🎤",
+    iconUrl: "../../assets/icons/home-mic.png",
+    stickerUrl: "../../assets/icons/home-mic.png",
     emoji: "🎤",
     route: "/pages/speaker/speaker",
     delay: 0.05,
@@ -20,7 +21,8 @@ const BASE_GAMES = [
     id: "color",
     title: "涂色小画家",
     desc: "给可爱动物涂上颜色",
-    iconEmoji: "🖌️",
+    iconUrl: "../../assets/icons/home-color.png",
+    stickerUrl: "../../assets/icons/home-color.png",
     emoji: "🖌️",
     route: "/pages/color/color",
     delay: 0.1,
@@ -28,9 +30,10 @@ const BASE_GAMES = [
   },
   {
     id: "companion",
-    title: "AI伴宠",
+    title: "AI聊伴",
     desc: "语音聊天 + 可爱互动",
-    iconEmoji: "🐶",
+    iconUrl: "../../assets/icons/home-chat.png",
+    stickerUrl: "../../assets/icons/home-chat.png",
     emoji: "✨",
     route: "/pages/companion/companion",
     delay: 0.15,
@@ -40,7 +43,8 @@ const BASE_GAMES = [
     id: "petEggGarden",
     title: "宠物蛋乐园",
     desc: "签到和阅读都会让蛋蛋长大",
-    iconEmoji: "🥚",
+    iconUrl: "../../assets/icons/home-egg.png",
+    stickerUrl: "../../assets/icons/home-egg.png",
     emoji: "✨",
     route: "/pages/pet-system/pet-system",
     delay: 0.2,
@@ -67,10 +71,17 @@ Page({
     games: [],
     ferrisDeg: 0,
     ferrisCabins: FERRIS_CABINS,
+    ferrisCabinFilled: Array.from({ length: FERRIS_CABINS.length }, () => false),
     apCount: 0,
     apTotal: 4,
     apNodes: [],
     apFillPercent: 0,
+    apStarsToday: 0,
+    apHint: '',
+    flyStar: { show: false, phase: 'ready', x: 0, y: 0, dx: 0, dy: 0 },
+    groundStars: [],
+    apBonusStars: 0,
+    ferrisNotes: [],
     showGuide: false,
     guideSteps: [],
     guideStepIndex: 0,
@@ -85,6 +96,10 @@ Page({
     this._ferrisRect = null;
     this._ferrisTimer = null;
     this._lastTouchAngle = 0;
+    this._apStarsPrev = null;
+    this._groundSeed = 0;
+    this._initFerrisNotes();
+    this._initGroundStars();
     this.refreshAmusementParkUi();
   },
 
@@ -189,7 +204,8 @@ Page({
     this.measureFerrisTouch();
   },
 
-  refreshAmusementParkUi() {
+  refreshAmusementParkUi(options = {}) {
+    const suppressFly = !!(options && options.suppressFly);
     const progress = getAmusementParkProgress();
     const doneSet = new Set(progress.doneIds || []);
     const guest = isGuestCompanionUserId(getUserId());
@@ -216,11 +232,193 @@ Page({
       leftPct: Number((((idx + 0.5) / 4) * 100).toFixed(2)),
       stackLayers: Array.from({ length: Math.min(stars, 3) }, (_, i) => i),
     }));
+    const baseStars = Math.max(0, Number(progress.milestoneStarsEarnedToday || 0) || 0);
+    const bonus = Math.max(0, Number(this.data.apBonusStars || 0) || 0);
+    const apStarsToday = baseStars + bonus;
+    const apHint = buildAmusementParkHint(progress);
+    const cabins = this.data.ferrisCabins || [];
+    const maxFill = Math.min(cabins.length, apStarsToday);
+    const nextCabinFilled = cabins.map((_, idx) => idx < maxFill);
     this.setData({
       apCount: c,
       apTotal: 4,
       apFillPercent,
       apNodes,
+      apStarsToday,
+      apHint,
+      ferrisCabinFilled: nextCabinFilled,
+    });
+
+    // 从其它页面返回时，若“今日游乐园累计星数”增加，则补一个飞入舱位的动效
+    // 首次进入仅同步状态，不播放飞星；后续“新增”再播放
+    const prevRaw = this._apStarsPrev;
+    const prev = prevRaw === null || prevRaw === undefined ? null : (Number(prevRaw) || 0);
+    this._apStarsPrev = apStarsToday;
+    if (!suppressFly && prev !== null && apStarsToday > prev) {
+      // 仅为“新增且在舱位上可见的那部分”播放动画
+      const from = Math.min(prev, cabins.length);
+      const to = Math.min(apStarsToday, cabins.length);
+      const delta = Math.max(0, to - from);
+      if (delta > 0) this._queueFlyStars(from, delta);
+    }
+  },
+
+  _initGroundStars() {
+    // 生成几颗“掉落到地面”的可拾取星星（仅做互动展示，不影响任务结算）
+    const seed = Number(this._groundSeed || 0) + 1;
+    this._groundSeed = seed;
+    const lefts = [16, 34, 56, 72, 86];
+    const count = 4;
+    const groundStars = Array.from({ length: count }, (_, i) => ({
+      id: `g${seed}_${i}`,
+      leftPct: lefts[i % lefts.length],
+      delayMs: 120 + i * 140,
+      picked: false,
+    }));
+    this.setData({ groundStars });
+  },
+
+  _initFerrisNotes() {
+    // 音符粒子：跟随摩天轮缓慢“飘出”，若隐若现
+    const notes = ["♪", "♫", "♩", "♬"];
+    const ferrisNotes = Array.from({ length: 10 }, (_, i) => ({
+      id: `n${i}`,
+      glyph: notes[i % notes.length],
+      // 让音符围绕摩天轮分布，但相位错开
+      angle: (i * 36) % 360,
+      radius: 214 + (i % 3) * 18,
+      delayMs: 160 * i,
+      size: 22 + (i % 3) * 2,
+      drift: 8 + (i % 4) * 3,
+    }));
+    this.setData({ ferrisNotes });
+  },
+
+  _nextEmptyCabinIndex() {
+    const filled = Array.isArray(this.data.ferrisCabinFilled) ? this.data.ferrisCabinFilled : [];
+    const idx = filled.findIndex((x) => !x);
+    if (idx >= 0) return idx;
+    return Math.max(0, filled.length - 1);
+  },
+
+  onPickGroundStar(e) {
+    const id = e && e.currentTarget && e.currentTarget.dataset ? String(e.currentTarget.dataset.id || "") : "";
+    if (!id) return;
+    const list = Array.isArray(this.data.groundStars) ? this.data.groundStars : [];
+    const hit = list.find((s) => s && s.id === id);
+    if (!hit || hit.picked) return;
+
+    const targetCabinIdx = this._nextEmptyCabinIndex();
+    // 先标记为已拾取，避免重复点击
+    const nextList = list.map((s) => (s.id === id ? { ...s, picked: true } : s));
+    this.setData({ groundStars: nextList });
+
+    this._animateFlyStarFromSelector(`#groundStar-${id}`, targetCabinIdx).then(() => {
+      // 飞到舱位后点亮，并增加“展示用”今日累计星
+      const filled = Array.isArray(this.data.ferrisCabinFilled) ? [...this.data.ferrisCabinFilled] : [];
+      if (filled.length) filled[targetCabinIdx] = true;
+      const bonus = Math.max(0, Number(this.data.apBonusStars || 0) || 0) + 1;
+      this.setData(
+        { ferrisCabinFilled: filled, apBonusStars: bonus },
+        () => this.refreshAmusementParkUi({ suppressFly: true })
+      );
+    });
+  },
+
+  _animateFlyStarFromSelector(startSelector, cabinIdx) {
+    const idx = Math.max(0, Math.min((this.data.ferrisCabins || []).length - 1, Number(cabinIdx) || 0));
+    const sel = String(startSelector || "").trim();
+    if (!sel) return Promise.resolve();
+    return new Promise((resolve) => {
+      wx.createSelectorQuery()
+        .in(this)
+        .select(sel)
+        .boundingClientRect()
+        .select(`#ferrisCabinBox-${idx}`)
+        .boundingClientRect()
+        .exec((res) => {
+          const start = res && res[0];
+          const end = res && res[1];
+          if (!start || !end) {
+            resolve();
+            return;
+          }
+          const sx = start.left + start.width / 2;
+          const sy = start.top + start.height / 2;
+          const ex = end.left + end.width / 2;
+          const ey = end.top + end.height / 2;
+          this.setData({ flyStar: { show: true, phase: "ready", x: sx, y: sy, dx: 0, dy: 0 } });
+          setTimeout(() => {
+            this.setData({ flyStar: { show: true, phase: "go", x: sx, y: sy, dx: ex - sx, dy: ey - sy } });
+          }, 16);
+          setTimeout(() => {
+            this.setData({ flyStar: { ...this.data.flyStar, show: false, phase: "ready" } });
+            resolve();
+          }, 640);
+        });
+    });
+  },
+
+  _queueFlyStars(startIdx, delta) {
+    if (!Number.isFinite(startIdx) || startIdx < 0) startIdx = 0;
+    const d = Math.max(0, Number(delta || 0) || 0);
+    if (!d) return;
+    if (!this._flyStarQueue) this._flyStarQueue = [];
+    for (let i = 0; i < d; i++) this._flyStarQueue.push(startIdx + i);
+    if (this._flyStarRunning) return;
+    this._flyStarRunning = true;
+    this._runNextFlyStar();
+  },
+
+  _runNextFlyStar() {
+    const q = Array.isArray(this._flyStarQueue) ? this._flyStarQueue : [];
+    const nextIdx = q.shift();
+    this._flyStarQueue = q;
+    if (nextIdx === undefined || nextIdx === null) {
+      this._flyStarRunning = false;
+      return;
+    }
+    this._animateFlyStarIntoCabin(Number(nextIdx) || 0).finally(() => {
+      // 小间隔，让连续奖励更顺滑
+      setTimeout(() => this._runNextFlyStar(), 140);
+    });
+  },
+
+  _animateFlyStarIntoCabin(cabinIdx) {
+    const idx = Math.max(0, Math.min((this.data.ferrisCabins || []).length - 1, Number(cabinIdx) || 0));
+    return new Promise((resolve) => {
+      // 起点：进度卡头部的不可见锚点；终点：指定舱位
+      wx.createSelectorQuery()
+        .in(this)
+        .select("#apFlyAnchor")
+        .boundingClientRect()
+        .select(`#ferrisCabinBox-${idx}`)
+        .boundingClientRect()
+        .exec((res) => {
+          const start = res && res[0];
+          const end = res && res[1];
+          if (!start || !end) {
+            resolve();
+            return;
+          }
+          const sx = start.left + start.width / 2;
+          const sy = start.top + start.height / 2;
+          const ex = end.left + end.width / 2;
+          const ey = end.top + end.height / 2;
+          // 先放到起点，再触发位移（用 CSS transition）
+          this.setData({
+            flyStar: { show: true, phase: "ready", x: sx, y: sy, dx: 0, dy: 0 },
+          });
+          setTimeout(() => {
+            this.setData({
+              flyStar: { show: true, phase: "go", x: sx, y: sy, dx: ex - sx, dy: ey - sy },
+            });
+          }, 16);
+          setTimeout(() => {
+            this.setData({ flyStar: { ...this.data.flyStar, show: false, phase: "ready" } });
+            resolve();
+          }, 640);
+        });
     });
   },
 

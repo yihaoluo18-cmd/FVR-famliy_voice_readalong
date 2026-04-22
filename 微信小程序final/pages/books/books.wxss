@@ -119,6 +119,12 @@
   font-size: 44rpx;
 }
 
+.book-icon-img {
+  width: 40rpx;
+  height: 40rpx;
+  flex-shrink: 0;
+}
+
 .header-text {
   color: #f0a3c2;
   font-size: 26rpx;
@@ -1080,6 +1086,29 @@
 
 .sparkle-icon {
   font-size: 40rpx;
+}
+
+.section-icon-img {
+  width: 40rpx;
+  height: 40rpx;
+  flex-shrink: 0;
+  opacity: 0.92;
+}
+
+.featured-recent-section .featured-section-header {
+  gap: 18rpx;
+}
+
+.featured-recent-section .section-icon-img {
+  margin-left: 4rpx;
+}
+
+.featured-recent-section .bookshelf-title {
+  margin-left: 6rpx;
+}
+
+.featured-recent-section .bookshelf-count {
+  margin-left: 2rpx;
 }
 
 .bookshelf-title {

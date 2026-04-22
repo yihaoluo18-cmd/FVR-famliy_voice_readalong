@@ -61,7 +61,7 @@ curl http://127.0.0.1:9880/coloring/health
 #### 选项 B：生成完整线稿（30张）
 
 ```bash
-cd /home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604
+cd /path/to/test1
 
 # 运行生成脚本
 python modules/coloring_artist/practice/generate_coloring_lineart.py

@@ -1,13 +1,11 @@
 const app = getApp();
 const { markMainDone, isMainDone } = require("../../utils/guide-flow.js");
+const { resolveApiBase } = require("../../utils/api-base.js");
 
 const MASCOT_URL = "https://images.unsplash.com/photo-1772371272174-392cf9cfabae?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&w=400";
 
 function authApiBase() {
-  try {
-    if (app && typeof app.getApiBaseUrl === "function") return app.getApiBaseUrl();
-  } catch (e) {}
-  return "http://127.0.0.1:9880";
+  return resolveApiBase(app);
 }
 
 function isValidCnMobile(s) {

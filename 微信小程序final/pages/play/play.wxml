@@ -8,9 +8,25 @@
     </view>
 
     <view class="ride-stage">
-      <view class="ride-orbit-wrap">
+      <view class="ride-orbit-wrap" style="--ferris: {{ferrisDeg}}deg;">
         <view class="ride-shimmer"></view>
         <view class="ride-glow-pulse"></view>
+        <view class="ride-notes-layer">
+          <view
+            wx:for="{{ferrisNotes}}"
+            wx:key="id"
+            class="ride-note"
+            style="
+              --a: {{item.angle}}deg;
+              --r: {{item.radius}}rpx;
+              --delay: {{item.delayMs}}ms;
+              --size: {{item.size}}rpx;
+              --drift: {{item.drift}}rpx;
+            "
+          >
+            <text class="ride-note-glyph">{{item.glyph}}</text>
+          </view>
+        </view>
 
         <view
           class="ride-touch-target"
@@ -35,6 +51,7 @@
               <view
                 wx:for="{{ferrisCabins}}"
                 wx:key="angle"
+                wx:for-index="cidx"
                 class="ferris-arm"
                 style="transform: rotate({{item.angle}}deg);"
               >
@@ -44,12 +61,16 @@
                 >
                   <view class="ferris-cabin-cable"></view>
                   <view class="ferris-cabin-roof"></view>
-                  <view class="ferris-cabin-box">
+                  <view class="ferris-cabin-box" id="ferrisCabinBox-{{cidx}}">
                     <view class="ferris-cabin-window ferris-cabin-window-l"></view>
                     <view class="ferris-cabin-window ferris-cabin-window-r"></view>
                     <view class="ferris-cabin-door"></view>
                   </view>
                   <view class="ferris-cabin-skirt"></view>
+                  <view class="ferris-cabin-tether"></view>
+                  <view class="ferris-cabin-hanging" wx:if="{{ferrisCabinFilled[cidx]}}">
+                    <text class="ferris-cabin-hanging-star">⭐</text>
+                  </view>
                 </view>
               </view>
               <view class="ferris-hub">
@@ -65,13 +86,36 @@
         <view class="ferris-leg ferris-leg-right"></view>
         <view class="ferris-base-foot"></view>
       </view>
+
+      <!-- 地面 + 可拾取星星 -->
+      <view class="ride-ground">
+        <view class="ride-ground-deck"></view>
+        <view class="ride-ground-shadow"></view>
+        <view class="ride-ground-stars">
+          <view
+            wx:for="{{groundStars}}"
+            wx:key="id"
+            class="ground-star {{item.picked ? 'is-picked' : ''}}"
+            id="groundStar-{{item.id}}"
+            style="left: {{item.leftPct}}%; animation-delay: {{item.delayMs}}ms;"
+            catchtap="onPickGroundStar"
+            data-id="{{item.id}}"
+          >
+            <text class="ground-star-icon">⭐</text>
+          </view>
+        </view>
+      </view>
     </view>
   </view>
 
   <!-- 游乐园：细轨道 + 圆点节点（堆叠星 + 数字） -->
   <view class="ap-progress-card {{showGuide && guideHighlight === 'egg' ? 'guide-pulse' : ''}}">
     <view class="ap-progress-head">
-      <text class="ap-head-icon">🎪</text>
+      <view class="ap-head-stars" id="apFlyAnchor">
+        <text class="ap-head-stars-num">{{apStarsToday}}</text>
+        <text class="ap-head-stars-unit">⭐</text>
+        <text class="ap-head-stars-text">今日累计</text>
+      </view>
       <text class="ap-progress-count">{{apCount}}/{{apTotal}}</text>
     </view>
     <view class="ap-rail-inner">
@@ -103,6 +147,14 @@
     </view>
   </view>
 
+  <view
+    wx:if="{{flyStar && flyStar.show}}"
+    class="fly-star {{flyStar.phase === 'go' ? 'is-go' : ''}}"
+    style="left: {{flyStar.x}}px; top: {{flyStar.y}}px; --dx: {{flyStar.dx}}px; --dy: {{flyStar.dy}}px;"
+  >
+    <text class="fly-star-icon">⭐</text>
+  </view>
+
   <!-- 游戏列表 -->
   <view class="games-list {{showGuide && guideHighlight === 'games' ? 'guide-pulse' : ''}}">
     <view 
@@ -119,21 +171,24 @@
       >
         <!-- 图标 -->
         <view class="game-icon-box icon-{{item.id}}">
-          <text class="game-icon">{{item.iconEmoji}}</text>
+          <image class="game-icon-img" src="{{item.iconUrl}}" mode="aspectFit"></image>
         </view>
 
         <!-- 文本 -->
         <view class="game-text">
-          <text class="game-title">{{item.title}}</text>
+          <view class="game-title-row">
+            <text class="game-title">{{item.title}}</text>
+          </view>
           <text class="game-desc">{{item.desc}}</text>
         </view>
 
         <!-- 右侧 -->
         <view class="game-right">
-          <text class="game-emoji">{{item.emoji}}</text>
-          <view class="game-stars-badge {{item.done ? 'is-done' : 'is-todo'}}">
-            <text class="stars-text {{item.done ? 'done' : 'todo'}}">{{item.done ? '已完成' : '待完成'}}</text>
-          </view>
+          <image
+            class="game-status-sticker-img"
+            src="{{item.done ? '../../assets/icons/完成.png' : '../../assets/icons/imcomplete.png'}}"
+            mode="aspectFit"
+          ></image>
         </view>
 
         <!-- 锁定遮罩 -->

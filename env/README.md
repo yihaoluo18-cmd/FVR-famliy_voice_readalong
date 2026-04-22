@@ -4,22 +4,22 @@
 
 ## 文件用途
 
-- `wx_api.env`：实际运行时环境变量（包含 AI Key 等敏感配置）
+- `wx_api.env`：实际运行时环境变量（包含 AI Key/微信密钥等敏感配置，**不要提交 git**）
 - `wx_api.env.example`：环境变量模板（不含真实密钥）
-- `requirements.txt`：Python 依赖列表（无 `requirements-lock.txt` 时使用）
+- `requirements.txt`：Python 依赖冻结（由可运行环境 `pip freeze` 生成，用于复现）
 - `setup_env.cmd`：Windows 环境初始化脚本（创建 `venv` + 安装依赖）
-- `setup_env.sh`：Linux / Git Bash 环境初始化脚本
+- `setup_env.sh`：Linux/macOS/WSL2 环境初始化脚本
 - `setuptools-81.0.0-py3-none-any.whl`：离线安装辅助包（可选）
 - `DEPLOY.md`：部署文档
 
-## 一键初始化（从仓库根目录）
+## 一键初始化（在 test1/ 根目录执行）
 
-根目录保留了启动入口脚本：
+```bash
+chmod +x env/setup_env.sh
+env/setup_env.sh
+```
 
-- Windows：`setup_env.cmd`
-- Linux / Git Bash：`./setup_env.sh`
-
-它们会转发到本目录对应脚本执行。
+Windows 直接运行 `env\\setup_env.cmd` 即可。
 
 ## `wx_api.env` 配置说明（重点）
 
@@ -40,9 +40,11 @@
 
 ## 运行时加载规则
 
-`start_wx_api.sh` 会按以下顺序加载：
+`start_wx_api.sh` 会依次尝试加载：
 
-1. `env/wx_api.env`
-2. `env/wx_api.env.example`（仅当前者不存在时）
+1. `wx_api.env`
+2. `env/wx_api.env`
+3. `wx_api.env.example`
+4. `env/wx_api.env.example`
 
-因此生产环境务必提供 `env/wx_api.env`。
+建议只维护 `env/wx_api.env`（不提交）与 `env/wx_api.env.example`（提交）。

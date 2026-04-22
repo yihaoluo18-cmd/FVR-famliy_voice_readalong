@@ -1,23 +1,17 @@
 /**
- * 小程序逻辑路径 /assets/... 已统一由后端 /assets/... 提供。
- * 将逻辑路径转为完整 URL（路径段 URL 编码以支持中文文件名）。
+ * 小程序包内 /assets 由后端 /assets 统一提供。
+ * 将逻辑路径 /assets/... 转为可请求的完整 URL（路径段 URL 编码以支持中文文件名）。
  */
 
-const DEFAULT_BASE = "http://127.0.0.1:9880";
+const { resolveApiBase, DEV_LOOPBACK_FALLBACK } = require("./api-base.js");
 
 function normalizeBase(url) {
   const s = String(url || "").trim().replace(/\/+$/, "");
-  return s || DEFAULT_BASE;
+  return s || DEV_LOOPBACK_FALLBACK;
 }
 
 function getApiBase() {
-  try {
-    const app = typeof getApp === "function" ? getApp() : null;
-    if (app && typeof app.getApiBaseUrl === "function") {
-      return normalizeBase(app.getApiBaseUrl());
-    }
-  } catch (e) {}
-  return DEFAULT_BASE;
+  return normalizeBase(resolveApiBase(null));
 }
 
 function toMiniprogramAssetUrl(relPath) {

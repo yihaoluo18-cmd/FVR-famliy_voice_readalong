@@ -1,4 +1,5 @@
 const app = getApp();
+const { resolveApiBase } = require("../../utils/api-base.js");
 const { isMainDone } = require("../../utils/guide-flow.js");
 
 // 分类书屋：按后端 magic_books/index 的 tags 动态生成；缺失类别则自动新建
@@ -172,7 +173,7 @@ Page({
   },
 
   loadShelfBooks() {
-    const base = (app && app.getApiBaseUrl) ? app.getApiBaseUrl() : 'http://127.0.0.1:9880';
+    const base = resolveApiBase(app);
     this.setData({ shelfLoading: true, shelfError: '' });
 
     wx.request({

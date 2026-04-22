@@ -407,6 +407,100 @@
 .training-title { margin-top: 14rpx; color: #b87a94; font-size: 30rpx; font-weight: 800; }
 .training-hint { margin-top: 8rpx; color: #c97a9a; font-size: 24rpx; }
 
+.training-egg-guide {
+  margin-top: 18rpx;
+  width: 100%;
+  padding: 14rpx;
+  border-radius: 20rpx;
+  background: linear-gradient(145deg, #fff7ed, #fffbeb);
+  border: 2rpx dashed #f0a8c0;
+}
+
+.training-egg-fab {
+  position: fixed;
+  right: 24rpx;
+  bottom: 180rpx;
+  z-index: 1200;
+  border-radius: 999rpx;
+  padding: 14rpx 18rpx;
+  background: linear-gradient(145deg, #f0a8c0, #e879a9);
+  box-shadow: 0 10rpx 24rpx rgba(232, 121, 169, 0.35);
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  animation: eggFloat 1.8s ease-in-out infinite;
+}
+
+.training-egg-fab-icon {
+  font-size: 32rpx;
+}
+
+.training-egg-fab-text {
+  color: #fff;
+  font-size: 24rpx;
+  font-weight: 800;
+}
+
+.egg-arrow-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+}
+
+.egg-arrow {
+  font-size: 34rpx;
+  animation: eggArrowPulse 0.9s ease-in-out infinite;
+}
+
+.egg-arrow-label {
+  color: #b87a94;
+  font-size: 24rpx;
+  font-weight: 800;
+}
+
+.egg-card {
+  margin-top: 8rpx;
+  border-radius: 16rpx;
+  background: #fff;
+  padding: 14rpx;
+  text-align: center;
+}
+
+.egg-card.floating {
+  animation: eggFloat 1.8s ease-in-out infinite;
+}
+
+.egg-icon {
+  display: block;
+  font-size: 54rpx;
+}
+
+.egg-title {
+  display: block;
+  margin-top: 4rpx;
+  color: #f08aae;
+  font-size: 26rpx;
+  font-weight: 900;
+}
+
+.egg-desc {
+  display: block;
+  margin-top: 4rpx;
+  color: #c97a9a;
+  font-size: 22rpx;
+}
+
+@keyframes eggArrowPulse {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6rpx); }
+}
+
+@keyframes eggFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4rpx); }
+}
+
 .science-card {
   margin-top: 20rpx;
   width: 100%;

@@ -106,7 +106,7 @@ curl http://127.0.0.1:9880/coloring/health
 仅当需要 30 张完整线稿时执行：
 
 ```bash
-cd /home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604
+cd /path/to/test1
 
 # 检查火山引擎配置
 # 确保 wx_api.env 中有 VOLC_ACCESSKEY 和 VOLC_SECRETKEY
@@ -503,8 +503,8 @@ if sketch_id not in valid_sketches:
 **立即执行的命令**:
 
 ```bash
-# 1. 进入项目目录
-cd /home/user0/public2/lyh/GPT-SoVITS-v2pro-20250604
+# 1. 进入项目目录（test1）
+cd /path/to/test1
 
 # 2. 启动 API 服务
 ./start_wx_api.sh --wx-only

@@ -142,10 +142,12 @@ RESP: 无
 
 import argparse
 import asyncio
+import difflib
 import os
 import re
 import sys
 import json
+import hashlib
 import base64
 import shutil
 import threading
@@ -156,8 +158,8 @@ from modules.ai_runtime import load_ai_runtime_config
 
 
 # 定义临时文件目录（添加到代码开头）
-TEMP_RAW_DIR = "train/temp_raw_audio"  # 存放原始上传音频（MP3/AMR）
-TEMP_WAV_DIR = "train/temp_wav_audio"  # 存放转码后的WAV音频
+TEMP_RAW_DIR = "temp_raw_audio"  # 存放原始上传音频（MP3/AMR）
+TEMP_WAV_DIR = "temp_wav_audio"  # 存放转码后的WAV音频
 
 # 前端"需要录制/展示"的句子数量（索引范围: 0 ~ MAX_READ_SENTENCES-1）
 # 注意：训练端仍由 train_api.py 的 MAX_DATASET_SENTENCES 控制（当前为 14）
@@ -166,15 +168,6 @@ MAX_READ_SENTENCES = 14
 # 确保目录存在
 os.makedirs(TEMP_RAW_DIR, exist_ok=True)
 os.makedirs(TEMP_WAV_DIR, exist_ok=True)
-
-# Windows 控制台常为 GBK，print/部分日志输出含 ✅、⚠️ 等时会触发 UnicodeEncodeError
-if sys.platform == "win32":
-    for _stream in (sys.stdout, sys.stderr):
-        if hasattr(_stream, "reconfigure"):
-            try:
-                _stream.reconfigure(encoding="utf-8")
-            except Exception:
-                pass
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -216,6 +209,7 @@ except Exception as e:
                 return []
             return [text]
 from time import time as ttime
+import gc
 import torch
 _torchaudio_import_error = None
 try:
@@ -263,15 +257,16 @@ if _langseg_import_error:
 if _torchaudio_import_error:
     logger.warning(f"[wx_api] torchaudio 导入失败（将降级为 librosa 加载/重采样）: {_torchaudio_import_error}")
 
-# 导入音频预处理模块
+# 上传阶段不再做 HP5 主人声提取，改为仅转码后的 WAV 入库。
+
+# 上传后音频提纯（net2/deepfilternet2+wpe），用于训练阶段跳过重复提纯
 try:
-    # 新版：仅使用官网 UVR5 的 HP5_only_main_vocal 模型提取主人声
-    # 对外统一用 preprocess_audio 接口，内部已经固定为 HP5_only_main_vocal 逻辑
-    from audio_preprocess import preprocess_audio
-    AUDIO_PREPROCESS_AVAILABLE = True
-except ImportError as e:
-    logger.warning(f"[wx_api] 音频预处理模块导入失败: {e}，将跳过预处理步骤")
-    AUDIO_PREPROCESS_AVAILABLE = False 
+    from tools.audio_purification import purify_audio_file as _purify_audio_file
+    _AUDIO_PURIFY_AVAILABLE = True
+except Exception as _pur_exc:
+    _AUDIO_PURIFY_AVAILABLE = False
+    _purify_audio_file = None  # type: ignore
+    logger.warning(f"[wx_api] 音频提纯模块不可用（上传后将不自动提纯）: {_pur_exc}")
 
 class DefaultRefer:
     def __init__(self, path, text, language):
@@ -514,7 +509,10 @@ VOICE_LIBRARY = {
 
 QWEN_BASE_FEMALE_VOICE_ID = "voice_001"
 QWEN_BASE_MALE_VOICE_ID = "voice_002"
-QWEN_BASE_VOICE_IDS = {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID}
+QWEN_BASE_SCIENCE_VOICE_ID = "voice_003"
+QWEN_BASE_VOICE_IDS = {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID, QWEN_BASE_SCIENCE_VOICE_ID}
+LOCAL_PRIMARY_VOICE_ID = str(os.environ.get("LOCAL_PRIMARY_VOICE_ID", "voice_018") or "voice_018").strip() or "voice_018"
+VOICE_WHITELIST_IDS = {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID, LOCAL_PRIMARY_VOICE_ID}
 
 
 def _build_qwen_base_voice_profiles() -> dict:
@@ -523,8 +521,17 @@ def _build_qwen_base_voice_profiles() -> dict:
             "name": "温柔姐姐",
             "model_type": "pretrained",
             "provider": "qwen_tts",
+            "qwen_model": "qwen3-tts-instruct-flash",
+            "qwen_model_candidates": [
+                "qwen3-tts-instruct-flash",
+                "qwen3-tts-flash",
+                "qwen-tts",
+                "qwen3-omni-flash",
+                "qwen3.5-omni-flash",
+                "qwen-omni-turbo",
+            ],
             "qwen_voice": "Cherry",
-            "qwen_voice_candidates": ["Cherry", "Clover", "Nora"],
+            "qwen_voice_candidates": ["Cherry", "Clover", "Serena", "Nora"],
             "is_builtin": True,
             "can_delete": False,
             "can_rename": False,
@@ -539,6 +546,15 @@ def _build_qwen_base_voice_profiles() -> dict:
             "name": "俊朗哥哥",
             "model_type": "pretrained",
             "provider": "qwen_tts",
+            "qwen_model": "qwen3-tts-instruct-flash",
+            "qwen_model_candidates": [
+                "qwen3-tts-instruct-flash",
+                "qwen3-tts-flash",
+                "qwen-tts",
+                "qwen3-omni-flash",
+                "qwen3.5-omni-flash",
+                "qwen-omni-turbo",
+            ],
             "qwen_voice": "Ethan",
             "qwen_voice_candidates": ["Ethan", "Atlas", "Echo"],
             "is_builtin": True,
@@ -549,6 +565,32 @@ def _build_qwen_base_voice_profiles() -> dict:
             "emotion": "自然",
             "voice_group": "qwen_base",
             "quick_story": True,
+            "trained_at": "",
+        },
+        QWEN_BASE_SCIENCE_VOICE_ID: {
+            "name": "科普老师",
+            "model_type": "pretrained",
+            "provider": "qwen_tts",
+            "qwen_model": "qwen3-tts-instruct-flash",
+            "qwen_model_candidates": [
+                "qwen3-tts-instruct-flash",
+                "qwen3-tts-flash",
+                "qwen-tts",
+                "qwen3-omni-flash",
+                "qwen3.5-omni-flash",
+                "qwen-omni-turbo",
+            ],
+            "qwen_voice": "Serena",
+            "qwen_voice_candidates": ["Serena", "Clover", "Nora", "Cherry"],
+            "is_builtin": True,
+            "can_delete": False,
+            "can_rename": False,
+            "gender": "female",
+            "scene": "科普讲解",
+            "emotion": "清晰",
+            "voice_group": "qwen_science",
+            "quick_story": True,
+            "hide_in_voice_list": True,
             "trained_at": "",
         },
     }
@@ -570,6 +612,11 @@ def _is_qwen_voice_profile(profile: Optional[dict]) -> bool:
     p = profile if isinstance(profile, dict) else {}
     provider = str((p or {}).get("provider") or "").strip().lower()
     return provider == "qwen_tts"
+
+
+def _is_qwen_base_story_voice_profile(profile: Optional[dict]) -> bool:
+    p = profile if isinstance(profile, dict) else {}
+    return _is_qwen_voice_profile(p) and str((p or {}).get("voice_group") or "").strip().lower() == "qwen_base"
 
 
 def _qwen_voice_candidates(profile: Optional[dict]) -> List[str]:
@@ -597,9 +644,40 @@ def _qwen_voice_candidates(profile: Optional[dict]) -> List[str]:
     return out
 
 
+def _qwen_tts_model_candidates(profile: Optional[dict] = None) -> List[str]:
+    p = profile if isinstance(profile, dict) else {}
+    out = []
+
+    def _append(v):
+        mv = str(v or "").strip()
+        if mv and mv not in out:
+            out.append(mv)
+
+    _append((p or {}).get("qwen_model"))
+    raw = (p or {}).get("qwen_model_candidates")
+    if isinstance(raw, (list, tuple)):
+        for it in raw:
+            _append(it)
+    elif isinstance(raw, str):
+        for it in raw.split(","):
+            _append(it)
+
+    _append(SAFETY_AI_TTS_MODEL)
+    for it in SAFETY_AI_TTS_MODEL_FALLBACKS:
+        _append(it)
+    for it in QWEN_TTS_MODEL_CANDIDATES_DEFAULT:
+        _append(it)
+    return out
+
+
 def _ensure_builtin_base_voices() -> bool:
     changed = False
-    builtin = _build_qwen_base_voice_profiles()
+    # 只保留“温柔姐姐/俊朗哥哥”两个内置音色，科普老师默认不注入正式库
+    builtin_all = _build_qwen_base_voice_profiles()
+    builtin = {
+        QWEN_BASE_FEMALE_VOICE_ID: builtin_all.get(QWEN_BASE_FEMALE_VOICE_ID, {}),
+        QWEN_BASE_MALE_VOICE_ID: builtin_all.get(QWEN_BASE_MALE_VOICE_ID, {}),
+    }
     for vid, info in builtin.items():
         current = VOICE_LIBRARY.get(vid)
         if not isinstance(current, dict):
@@ -612,6 +690,8 @@ def _ensure_builtin_base_voices() -> bool:
             "name",
             "model_type",
             "provider",
+            "qwen_model",
+            "qwen_model_candidates",
             "qwen_voice",
             "qwen_voice_candidates",
             "is_builtin",
@@ -622,6 +702,7 @@ def _ensure_builtin_base_voices() -> bool:
             "emotion",
             "voice_group",
             "quick_story",
+            "hide_in_voice_list",
         ]:
             if merged.get(key) != info.get(key):
                 merged[key] = info.get(key)
@@ -636,9 +717,23 @@ BUFFER_TASKS = {}
 BUFFER_TASKS_LOCK = threading.Lock()
 BUFFER_TASK_TTL_SEC = 3600
 
+# 连续点击/前端抖动去重：同 voice+同文本短时间内直接复用最近合成结果
+SYNTH_RESULT_CACHE = {}
+SYNTH_RESULT_CACHE_LOCK = threading.Lock()
+try:
+    SYNTH_RESULT_CACHE_TTL_SEC = max(1.0, float(os.environ.get("SYNTH_RESULT_CACHE_TTL_SEC", "20")))
+except Exception:
+    SYNTH_RESULT_CACHE_TTL_SEC = 20.0
+SYNTH_RESULT_CACHE_MAX = 256
+
 TTS_DEBUG = {}
 TTS_DEBUG_LOCK = threading.Lock()
 TTS_DEBUG_TTL_SEC = 3600
+
+UPLOAD_PREP_LOCK = threading.Lock()
+UPLOAD_PREP_TIMERS = {}
+UPLOAD_PREP_RUNNING = set()
+
 
 def _cleanup_tts_debug():
     now = time.time()
@@ -690,7 +785,7 @@ def _debug_add_segment(debug_id: str, index: int, **fields):
         seg = {"index": index, **fields}
         rec["segments"].append(seg)
 
-VOICE_LIBRARY_FILE = str(PROJECT_ROOT / "modules" / "tts_backend" / "data" / "voice_library.json")
+VOICE_LIBRARY_FILE = str(PROJECT_ROOT / "voice_library.json")
 
 
 def _resolve_project_path(path_str):
@@ -712,29 +807,68 @@ def load_voice_library_from_file():
         if isinstance(data, dict):
             VOICE_LIBRARY.clear()
             VOICE_LIBRARY.update(data)
-            
-            # 兼容旧数据：如果没有model_type字段，根据路径判断
-            for voice_id, profile in VOICE_LIBRARY.items():
-                if "model_type" not in profile:
-                    # 如果路径包含 train/user_models，标记为用户训练模型
-                    gpt_path = _resolve_project_path(profile.get("gpt_path", ""))
-                    sovits_path = _resolve_project_path(profile.get("sovits_path", ""))
-                    refer_path = _resolve_project_path(profile.get("refer_audio", ""))
-                    if gpt_path:
-                        profile["gpt_path"] = gpt_path
-                    if sovits_path:
-                        profile["sovits_path"] = sovits_path
-                    if refer_path:
-                        profile["refer_audio"] = refer_path
 
-                    if "train/user_models" in str(gpt_path).replace("\\", "/"):
+            # 标准化路径并兼容旧字段
+            normalized_changed = False
+            for voice_id, profile in VOICE_LIBRARY.items():
+                old_gpt_path = str(profile.get("gpt_path", "") or "")
+                old_sovits_path = str(profile.get("sovits_path", "") or "")
+                old_ref_audio_path = str(profile.get("ref_audio_path", "") or profile.get("refer_audio", "") or "")
+
+                gpt_path = _resolve_project_path(old_gpt_path)
+                sovits_path = _resolve_project_path(old_sovits_path)
+                ref_audio_path = _resolve_project_path(old_ref_audio_path)
+
+                if gpt_path and gpt_path != old_gpt_path:
+                    profile["gpt_path"] = gpt_path
+                    normalized_changed = True
+                elif gpt_path:
+                    profile["gpt_path"] = gpt_path
+
+                if sovits_path and sovits_path != old_sovits_path:
+                    profile["sovits_path"] = sovits_path
+                    normalized_changed = True
+                elif sovits_path:
+                    profile["sovits_path"] = sovits_path
+
+                if ref_audio_path and ref_audio_path != old_ref_audio_path:
+                    profile["ref_audio_path"] = ref_audio_path
+                    normalized_changed = True
+                elif ref_audio_path:
+                    profile["ref_audio_path"] = ref_audio_path
+
+                if "model_type" not in profile:
+                    # 如果路径包含user_models，标记为用户训练模型
+                    if "user_models" in str(gpt_path):
                         profile["model_type"] = "user_trained"
                     else:
                         # 否则默认为预训练模型（用于快速体验）
                         profile["model_type"] = "pretrained"
+                    normalized_changed = True
 
             ensure_changed = _ensure_builtin_base_voices()
-            if ensure_changed:
+            # 强制白名单（基础保底）+ 放行“本次新训练且文件完整”的用户音色
+            # 这样既能控制脏数据，又不会把刚训练成功的音色（如 voice_019）在加载时误删。
+            prune_changed = False
+            for vid in list(VOICE_LIBRARY.keys()):
+                if vid in VOICE_WHITELIST_IDS:
+                    continue
+                profile = dict(VOICE_LIBRARY.get(vid) or {})
+                is_user_trained = str(profile.get("model_type") or "").strip().lower() == "user_trained"
+                gpt_path = str(profile.get("gpt_path") or "").strip()
+                sovits_path = str(profile.get("sovits_path") or "").strip()
+                ref_audio_path = str(profile.get("ref_audio_path") or "").strip()
+                keep_new_trained = (
+                    is_user_trained
+                    and _is_model_pair_valid(gpt_path, sovits_path)
+                    and (not ref_audio_path or os.path.exists(ref_audio_path))
+                )
+                if not keep_new_trained:
+                    VOICE_LIBRARY.pop(vid, None)
+                    prune_changed = True
+            if ensure_changed or normalized_changed:
+                save_voice_library_to_file()
+            elif prune_changed:
                 save_voice_library_to_file()
 
             logger.info(f"[声音库] 已从文件加载 {len(VOICE_LIBRARY)} 个模型: {list(VOICE_LIBRARY.keys())}")
@@ -792,6 +926,7 @@ def register_voice_model(
         # 确保路径是绝对路径
         gpt_path_abs = os.path.abspath(gpt_path) if not os.path.isabs(gpt_path) else gpt_path
         sovits_path_abs = os.path.abspath(sovits_path) if not os.path.isabs(sovits_path) else sovits_path
+        ref_audio_abs = _resolve_project_path(ref_audio_path) if ref_audio_path else ""
         
         VOICE_LIBRARY[voice_id] = {
             "name": model_name,
@@ -800,7 +935,7 @@ def register_voice_model(
             "scene": scene or "",
             "emotion": emotion or "",
             "trained_at": trained_at or datetime.now().isoformat(),
-            "ref_audio_path": ref_audio_path,  # 参考音频路径（用于推理）
+            "ref_audio_path": ref_audio_abs,  # 参考音频路径（用于推理）
             "ref_text": ref_text,  # 参考文本（用于推理）
             "ref_language": ref_language,  # 参考语言（用于推理）
             "model_type": model_type,  # 模型类型标记
@@ -851,7 +986,85 @@ def delete_voice_model(voice_id: str) -> bool:
     if _is_protected_voice(voice_id, profile):
         logger.warning(f"[删除模型] {voice_id} 为基础音色，禁止删除")
         raise ValueError("基础音色不可删除")
+
+    def _safe_remove_file(path_value: str, removed: list, errors: list):
+        p = str(path_value or "").strip()
+        if not p:
+            return
+        try:
+            ap = os.path.abspath(p)
+            if os.path.isfile(ap):
+                os.remove(ap)
+                removed.append(ap)
+        except Exception as e:
+            errors.append(f"file:{p} err={e}")
+
+    def _safe_rmtree_if_empty_up(path_value: str, removed: list):
+        p = str(path_value or "").strip()
+        if not p:
+            return
+        cur = os.path.abspath(p)
+        # 最多向上清理4层空目录，避免删到过高层级
+        for _ in range(4):
+            if not os.path.isdir(cur):
+                break
+            try:
+                if os.listdir(cur):
+                    break
+                os.rmdir(cur)
+                removed.append(cur)
+                cur = os.path.dirname(cur)
+            except Exception:
+                break
+
+    def _try_delete_dataset_dir_for_profile(target_profile: dict, removed: list, errors: list):
+        ref_audio = str((target_profile or {}).get("ref_audio_path") or "").strip()
+        if not ref_audio:
+            return
+        try:
+            ds_dir = os.path.abspath(os.path.dirname(ref_audio))
+            # 仅处理 user_datasets 下目录，防止误删
+            user_datasets_root = os.path.abspath(os.path.join(PROJECT_ROOT, "user_datasets"))
+            if not ds_dir.startswith(user_datasets_root + os.sep):
+                return
+            # 若还有其他音色引用同数据集，跳过删除
+            for vid, info in VOICE_LIBRARY.items():
+                if vid == voice_id:
+                    continue
+                other_ref = str((info or {}).get("ref_audio_path") or "").strip()
+                if not other_ref:
+                    continue
+                other_dir = os.path.abspath(os.path.dirname(other_ref))
+                if other_dir == ds_dir:
+                    return
+            if os.path.isdir(ds_dir):
+                shutil.rmtree(ds_dir, ignore_errors=False)
+                removed.append(ds_dir)
+                _safe_rmtree_if_empty_up(os.path.dirname(ds_dir), removed)
+        except Exception as e:
+            errors.append(f"dataset:{ref_audio} err={e}")
     try:
+        removed_paths = []
+        remove_errors = []
+
+        # 先删除关联模型文件（保留基础模型保护逻辑）
+        _safe_remove_file(profile.get("gpt_path"), removed_paths, remove_errors)
+        _safe_remove_file(profile.get("sovits_path"), removed_paths, remove_errors)
+
+        # 若是最小推理包目录，尝试清理整个模型包目录
+        try:
+            gpt_path = str(profile.get("gpt_path") or "").strip()
+            if gpt_path:
+                gpt_dir = os.path.abspath(os.path.dirname(gpt_path))
+                if os.path.basename(gpt_dir).startswith(("mother_", "father_", "voice_", "mom_", "dad_")) and os.path.isdir(gpt_dir):
+                    shutil.rmtree(gpt_dir, ignore_errors=False)
+                    removed_paths.append(gpt_dir)
+        except Exception as e:
+            remove_errors.append(f"bundle_dir err={e}")
+
+        # 尝试删除对应数据集目录（仅当无其他音色引用该目录）
+        _try_delete_dataset_dir_for_profile(profile, removed_paths, remove_errors)
+
         VOICE_LIBRARY.pop(voice_id, None)
         # 清理 speaker list 缓存
         speaker_list.pop(voice_id, None)
@@ -866,6 +1079,14 @@ def delete_voice_model(voice_id: str) -> bool:
             user_mgmt_db.delete_voice_model(voice_id)
         except Exception as db_sync_err:
             logger.warning(f"[删除模型] voice_models 同步失败(不影响主流程): {db_sync_err}")
+        if removed_paths:
+            logger.info(f"[删除模型] 已级联删除资源 {len(removed_paths)} 项")
+            for p in removed_paths[:20]:
+                logger.info(f"[删除模型] - {p}")
+        if remove_errors:
+            logger.warning(f"[删除模型] 资源删除存在 {len(remove_errors)} 个问题（不影响条目删除）")
+            for e in remove_errors[:20]:
+                logger.warning(f"[删除模型] - {e}")
         logger.info(f"[删除模型] 已删除 {voice_id}，当前模型数：{len(VOICE_LIBRARY)}")
         return True
     except Exception as e:
@@ -946,6 +1167,151 @@ def _find_fallback_voice_for_name(missing_voice_id: str):
     return fallback_vid, fallback_info
 
 
+def _pick_default_switch_voice():
+    """在 voice_id 无效时挑选一个可用音色，避免前端切换直接报错。"""
+    preferred_ids = [QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID, "voice_001", "voice_002"]
+    for vid in preferred_ids:
+        info = VOICE_LIBRARY.get(vid)
+        if not isinstance(info, dict):
+            continue
+        if _is_qwen_voice_profile(info) or _is_model_pair_valid(info.get("gpt_path"), info.get("sovits_path")):
+            return vid, info
+
+    for vid, info in VOICE_LIBRARY.items():
+        if not isinstance(info, dict):
+            continue
+        if _is_qwen_voice_profile(info) or _is_model_pair_valid(info.get("gpt_path"), info.get("sovits_path")):
+            return vid, info
+    return None
+
+
+def _pick_local_fallback_voice_for_qwen(profile: Optional[dict], preferred_voice_id: str = ""):
+    """Qwen 基础音色不可用时，回退到本地可推理音色，保证播放不中断。"""
+    pref_gender = str((profile or {}).get("gender") or "").strip().lower()
+    candidates = []
+
+    for vid, info in VOICE_LIBRARY.items():
+        if not isinstance(info, dict):
+            continue
+        if _is_qwen_voice_profile(info):
+            continue
+        if not _is_model_pair_valid(info.get("gpt_path"), info.get("sovits_path")):
+            continue
+
+        score = 0
+        if bool((info or {}).get("is_builtin")):
+            score += 5
+        if str((info or {}).get("model_type") or "").strip().lower() == "pretrained":
+            score += 4
+
+        g = str((info or {}).get("gender") or "").strip().lower()
+        if pref_gender and g == pref_gender:
+            score += 3
+
+        if preferred_voice_id and vid == preferred_voice_id:
+            score += 2
+
+        trained_at = str((info or {}).get("trained_at") or "")
+        candidates.append((score, trained_at, vid, info))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    _score, _trained_at, picked_vid, picked_info = candidates[0]
+    return picked_vid, picked_info
+
+
+def _normalize_role_key(role_key: Optional[str], user_id: Optional[str] = None) -> str:
+    key = str(role_key or "").strip().lower()
+    if key.startswith("custom:"):
+        return key
+    if key in {"mom", "mother", "妈妈"}:
+        return "mom"
+    if key in {"dad", "father", "爸爸"}:
+        return "dad"
+    if key in {"custom", "other", "self"}:
+        return "custom"
+
+    uid = str(user_id or "").strip().lower()
+    if uid.endswith("_mom"):
+        return "mom"
+    if uid.endswith("_dad"):
+        return "dad"
+    if uid.endswith("_custom"):
+        return "custom"
+    return key
+
+
+def _normalize_train_model_name(
+    user_id: str,
+    requested_model_name: str = "",
+    role_key: Optional[str] = None,
+    custom_role_name: Optional[str] = None,
+):
+    normalized_role = _normalize_role_key(role_key, user_id)
+    requested = str(requested_model_name or "").strip()
+    custom_name = str(custom_role_name or "").strip()
+
+    if normalized_role == "mom":
+        return "mother", "mom"
+    if normalized_role == "dad":
+        return "father", "dad"
+
+    if normalized_role.startswith("custom:"):
+        if not custom_name:
+            custom_name = normalized_role.split(":", 1)[1].strip()
+        if custom_name:
+            return custom_name[:64], "custom"
+
+    if normalized_role == "custom":
+        if custom_name:
+            return custom_name[:64], "custom"
+        if requested and requested.lower() not in {"mom", "mother", "dad", "father"}:
+            return requested[:64], "custom"
+        fallback = f"custom_{str(user_id or 'wx_clone_user').strip()}"
+        return fallback[:64], "custom"
+
+    req_l = requested.lower()
+    if req_l in {"mom", "mother", "妈妈"}:
+        return "mother", "mom"
+    if req_l in {"dad", "father", "爸爸"}:
+        return "father", "dad"
+    if requested:
+        return requested[:64], normalized_role or ""
+    return str(user_id or "wx_clone_user").strip()[:64], normalized_role or ""
+
+
+def _resolve_voice_id_by_name(target_name: str, owner_user_id: Optional[str] = None):
+    target = str(target_name or "").strip()
+    if not target:
+        return None
+
+    target_lower = target.lower()
+    owner = str(owner_user_id or "").strip()
+    candidates = []
+    for vid, info in VOICE_LIBRARY.items():
+        name = str((info or {}).get("name") or "").strip()
+        if not name or name.lower() != target_lower:
+            continue
+
+        if owner:
+            info_owner = str((info or {}).get("owner_user_id") or "").strip()
+            if info_owner and info_owner != owner:
+                continue
+
+        valid_pair = _is_qwen_voice_profile(info) or _is_model_pair_valid(info.get("gpt_path"), info.get("sovits_path"))
+        model_type = str((info or {}).get("model_type") or "").strip().lower()
+        trained_at = str((info or {}).get("trained_at") or "")
+        candidates.append((1 if valid_pair else 0, 1 if model_type == "user_trained" else 0, trained_at, vid))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+    return candidates[0][3]
+
+
 class Sovits:
     def __init__(self, vq_model, hps):
         self.vq_model = vq_model
@@ -956,14 +1322,6 @@ from process_ckpt import get_sovits_version_from_path_fast, load_sovits_new
 
 
 def get_sovits_weights(sovits_path):
-    # 兼容：Windows 反序列化 Linux 训练产物时可能包含 pathlib.PosixPath
-    try:
-        import pathlib
-
-        if os.name == "nt" and hasattr(pathlib, "PosixPath"):
-            pathlib.PosixPath = pathlib.WindowsPath  # type: ignore[attr-defined]
-    except Exception:
-        pass
     from config import pretrained_sovits_name
 
     # 只支持 v2Pro，移除 v3/v4 的引用
@@ -1003,33 +1361,17 @@ def get_sovits_weights(sovits_path):
             "info": dict_s2.get("info", f"legacy_{os.path.basename(sovits_path)}"),
         }
 
-    # 兼容：部分训练产物的 config/hps 不完整（缺 train/data/model），用官方 v2Pro 配置兜底补齐。
-    try:
-        cfg = dict_s2.get("config")
-        if not isinstance(cfg, dict):
-            cfg = {}
-        need_fill = any(k not in cfg for k in ("train", "data", "model"))
-        if need_fill:
-            base_cfg_path = PROJECT_ROOT / "GPT_SoVITS" / "configs" / "s2v2Pro.json"
-            with open(base_cfg_path, "r", encoding="utf-8") as f:
-                base_cfg = json.load(f)
-            for k in ("train", "data", "model"):
-                base_part = base_cfg.get(k) if isinstance(base_cfg.get(k), dict) else {}
-                user_part = cfg.get(k) if isinstance(cfg.get(k), dict) else {}
-                merged = dict(base_part)
-                merged.update(user_part)
-                base_cfg[k] = merged
-            # 允许覆盖其他顶层字段
-            for k, v in cfg.items():
-                if k in ("train", "data", "model"):
-                    continue
-                base_cfg[k] = v
-            dict_s2["config"] = base_cfg
-    except Exception as e:
-        logger.warning(f"[get_sovits_weights] 补齐 v2Pro 配置失败(将继续尝试加载): {e}")
+    hps_cfg = dict_s2.get("config")
+    if (not isinstance(hps_cfg, dict)) or (not all(k in hps_cfg for k in ("data", "train", "model"))):
+        logger.warning(f"[get_sovits_weights] SoVITS 配置缺失关键字段(data/train/model)，回退到官方配置模板: {sovits_path}")
+        cfg_name = "s2v2ProPlus.json" if model_version == "v2ProPlus" else ("s2v2Pro.json" if model_version == "v2Pro" else "s2.json")
+        fallback_cfg_path = PROJECT_ROOT / "GPT_SoVITS" / "configs" / cfg_name
+        if not fallback_cfg_path.exists():
+            fallback_cfg_path = PROJECT_ROOT / "GPT_SoVITS" / "configs" / "s2.json"
+        hps_cfg = json.loads(fallback_cfg_path.read_text(encoding="utf-8"))
+        dict_s2["config"] = hps_cfg
 
-    hps = dict_s2["config"]
-    hps = DictToAttrRecursive(hps)
+    hps = DictToAttrRecursive(hps_cfg)
     hps.model.semantic_frame_rate = "25hz"
     if "enc_p.text_embedding.weight" not in dict_s2["weight"]:
         hps.model.version = "v2"  # v3model,v2sybomls
@@ -1090,16 +1432,94 @@ global hz
 hz = 50
 
 
-def get_gpt_weights(gpt_path):
-    # 兼容：Windows 反序列化 Linux 训练产物时，ckpt/pth 里可能包含 pathlib.PosixPath
-    # 会导致报错：cannot instantiate 'PosixPath' on your system
-    try:
-        import pathlib
+def _strip_state_dict_prefix(state_dict: dict, prefix: str) -> dict:
+    p = str(prefix or "")
+    if not p:
+        return dict(state_dict or {})
+    out = {}
+    changed = False
+    for k, v in (state_dict or {}).items():
+        ks = str(k)
+        if ks.startswith(p):
+            out[ks[len(p):]] = v
+            changed = True
+        else:
+            out[ks] = v
+    return out if changed else dict(state_dict or {})
 
-        if os.name == "nt" and hasattr(pathlib, "PosixPath"):
-            pathlib.PosixPath = pathlib.WindowsPath  # type: ignore[attr-defined]
-    except Exception:
-        pass
+
+def _add_state_dict_prefix(state_dict: dict, prefix: str) -> dict:
+    p = str(prefix or "")
+    if not p:
+        return dict(state_dict or {})
+    out = {}
+    changed = False
+    for k, v in (state_dict or {}).items():
+        ks = str(k)
+        if ks.startswith(p):
+            out[ks] = v
+        else:
+            out[f"{p}{ks}"] = v
+            changed = True
+    return out if changed else dict(state_dict or {})
+
+
+def _build_t2s_state_dict_candidates(state_dict: dict):
+    base = dict(state_dict or {})
+    candidates = []
+    seen = set()
+
+    def _push(tag: str, cand: dict):
+        keys = tuple(sorted(cand.keys())[:24])
+        sig = (len(cand), keys)
+        if sig in seen:
+            return
+        seen.add(sig)
+        candidates.append((tag, cand))
+
+    _push("raw", base)
+    no_module = _strip_state_dict_prefix(base, "module.")
+    _push("strip_module", no_module)
+
+    for tag, cand in list(candidates):
+        _push(f"{tag}+add_model", _add_state_dict_prefix(cand, "model."))
+        _push(f"{tag}+strip_model", _strip_state_dict_prefix(cand, "model."))
+
+    return candidates
+
+
+def _load_t2s_state_dict_compat(t2s_model, state_dict: dict, gpt_path: str = ""):
+    if not isinstance(state_dict, dict):
+        raise RuntimeError("GPT权重格式无效：缺少 state_dict 字典")
+
+    total = max(1, len(t2s_model.state_dict()))
+    errs = []
+
+    for tag, candidate in _build_t2s_state_dict_candidates(state_dict):
+        try:
+            incompatible = t2s_model.load_state_dict(candidate, strict=False)
+            missing = len(getattr(incompatible, "missing_keys", []) or [])
+            unexpected = len(getattr(incompatible, "unexpected_keys", []) or [])
+            matched = total - missing
+            matched_ratio = float(matched) / float(total)
+            if missing == 0 and unexpected == 0:
+                if tag != "raw":
+                    logger.warning(f"[get_gpt_weights] 已自动兼容权重键名({tag}): {gpt_path}")
+                return
+            if matched_ratio >= 0.995 and unexpected <= 6:
+                logger.warning(
+                    f"[get_gpt_weights] 以宽松模式加载成功({tag}) missing={missing} unexpected={unexpected}: {gpt_path}"
+                )
+                return
+            errs.append(f"{tag}:missing={missing},unexpected={unexpected}")
+        except Exception as e:
+            errs.append(f"{tag}:{str(e)[:160]}")
+
+    detail = "; ".join(errs[:4])
+    raise RuntimeError(f"GPT权重与当前服务结构不兼容 ({detail})")
+
+
+def get_gpt_weights(gpt_path):
     dict_s1 = torch.load(gpt_path, map_location="cpu", weights_only=False)
 
     # 兼容旧格式：如果缺少 config/weight，则尝试从 PyTorch Lightning checkpoint 中转换
@@ -1123,9 +1543,13 @@ def get_gpt_weights(gpt_path):
             raise KeyError("'config'")
 
     config = dict_s1["config"]
+    if isinstance(config, dict) and "data" not in config and isinstance(config.get("config"), dict):
+        # 兼容 train_api 转换出的嵌套配置格式
+        config = config["config"]
+        dict_s1["config"] = config
     max_sec = config["data"]["max_sec"]
     t2s_model = Text2SemanticLightningModule(config, "****", is_train=False)
-    t2s_model.load_state_dict(dict_s1["weight"])
+    _load_t2s_state_dict_compat(t2s_model, dict_s1["weight"], gpt_path=gpt_path)
     if is_half == True:
         t2s_model = t2s_model.half()
     t2s_model = t2s_model.to(device)
@@ -1141,41 +1565,101 @@ def change_gpt_sovits_weights(gpt_path, sovits_path):
     """
     切换GPT和SoVITS模型权重，并设置为默认说话人
     """
+    prev_default = speaker_list.get("default")
+    dropped_prev_default = False
+    gpt_abs = os.path.abspath(str(gpt_path or ""))
+    sovits_abs = os.path.abspath(str(sovits_path or ""))
+
     try:
-        logger.info(f"[change_gpt_sovits_weights] 开始加载模型 - GPT: {gpt_path}, SoVITS: {sovits_path}")
-        
+        logger.info(f"[change_gpt_sovits_weights] 开始加载模型 - GPT: {gpt_abs}, SoVITS: {sovits_abs}")
+
         # 验证文件路径是否存在
-        if not os.path.exists(gpt_path):
-            error_msg = f"GPT模型文件不存在: {gpt_path}"
+        if not os.path.exists(gpt_abs):
+            error_msg = f"GPT模型文件不存在: {gpt_abs}"
             logger.error(f"[change_gpt_sovits_weights] {error_msg}")
             return JSONResponse({"code": 400, "message": error_msg}, status_code=400)
-        
-        if not os.path.exists(sovits_path):
-            error_msg = f"SoVITS模型文件不存在: {sovits_path}"
+
+        if not os.path.exists(sovits_abs):
+            error_msg = f"SoVITS模型文件不存在: {sovits_abs}"
             logger.error(f"[change_gpt_sovits_weights] {error_msg}")
             return JSONResponse({"code": 400, "message": error_msg}, status_code=400)
-        
-        # 加载模型权重
-        logger.info("[change_gpt_sovits_weights] 正在加载GPT权重...")
-        gpt = get_gpt_weights(gpt_path)
-        logger.info("[change_gpt_sovits_weights] GPT权重加载成功")
-        
-        logger.info("[change_gpt_sovits_weights] 正在加载SoVITS权重...")
-        sovits = get_sovits_weights(sovits_path)
-        logger.info("[change_gpt_sovits_weights] SoVITS权重加载成功")
-        
+
+        def _load_pair():
+            logger.info("[change_gpt_sovits_weights] 正在加载GPT权重...")
+            gpt_obj = get_gpt_weights(gpt_abs)
+            logger.info("[change_gpt_sovits_weights] GPT权重加载成功")
+
+            logger.info("[change_gpt_sovits_weights] 正在加载SoVITS权重...")
+            sovits_obj = get_sovits_weights(sovits_abs)
+            logger.info("[change_gpt_sovits_weights] SoVITS权重加载成功")
+            return gpt_obj, sovits_obj
+
+        try:
+            gpt, sovits = _load_pair()
+        except Exception as first_e:
+            first_msg = str(first_e or "").lower()
+            if ("out of memory" in first_msg) or ("cuda" in first_msg and "memory" in first_msg):
+                logger.warning("[change_gpt_sovits_weights] 首次加载疑似显存不足，释放旧模型后重试一次")
+                try:
+                    if "default" in speaker_list:
+                        speaker_list.pop("default", None)
+                        dropped_prev_default = True
+                except Exception:
+                    pass
+                try:
+                    gc.collect()
+                except Exception:
+                    pass
+                try:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                gpt, sovits = _load_pair()
+            else:
+                raise
+
         # 设置为默认说话人
         speaker_list["default"] = Speaker(name="default", gpt=gpt, sovits=sovits)
+
+        # 与合成链路共享当前权重指纹，避免后续重复切权重。
+        try:
+            gpt_mtime_ns, gpt_size = _get_model_file_fingerprint(gpt_abs)
+            sovits_mtime_ns, sovits_size = _get_model_file_fingerprint(sovits_abs)
+            _OFFICIAL_MODEL_CACHE["gpt_path"] = gpt_abs
+            _OFFICIAL_MODEL_CACHE["sovits_path"] = sovits_abs
+            _OFFICIAL_MODEL_CACHE["gpt_mtime_ns"] = int(gpt_mtime_ns)
+            _OFFICIAL_MODEL_CACHE["gpt_size"] = int(gpt_size)
+            _OFFICIAL_MODEL_CACHE["sovits_mtime_ns"] = int(sovits_mtime_ns)
+            _OFFICIAL_MODEL_CACHE["sovits_size"] = int(sovits_size)
+        except Exception:
+            pass
+
         logger.info("[change_gpt_sovits_weights] 模型切换成功，已设置为默认说话人")
-        
         return JSONResponse({"code": 0, "message": "Success"}, status_code=200)
-        
+
     except Exception as e:
+        if (speaker_list.get("default") is None) and (prev_default is not None):
+            try:
+                speaker_list["default"] = prev_default
+            except Exception:
+                pass
+        elif dropped_prev_default and (prev_default is not None) and ("default" not in speaker_list):
+            try:
+                speaker_list["default"] = prev_default
+            except Exception:
+                pass
+
         import traceback
         error_detail = traceback.format_exc()
-        error_msg = f"模型加载失败: {str(e)}"
-        logger.error(f"[change_gpt_sovits_weights] {error_msg}\n{error_detail}")
-        return JSONResponse({"code": 400, "message": error_msg}, status_code=400)
+        raw = str(e or "").strip()
+        lower = raw.lower()
+        if ("state_dict" in lower) or ("missing key(s)" in lower) or ("unexpected key(s)" in lower):
+            public_msg = "模型加载失败：训练权重格式与当前服务不兼容，请重新训练后重试"
+        else:
+            public_msg = f"模型加载失败: {(raw[:180] if raw else '未知错误')}"
+        logger.error(f"[change_gpt_sovits_weights] {public_msg}\n{error_detail}")
+        return JSONResponse({"code": 400, "message": public_msg}, status_code=400)
 
 
 def load_voice_profile(voice_id: str):
@@ -1184,25 +1668,37 @@ def load_voice_profile(voice_id: str):
     并将其设为当前默认说话人（speaker_list['default']）。
     """
     load_voice_library_from_file()
-    if voice_id not in VOICE_LIBRARY:
+
+    requested_voice_id = str(voice_id or "").strip()
+    if not requested_voice_id:
+        return JSONResponse({"code": 400, "message": "缺少参数: voice_id"}, status_code=400)
+
+    resolved_voice_id = requested_voice_id
+    fallback_reason = ""
+
+    if resolved_voice_id not in VOICE_LIBRARY:
         return JSONResponse(
-            {"code": 400, "message": f"未知的 voice_id: {voice_id}"}, status_code=400
+            {"code": 400, "message": f"未知的 voice_id: {requested_voice_id}"},
+            status_code=400,
         )
 
-    profile = VOICE_LIBRARY[voice_id]
+    profile = VOICE_LIBRARY.get(resolved_voice_id) or {}
 
     # Qwen 基础音色走 API 直出，不依赖本地 GPT/SoVITS 权重文件。
     if _is_qwen_voice_profile(profile):
         try:
             if "default" in speaker_list:
-                speaker_list["default"].name = voice_id
+                speaker_list["default"].name = resolved_voice_id
         except Exception:
             pass
         return JSONResponse(
             {
                 "code": 0,
                 "message": "Success",
-                "voice_id": voice_id,
+                "voice_id": resolved_voice_id,
+                "requested_voice_id": requested_voice_id,
+                "fallback_applied": bool(fallback_reason),
+                "fallback_reason": fallback_reason,
                 "provider": "qwen_tts",
                 "mode": "api_tts",
             },
@@ -1213,35 +1709,56 @@ def load_voice_profile(voice_id: str):
     sovits_path = profile.get("sovits_path")
 
     if not _is_model_pair_valid(gpt_path, sovits_path):
-        fallback = _find_fallback_voice_for_name(voice_id)
-        if fallback:
-            fallback_vid, fallback_info = fallback
-            logger.warning(f"[load_voice_profile] {voice_id} 模型文件缺失，自动回退到 {fallback_vid}")
-            voice_id = fallback_vid
-            profile = fallback_info
-            gpt_path = profile.get("gpt_path")
-            sovits_path = profile.get("sovits_path")
-        else:
+        return JSONResponse(
+            {"code": 400, "message": f"模型文件不存在，请重新训练或重新选择音色（voice_id={requested_voice_id}）"},
+            status_code=400,
+        )
+
+    try:
+        _ensure_official_model_loaded(change_gpt_sovits_weights, gpt_path, sovits_path)
+    except Exception as e:
+        logger.warning(f"[load_voice_profile] 初次加载失败，尝试清缓存后重试: voice_id={resolved_voice_id}, err={e}")
+        try:
+            _clear_official_model_cache()
+            _ensure_official_model_loaded(change_gpt_sovits_weights, gpt_path, sovits_path)
+        except Exception as retry_err:
             return JSONResponse(
                 {
                     "code": 400,
-                    "message": f"模型文件不存在，请重新训练或重新选择音色（voice_id={voice_id}）",
+                    "message": str(retry_err or "模型加载失败")[:200],
                 },
                 status_code=400,
             )
 
-    # 直接复用原有的权重切换逻辑
-    resp = change_gpt_sovits_weights(gpt_path=gpt_path, sovits_path=sovits_path)
-    # 将说话人名称更新为 voice_id，便于调试区分
     if "default" in speaker_list:
-        speaker_list["default"].name = voice_id
-    return resp
+        speaker_list["default"].name = resolved_voice_id
+
+    return JSONResponse(
+        {
+            "code": 0,
+            "message": "Success",
+            "voice_id": resolved_voice_id,
+            "requested_voice_id": requested_voice_id,
+            "fallback_applied": bool(fallback_reason),
+            "fallback_reason": fallback_reason,
+            "provider": str((profile or {}).get("provider") or ""),
+        },
+        status_code=200,
+    )
 
 
-# 缓存当前已加载到官方 api.py 的模型路径，避免每次朗读都重复切权重导致卡顿
+
+# 缓存当前已加载到官方 api.py 的模型路径 + 文件指纹，避免每次朗读都重复切权重导致卡顿。
+# 仅按路径缓存会在“同路径覆盖新模型”时误命中，导致实际仍使用旧模型（常见表现：音色漂移/噪声）。
 _OFFICIAL_MODEL_CACHE = {
     "gpt_path": "",
     "sovits_path": "",
+    "gpt_mtime_ns": 0,
+    "gpt_size": 0,
+    "sovits_mtime_ns": 0,
+    "sovits_size": 0,
+    # 轻量检查节流：避免每次请求都 os.stat 两个大权重文件
+    "last_check_ts": 0.0,
 }
 _OFFICIAL_MODEL_CACHE_LOCK = threading.Lock()
 
@@ -1254,16 +1771,56 @@ except Exception:
     _VOICE_GEN_PROFILE_CACHE_TTL_SEC = 21600.0
 
 
+def _get_model_file_fingerprint(path_value: str) -> tuple[int, int]:
+    try:
+        st = os.stat(str(path_value or ""))
+        return int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), int(st.st_size)
+    except Exception:
+        return 0, 0
+
+
+def _clear_official_model_cache():
+    with _OFFICIAL_MODEL_CACHE_LOCK:
+        _OFFICIAL_MODEL_CACHE["gpt_path"] = ""
+        _OFFICIAL_MODEL_CACHE["sovits_path"] = ""
+        _OFFICIAL_MODEL_CACHE["gpt_mtime_ns"] = 0
+        _OFFICIAL_MODEL_CACHE["gpt_size"] = 0
+        _OFFICIAL_MODEL_CACHE["sovits_mtime_ns"] = 0
+        _OFFICIAL_MODEL_CACHE["sovits_size"] = 0
+
+
 def _ensure_official_model_loaded(official_change_fn, gpt_path_local: str, sovits_path_local: str):
     gpt_abs = os.path.abspath(str(gpt_path_local or ""))
     sovits_abs = os.path.abspath(str(sovits_path_local or ""))
     if not gpt_abs or not sovits_abs:
         raise Exception("模型路径为空")
 
+    # 快路径：同路径且刚检查过，则不重复 stat（对短句高 QPS 更稳定）
+    now_ts = time.time()
+    try:
+        ttl_sec = max(0.0, float(os.environ.get("OFFICIAL_MODEL_FINGERPRINT_TTL_SEC", "2.0") or "2.0"))
+    except Exception:
+        ttl_sec = 2.0
     with _OFFICIAL_MODEL_CACHE_LOCK:
         if (
             _OFFICIAL_MODEL_CACHE.get("gpt_path") == gpt_abs
             and _OFFICIAL_MODEL_CACHE.get("sovits_path") == sovits_abs
+            and (now_ts - float(_OFFICIAL_MODEL_CACHE.get("last_check_ts") or 0.0)) <= ttl_sec
+        ):
+            return
+
+    gpt_mtime_ns, gpt_size = _get_model_file_fingerprint(gpt_abs)
+    sovits_mtime_ns, sovits_size = _get_model_file_fingerprint(sovits_abs)
+
+    with _OFFICIAL_MODEL_CACHE_LOCK:
+        _OFFICIAL_MODEL_CACHE["last_check_ts"] = float(now_ts)
+        if (
+            _OFFICIAL_MODEL_CACHE.get("gpt_path") == gpt_abs
+            and _OFFICIAL_MODEL_CACHE.get("sovits_path") == sovits_abs
+            and int(_OFFICIAL_MODEL_CACHE.get("gpt_mtime_ns") or 0) == int(gpt_mtime_ns)
+            and int(_OFFICIAL_MODEL_CACHE.get("gpt_size") or 0) == int(gpt_size)
+            and int(_OFFICIAL_MODEL_CACHE.get("sovits_mtime_ns") or 0) == int(sovits_mtime_ns)
+            and int(_OFFICIAL_MODEL_CACHE.get("sovits_size") or 0) == int(sovits_size)
         ):
             return
 
@@ -1278,6 +1835,11 @@ def _ensure_official_model_loaded(official_change_fn, gpt_path_local: str, sovit
 
         _OFFICIAL_MODEL_CACHE["gpt_path"] = gpt_abs
         _OFFICIAL_MODEL_CACHE["sovits_path"] = sovits_abs
+        _OFFICIAL_MODEL_CACHE["gpt_mtime_ns"] = int(gpt_mtime_ns)
+        _OFFICIAL_MODEL_CACHE["gpt_size"] = int(gpt_size)
+        _OFFICIAL_MODEL_CACHE["sovits_mtime_ns"] = int(sovits_mtime_ns)
+        _OFFICIAL_MODEL_CACHE["sovits_size"] = int(sovits_size)
+        _OFFICIAL_MODEL_CACHE["last_check_ts"] = float(now_ts)
 
 
 def _normalize_gen_profile(profile: dict, base_profile: dict) -> dict:
@@ -1335,19 +1897,27 @@ def _clamp_cached_user_voice_profile(profile: dict, base_profile: dict, cache_mo
     p = _normalize_gen_profile(profile or {}, base)
 
     mode = str(cache_mode or "speed").strip().lower()
+    base_steps = int(base.get("sample_steps", 32))
+    base_speed = float(base.get("speed", 1.0))
     if mode in ("quality", "strict", "robust"):
-        # 高风险音色允许稍重参数，优先保证完整度，避免被缓存回拉到“过快”配置。
-        max_steps = max(32, min(44, int(base.get("sample_steps", 32)) + 8))
-        p["sample_steps"] = min(int(p.get("sample_steps", 32)), max_steps)
-        p["speed"] = max(float(p.get("speed", 1.0)), max(0.90, min(1.06, float(base.get("speed", 1.0)))))
+        # 高风险音色优先稳态，缓存命中时禁止回拉到过快/过低步数。
+        min_steps = max(28, min(44, base_steps))
+        max_steps = max(min_steps, min(50, base_steps + 8))
+        p["sample_steps"] = max(min_steps, min(int(p.get("sample_steps", min_steps)), max_steps))
+        quality_speed_cap = max(0.92, min(1.00, base_speed))
+        quality_speed_floor = max(0.84, min(quality_speed_cap, base_speed - 0.08))
+        p["speed"] = max(quality_speed_floor, min(float(p.get("speed", base_speed)), quality_speed_cap))
         p["top_k"] = min(int(p.get("top_k", 18)), 24)
         p["top_p"] = min(float(p.get("top_p", 0.9)), 0.92)
         p["repetition_penalty"] = min(float(p.get("repetition_penalty", 1.18)), 1.26)
     else:
-        # 常规音色保留偏快参数，避免总体时延回退。
-        max_steps = max(28, min(32, int(base.get("sample_steps", 32)) + 2))
-        p["sample_steps"] = min(int(p.get("sample_steps", 32)), max_steps)
-        p["speed"] = max(float(p.get("speed", 1.0)), max(1.02, float(base.get("speed", 1.0))))
+        # 常规音色允许缓存加速，但限制极端快速参数。
+        min_steps = max(24, min(30, base_steps))
+        max_steps = max(min_steps, min(36, base_steps + 3))
+        p["sample_steps"] = max(min_steps, min(int(p.get("sample_steps", base_steps)), max_steps))
+        speed_floor = max(0.95, min(1.02, base_speed))
+        speed_cap = max(speed_floor, min(1.08, base_speed + 0.05))
+        p["speed"] = max(speed_floor, min(float(p.get("speed", base_speed)), speed_cap))
         p["top_k"] = min(int(p.get("top_k", 16)), 20)
         p["top_p"] = min(float(p.get("top_p", 0.9)), 0.90)
         p["repetition_penalty"] = min(float(p.get("repetition_penalty", 1.18)), 1.22)
@@ -1443,6 +2013,20 @@ def _resolve_user_voice_risk_policy(voice_id: str, voice_profile: dict) -> dict:
         score += 1
         reasons.append("name_hint:test_or_opt")
 
+    ref_audio = _normalize_ref_audio_path(p.get("ref_audio_path"), base_dir=now_dir)
+    if ref_audio:
+        base = os.path.basename(ref_audio).lower()
+        if re.match(r"^sentence_\d+\.wav$", base):
+            primary_txt = os.path.splitext(ref_audio)[0] + ".txt"
+            txt_raw = _read_text_file_safe(primary_txt) if os.path.exists(primary_txt) else ""
+            if not has_speakable_content(txt_raw):
+                score += 2
+                reasons.append("primary_sentence_text_missing")
+
+    if age_hours is not None and age_hours <= 168.0:
+        score += 2
+        reasons.append(f"young_model_week:{age_hours:.1f}h")
+
     if score >= 5:
         tier = "strict"
     elif score >= 3:
@@ -1455,13 +2039,28 @@ def _resolve_user_voice_risk_policy(voice_id: str, voice_profile: dict) -> dict:
             "hq_user_voice_speed_boost": False,
             "hq_user_voice_min_speed": 1.00,
             "hq_user_voice_fast_decode": False,
+            "hq_user_voice_allow_cache_hint": False,
             "hq_user_voice_over_retry": True,
             "hq_user_voice_adaptive_fast": False,
             "hq_user_voice_bootstrap": False,
+            "hq_user_voice_main_asr_guard": True,
+            "hq_user_voice_asr_rerank": True,
+            "hq_user_voice_block_abnormal_segment": True,
+            "hq_user_voice_retry_low_energy": True,
             "hq_user_voice_min_steps": 32,
-            "hq_user_voice_segmented_mode": "always",
-            "sample_steps": 36,
-            "max_text_len": 24,
+            "hq_user_voice_segmented_mode": "auto",
+            "hq_user_voice_relax_max_sec": True,
+            "hq_user_voice_generic_retry": True,
+            "hq_user_voice_buffered_retry_rescue": True,
+            "hq_user_voice_under_reroll_max": 2,
+            "hq_user_voice_buffered_force_split": False,
+            "top_k": 15,
+            "top_p": 0.72,
+            "temperature": 0.22,
+            "repetition_penalty": 1.20,
+            "speed": 0.98,
+            "sample_steps": 40,
+            "max_text_len": 56,
         }
         cache_mode = "quality"
     elif tier == "risky":
@@ -1469,12 +2068,29 @@ def _resolve_user_voice_risk_policy(voice_id: str, voice_profile: dict) -> dict:
             "hq_user_voice_speed_boost": False,
             "hq_user_voice_min_speed": 1.00,
             "hq_user_voice_fast_decode": False,
-            "hq_user_voice_over_retry": True,
+            "hq_user_voice_allow_cache_hint": False,
+            "hq_user_voice_over_retry": False,
             "hq_user_voice_adaptive_fast": False,
             "hq_user_voice_bootstrap": False,
+            "hq_user_voice_main_asr_guard": False,
+            "hq_user_voice_asr_rerank": False,
+            "hq_user_voice_block_abnormal_segment": True,
+            "hq_user_voice_retry_low_energy": True,
             "hq_user_voice_min_steps": 30,
-            "hq_user_voice_segmented_mode": "always",
-            "max_text_len": 28,
+            "hq_user_voice_segmented_mode": "auto",
+            "hq_user_voice_relax_max_sec": False,
+            "hq_user_voice_generic_retry": False,
+            "hq_user_voice_buffered_retry_rescue": False,
+            "hq_user_voice_under_reroll_max": 1,
+            "hq_user_voice_buffered_force_split": False,
+            "hq_user_voice_long_trim": False,
+            "top_k": 16,
+            "top_p": 0.76,
+            "temperature": 0.28,
+            "repetition_penalty": 1.20,
+            "speed": 1.02,
+            "sample_steps": 32,
+            "max_text_len": 64,
         }
         cache_mode = "quality"
     else:
@@ -1496,13 +2112,51 @@ def _resolve_user_voice_risk_policy(voice_id: str, voice_profile: dict) -> dict:
 def _apply_user_voice_risk_policy(data: dict, voice_id: str, voice_profile: dict):
     out = dict(data or {})
     policy = _resolve_user_voice_risk_policy(voice_id, voice_profile)
+    tier_l = str(policy.get("tier") or "normal").strip().lower()
+    force_policy = _coerce_bool_param(out.get("hq_user_voice_force_policy"), tier_l in ("risky", "strict"))
+    force_keys = {
+        "top_k",
+        "top_p",
+        "temperature",
+        "repetition_penalty",
+        "speed",
+        "sample_steps",
+        "max_text_len",
+        "hq_user_voice_speed_boost",
+        "hq_user_voice_min_speed",
+        "hq_user_voice_fast_decode",
+        "hq_user_voice_allow_cache_hint",
+        "hq_user_voice_over_retry",
+        "hq_user_voice_adaptive_fast",
+        "hq_user_voice_bootstrap",
+        "hq_user_voice_min_steps",
+        "hq_user_voice_segmented_mode",
+        "hq_user_voice_relax_max_sec",
+        "hq_user_voice_generic_retry",
+        "hq_user_voice_main_asr_guard",
+        "hq_user_voice_asr_rerank",
+        "hq_user_voice_block_abnormal_segment",
+        "hq_user_voice_retry_low_energy",
+        "hq_user_voice_buffered_retry_rescue",
+        "hq_user_voice_under_reroll_max",
+        "hq_user_voice_buffered_force_split",
+    }
 
     applied = {}
+    forced = {}
     for k, v in dict(policy.get("overrides") or {}).items():
+        if force_policy and k in force_keys:
+            if (k not in out) or (out.get(k) != v):
+                out[k] = v
+                applied[k] = v
+                forced[k] = v
+            continue
         if k not in out:
             out[k] = v
             applied[k] = v
 
+    policy["force_policy"] = bool(force_policy)
+    policy["forced_overrides"] = forced
     policy["applied_overrides"] = applied
     policy["applied"] = bool(applied)
     return out, policy
@@ -1516,8 +2170,9 @@ def _apply_voice_risk_tolerance(under_tol: float, over_tol: float, risk_tier: st
         u = min(0.97, u + 0.03)
         o = max(1.12, o - 0.05)
     elif tier == "risky":
-        u = min(0.95, u + 0.02)
-        o = max(1.15, o - 0.03)
+        # risky 音色优先减少误判重试，避免把可读 base 结果替换成更差重试版本。
+        u = max(0.86, u - 0.02)
+        o = min(1.30, o + 0.04)
     return u, o
 
 
@@ -1711,6 +2366,98 @@ def _text_overlap_score(source_text: str, target_text: str) -> float:
     return float(inter) / float(max(1, union))
 
 
+def _normalize_text_units_for_match(text: str) -> str:
+    t = sanitize_text(str(text or ""))
+    if not t:
+        return ""
+    return "".join(re.findall(r"[0-9A-Za-z一-鿿]", t))
+
+
+def _calc_recognition_ratio(expected_text: str, recognized_text: str) -> float:
+    exp = _normalize_text_units_for_match(expected_text)
+    if not exp:
+        return 0.0
+    rec = _normalize_text_units_for_match(recognized_text)
+    return max(0.0, min(1.0, float(len(rec)) / float(max(1, len(exp)))))
+
+
+def _calc_recognition_quality(expected_text: str, recognized_text: str) -> float:
+    exp = _normalize_text_units_for_match(expected_text)
+    rec = _normalize_text_units_for_match(recognized_text)
+    if (not exp) or (not rec):
+        return 0.0
+
+    coverage = max(0.0, min(1.0, float(len(rec)) / float(max(1, len(exp)))))
+    overlap = _text_overlap_score(expected_text, recognized_text)
+    try:
+        seq_ratio = float(difflib.SequenceMatcher(None, exp, rec).ratio())
+    except Exception:
+        seq_ratio = 0.0
+
+    quality = seq_ratio * 0.55 + overlap * 0.30 + coverage * 0.15
+    return max(0.0, min(1.0, quality))
+
+
+def _score_generated_audio_with_readalong(audio_bytes: bytes, expected_text: str, timeout_sec: float = 20.0) -> float:
+    if (not audio_bytes) or (not has_speakable_content(expected_text)):
+        return -1.0
+
+    target = f"{READALONG_PROXY_BASE}/readalong/evaluate"
+    files = {
+        "file": ("segment.wav", audio_bytes, "audio/wav")
+    }
+    data = {
+        "expected_text": expected_text or "",
+        "book_id": "tts_asr_rerank",
+        "sentence_index": "0",
+        "audio_format": "wav",
+        "eval_mode": "free_description",
+    }
+
+    try:
+        with httpx.Client(timeout=max(8.0, float(timeout_sec or 20.0)), trust_env=False) as client:
+            resp = client.post(target, files=files, data=data)
+        if resp.status_code >= 300:
+            return -1.0
+        payload = resp.json() if resp.content else {}
+        recognized = str((payload or {}).get("recognized_text") or (payload or {}).get("transcript") or "")
+        return _calc_recognition_quality(expected_text, recognized)
+    except Exception:
+        return -1.0
+
+
+def _is_better_candidate_by_recognition(
+    current_asr_score: float,
+    current_duration_score: float,
+    candidate_asr_score: float,
+    candidate_duration_score: float,
+    asr_margin: float = 0.03,
+) -> bool:
+    cur_asr = float(current_asr_score) if current_asr_score is not None else -1.0
+    cand_asr = float(candidate_asr_score) if candidate_asr_score is not None else -1.0
+    cur_dur = float(current_duration_score) if current_duration_score is not None else 1e9
+    cand_dur = float(candidate_duration_score) if candidate_duration_score is not None else 1e9
+    margin = max(0.0, float(asr_margin or 0.0))
+
+    if cand_asr >= 0.0 and cur_asr >= 0.0:
+        # 两个候选识别都偏低时，优先保守选择更接近期望时长的版本，避免“低分长音频”误胜。
+        low_asr_floor = 0.45
+        if cand_asr < low_asr_floor and cur_asr < low_asr_floor:
+            return cand_dur < cur_dur
+        if cand_asr >= (cur_asr + margin):
+            return True
+        if cur_asr >= (cand_asr + margin):
+            return False
+        return cand_dur < cur_dur
+    if cand_asr >= 0.0 > cur_asr:
+        return True
+    if cur_asr >= 0.0 > cand_asr:
+        return False
+    return cand_dur < cur_dur
+
+
+
+
 def _pick_prompt_text_from_samples(
     samples: list,
     fallback_text: str = "",
@@ -1786,7 +2533,7 @@ def _build_voice_reference_guard(
     req_max_aux_refs: int,
 ) -> dict:
     max_refs = max(1, min(int(req_max_refs or 6), 20))
-    max_aux = max(0, min(int(req_max_aux_refs or 2), 6))
+    max_aux = max(0, min(int(2 if req_max_aux_refs is None else req_max_aux_refs), 6))
     guard = {
         "max_refs": max_refs,
         "max_aux_refs": max_aux,
@@ -1847,9 +2594,10 @@ def _resolve_reference_bundle(
     dataset_scan_enabled: bool = True,
     prefer_primary_sentence_text: bool = False,
     prefer_target_primary_sample: bool = False,
+    risk_tier: str = "normal",
 ) -> dict:
     limit = max(1, min(int(max_refs or 4), 20))
-    aux_limit = max(0, min(int(max_aux_refs or 2), 6))
+    aux_limit = max(0, min(int(2 if max_aux_refs is None else max_aux_refs), 6))
     base_dir = base_dir or now_dir
 
     samples = []
@@ -1889,6 +2637,8 @@ def _resolve_reference_bundle(
                     primary_text = txt
                 else:
                     primary_text = ""
+            else:
+                primary_text = ""
 
     _add_sample(ref_audio_path, primary_text, source="primary")
     if dataset_scan_enabled and primary_abs:
@@ -1916,8 +2666,46 @@ def _resolve_reference_bundle(
             if (best_idx < 0) or (score > best_score):
                 best_idx = idx
                 best_score = score
+
+        # 当目标文本与数据集文本几乎无重合时，避免“噪声重合”误选，回到首个可用样本。
+        if target_ok and (best_idx > 0) and (best_score < 0.10):
+            for idx, sample in enumerate(samples[1:], start=1):
+                txt = sanitize_text(str((sample or {}).get("text") or ""))
+                if has_speakable_content(txt):
+                    best_idx = idx
+                    break
+
         if best_idx > 0:
             samples.insert(0, samples.pop(best_idx))
+
+    tier_l = str(risk_tier or "normal").strip().lower()
+    if tier_l == "risky" and len(samples) > 1:
+        def _sample_rms(idx: int) -> float:
+            try:
+                ap = str((samples[idx] or {}).get("audio_path") or "")
+                if not ap or (not os.path.exists(ap)):
+                    return 0.0
+                with open(ap, "rb") as rf:
+                    b = rf.read()
+                return float(_estimate_wav_rms(b) or 0.0)
+            except Exception:
+                return 0.0
+
+        primary_txt_ok = has_speakable_content((samples[0] or {}).get("text") or "")
+        if primary_txt_ok:
+            primary_rms = _sample_rms(0)
+            best_idx = 0
+            best_rms = primary_rms
+            for idx, sample in enumerate(samples[1:], start=1):
+                txt = sanitize_text(str((sample or {}).get("text") or ""))
+                if not has_speakable_content(txt):
+                    continue
+                rms_val = _sample_rms(idx)
+                if rms_val > best_rms:
+                    best_idx = idx
+                    best_rms = rms_val
+            if best_idx > 0 and best_rms >= max(900.0, primary_rms * 1.25):
+                samples.insert(0, samples.pop(best_idx))
 
     if prefer_target_primary_sample and len(samples) > 1 and has_speakable_content(target_text):
         tgt_len = len(sanitize_text(target_text))
@@ -1988,8 +2776,24 @@ SAFETY_AI_FAIL_CLOSED = AI_RUNTIME.fail_closed
 SAFETY_AI_MAX_CHARS = AI_RUNTIME.max_chars
 SAFETY_AI_CACHE_TTL_SEC = AI_RUNTIME.cache_ttl_sec
 SAFETY_AI_CACHE_MAX = AI_RUNTIME.cache_max
-SAFETY_AI_TTS_MODEL = str(os.environ.get("AI_TTS_MODEL", "") or os.environ.get("AI_MODEL_READALONG_TTS", "") or os.environ.get("AI_MODEL_TTS", "")).strip() or "qwen-omni-turbo"
+QWEN_TTS_MODEL_CANDIDATES_DEFAULT = [
+    # 新版千问语音合成模型优先
+    "qwen3-tts-instruct-flash",
+    "qwen3-tts-flash",
+    "qwen-tts",
+    # 兼容 chat+audio 兜底
+    "qwen3-omni-flash",
+    "qwen3.5-omni-flash",
+    # 保留历史默认，确保老环境不崩
+    "qwen-omni-turbo",
+]
+SAFETY_AI_TTS_MODEL = str(os.environ.get("AI_TTS_MODEL", "") or os.environ.get("AI_MODEL_READALONG_TTS", "") or os.environ.get("AI_MODEL_TTS", "")).strip() or QWEN_TTS_MODEL_CANDIDATES_DEFAULT[0]
 SAFETY_AI_TTS_TIMEOUT_SEC = max(12.0, float(os.environ.get("AI_TTS_TIMEOUT_SEC", SAFETY_AI_TIMEOUT_SEC or 20)))
+SAFETY_AI_TTS_MODEL_FALLBACKS = [
+    str(item or "").strip()
+    for item in str(os.environ.get("AI_TTS_MODEL_FALLBACKS", "")).split(",")
+    if str(item or "").strip()
+]
 
 def has_speakable_content(text: str) -> bool:
     """判断文本是否包含可发音字符，避免仅标点导致无效音频。"""
@@ -2000,6 +2804,25 @@ def has_speakable_content(text: str) -> bool:
 _SAFETY_AI_CACHE = {}
 _SAFETY_AI_CACHE_LOCK = threading.Lock()
 
+
+def _safety_ai_error_brief(err: Exception, max_len: int = 180) -> str:
+    raw = str(err or "").replace("\n", " ").strip()
+    if "body=" in raw:
+        raw = raw.split("body=", 1)[0].strip()
+    if not raw:
+        raw = err.__class__.__name__ if err else "unknown_error"
+    return raw[:max_len]
+
+
+def _classify_provider_account_issue(err_text: str) -> str:
+    s = str(err_text or "").lower()
+    if not s:
+        return ""
+    if "arrearage" in s or "overdue-payment" in s or "access denied" in s:
+        return "provider_arrearage"
+    if "invalid api key" in s or "unauthorized" in s or "forbidden" in s:
+        return "provider_auth_error"
+    return ""
 
 
 # 启动可观测性：打印 AI 审核配置（不含密钥）
@@ -2061,7 +2884,19 @@ def _call_openai_compatible_chat_json(prompt: str) -> dict:
             body = e.read().decode("utf-8", errors="ignore")
         except Exception:
             body = ""
-        raise RuntimeError(f"ai http error: {e.code} {e.reason} body={body[:500]}")
+
+        provider_code = ""
+        if body:
+            try:
+                obj = json.loads(body)
+                provider_code = str((((obj or {}).get("error") or {}).get("code") or "")).strip()
+            except Exception:
+                provider_code = ""
+
+        msg = f"ai http error: {e.code} {e.reason}"
+        if provider_code:
+            msg += f" code={provider_code}"
+        raise RuntimeError(msg)
 
     obj = json.loads(raw)
     content = (((obj.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
@@ -2133,10 +2968,11 @@ def _check_text_safety_ai(text: str):
         return ok, reason, hit
 
     except Exception as e:
-        logger.warning(f"[safety_ai] 审核失败，将按降级策略处理: {e}")
+        brief = _safety_ai_error_brief(e)
+        logger.warning(f"[safety_ai] 审核失败，将按降级策略处理: {brief}")
         if SAFETY_AI_FAIL_CLOSED:
-            return False, "内容审核暂时不可用，请稍后再试。", {"provider": "ai", "error": str(e)}
-        return True, None, {"provider": "ai", "skipped": True, "error": str(e)}
+            return False, "内容审核暂时不可用，请稍后再试。", {"provider": "ai", "error": brief}
+        return True, None, {"provider": "ai", "skipped": True, "error": brief}
 
 CONTENT_SAFETY_ENABLED = os.environ.get("CONTENT_SAFETY_ENABLED", "1") not in {"0", "false", "False"}
 
@@ -2229,16 +3065,17 @@ def _pcm16_to_wav_bytes(raw_pcm: bytes, sample_rate: int = 24000) -> bytes:
     return buf.getvalue()
 
 
-async def _qwen_tts_openai_speech_once(text: str, voice_name: str) -> bytes:
+async def _qwen_tts_openai_speech_once(text: str, voice_name: str, model_name: str = "") -> bytes:
     base_url = str(SAFETY_AI_BASE_URL or "").strip().rstrip("/")
     api_key = str(SAFETY_AI_API_KEY or "").strip()
     if not base_url or not api_key:
         raise RuntimeError("Qwen TTS 配置缺失")
 
+    model = str(model_name or "").strip() or SAFETY_AI_TTS_MODEL
     url = f"{base_url}/audio/speech"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": SAFETY_AI_TTS_MODEL,
+        "model": model,
         "voice": str(voice_name or "").strip(),
         "input": str(text or "").strip(),
         "format": "wav",
@@ -2286,17 +3123,18 @@ def _normalize_qwen_tts_compare_text(text: str) -> str:
     return re.sub(r"[\s\u3000\n\r\t，,。！？!?；;:：…、\"'“”‘’()（）\-—~·]", "", str(base))
 
 
-async def _qwen_tts_chat_stream_once(text: str, voice_name: str) -> bytes:
+async def _qwen_tts_chat_stream_once(text: str, voice_name: str, model_name: str = "") -> bytes:
     base_url = str(SAFETY_AI_BASE_URL or "").strip().rstrip("/")
     api_key = str(SAFETY_AI_API_KEY or "").strip()
     if not base_url or not api_key:
         raise RuntimeError("Qwen TTS 配置缺失")
 
+    model = str(model_name or "").strip() or SAFETY_AI_TTS_MODEL
     url = f"{base_url}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     speak_text = str(text or "").strip()
     payload = {
-        "model": SAFETY_AI_TTS_MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -2385,26 +3223,95 @@ async def _qwen_tts_generate_wav(text: str, profile: Optional[dict] = None):
     if not has_speakable_content(text_cleaned):
         raise RuntimeError("目标文本缺少可发音字符")
 
+    p = profile if isinstance(profile, dict) else {}
+    is_fast_base_voice = _is_qwen_base_story_voice_profile(p) and bool((p or {}).get("quick_story"))
+    primary_voice = str((p or {}).get("qwen_voice") or "").strip()
+    primary_model = str((p or {}).get("qwen_model") or "").strip() or str(SAFETY_AI_TTS_MODEL or "").strip()
+    base_url_lower = str(SAFETY_AI_BASE_URL or "").strip().lower()
+    skip_openai_speech_for_dashscope_compat = (
+        "dashscope.aliyuncs.com" in base_url_lower and "compatible-mode" in base_url_lower
+    )
+
+    # 基础绘本音色使用单声线极速策略，优先 /audio/speech，失败后回落到云端 chat+audio。
+    # 注意：该回落仍在 Qwen 云端链路，不会触发本地推理回退。
+    if is_fast_base_voice and primary_voice:
+        model_candidates = []
+        for mv in [primary_model, SAFETY_AI_TTS_MODEL, *SAFETY_AI_TTS_MODEL_FALLBACKS]:
+            item = str(mv or "").strip()
+            if item and item not in model_candidates:
+                model_candidates.append(item)
+        model_candidates = model_candidates[:2] if model_candidates else ["qwen3-tts-instruct-flash"]
+
+        errs = []
+        if skip_openai_speech_for_dashscope_compat:
+            errs.append("audio/speech:skipped_for_dashscope_compat")
+        else:
+            for model_name in model_candidates:
+                try:
+                    audio = await _qwen_tts_openai_speech_once(text_cleaned, primary_voice, model_name=model_name)
+                    if _looks_like_wav_bytes(audio):
+                        return audio, primary_voice, f"qwen_tts_openai_fast:{model_name}"
+                    errs.append(f"{model_name}:non-wav")
+                except Exception as e:
+                    errs.append(f"{model_name}:{str(e)[:140]}")
+
+        chat_fast_models = []
+        for mv in [
+            "qwen-omni-turbo",
+            "qwen3-omni-flash",
+            "qwen3.5-omni-flash",
+            primary_model,
+            SAFETY_AI_TTS_MODEL,
+            *SAFETY_AI_TTS_MODEL_FALLBACKS,
+        ]:
+            item = str(mv or "").strip()
+            if not item:
+                continue
+            if "omni" not in item.lower():
+                continue
+            if item not in chat_fast_models:
+                chat_fast_models.append(item)
+        if not chat_fast_models:
+            chat_fast_models = ["qwen-omni-turbo"]
+
+        for model_name in chat_fast_models[:2]:
+            try:
+                wav_audio = await _qwen_tts_chat_stream_once(text_cleaned, primary_voice, model_name=model_name)
+                return wav_audio, primary_voice, f"qwen_tts_chat_fast:{model_name}"
+            except Exception as e:
+                errs.append(f"chat/{model_name}:{str(e)[:140]}")
+        raise RuntimeError("qwen base fast tts failed: " + " | ".join(errs)[:420])
+
     voices = _qwen_voice_candidates(profile)
+    models = _qwen_tts_model_candidates(profile)
+    chat_models = [m for m in models if "omni" in str(m).lower()]
+    if not chat_models:
+        chat_models = models[:2]
+
     errs = []
     for voice_name in voices:
-        speech_err = None
-        try:
-            audio = await _qwen_tts_openai_speech_once(text_cleaned, voice_name)
-            if _looks_like_wav_bytes(audio):
-                return audio, voice_name, "qwen_tts_openai_compat"
-            speech_err = RuntimeError("audio/speech returned non-wav")
-        except Exception as e:
-            speech_err = e
+        speech_errors = []
+        for model_name in models:
+            try:
+                audio = await _qwen_tts_openai_speech_once(text_cleaned, voice_name, model_name=model_name)
+                if _looks_like_wav_bytes(audio):
+                    return audio, voice_name, f"qwen_tts_openai_compat:{model_name}"
+                speech_errors.append(f"{model_name}:non-wav")
+            except Exception as speech_err:
+                speech_errors.append(f"{model_name}:{str(speech_err)[:120]}")
 
-        try:
-            wav_audio = await _qwen_tts_chat_stream_once(text_cleaned, voice_name)
-            return wav_audio, voice_name, "qwen_tts_chat_stream"
-        except Exception as chat_err:
-            errs.append(f"{voice_name}:speech={str(speech_err)[:120]};chat={str(chat_err)[:120]}")
-            continue
+        for model_name in chat_models:
+            try:
+                wav_audio = await _qwen_tts_chat_stream_once(text_cleaned, voice_name, model_name=model_name)
+                return wav_audio, voice_name, f"qwen_tts_chat_stream:{model_name}"
+            except Exception as chat_err:
+                errs.append(
+                    f"{voice_name}/{model_name}:speech={'|'.join(speech_errors)[:140]};chat={str(chat_err)[:120]}"
+                )
+                continue
 
-    raise RuntimeError("; ".join(errs)[:420] or "qwen tts failed")
+    raise RuntimeError('; '.join(errs)[:420] or 'qwen tts failed')
+
 
 def _summarize_sanitize_delta(raw: str, cleaned: str, max_samples: int = 12) -> dict:
     """用于定位“吞字/漏字”是否发生在清洗阶段：统计被替换的字符。"""
@@ -2562,12 +3469,13 @@ def _resolve_static_root_dir() -> str:
     # 若 cwd 下仅有 tts/、没有 miniprogram_assets，原先会误选该目录，导致 /static/miniprogram_assets/* 全 404。
     backend_static = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wx_static")
     cwd_static = os.path.join(now_dir, "wx_static")
-    for c in (backend_static, cwd_static):
+    assets_static = os.path.join(now_dir, "assets", "wx_static")
+    for c in (backend_static, cwd_static, assets_static):
         if os.path.isdir(c) and os.path.isdir(os.path.join(c, "miniprogram_assets")):
             STATIC_ROOT_DIR = c
             return STATIC_ROOT_DIR
     # 无 miniprogram_assets 时保持旧行为：优先 cwd，避免误选仅有 fonts 的后端目录导致 tts 目录错位。
-    for c in (cwd_static, backend_static):
+    for c in (cwd_static, backend_static, assets_static):
         if os.path.isdir(c):
             STATIC_ROOT_DIR = c
             return STATIC_ROOT_DIR
@@ -2711,6 +3619,30 @@ def _collect_generator_bytes_with_stats(gen):
     for chunk in gen:
         if chunk is None:
             continue
+        if isinstance(chunk, tuple) and len(chunk) == 2:
+            sr, arr = chunk
+            try:
+                sr_i = int(sr)
+            except Exception:
+                sr_i = 0
+            if sr_i > 0 and isinstance(arr, np.ndarray):
+                if arr.dtype != np.int16:
+                    arr = arr.astype(np.int16, copy=False)
+                if arr.ndim > 1:
+                    arr = arr.reshape(-1)
+                bio = BytesIO()
+                with wave.open(bio, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr_i)
+                    wf.writeframes(arr.tobytes())
+                b = bio.getvalue()
+            else:
+                raise TypeError(f"Unexpected generator chunk tuple: ({type(sr)}, {type(arr)})")
+            chunks.append(b)
+            chunk_count += 1
+            byte_count += len(b)
+            continue
         if isinstance(chunk, (bytes, bytearray)):
             b = bytes(chunk)
         else:
@@ -2751,8 +3683,8 @@ def _try_get_wav_info(audio_bytes: bytes) -> dict:
 def _boost_low_rms_wav_if_needed(
     audio_bytes: bytes,
     trigger_rms: float = 180.0,
-    target_rms: float = 1100.0,
-    max_gain: float = 40.0,
+    target_rms: float = 920.0,
+    max_gain: float = 26.0,
 ):
     """对异常偏小音量进行温和增益，提升可听性。"""
     if not audio_bytes:
@@ -3100,6 +4032,16 @@ def _trim_over_generated_audio_if_needed(
     return trimmed, meta
 
 
+def _is_severely_over_generated_audio(
+    text: str,
+    audio_bytes: bytes,
+    speed: float = 1.0,
+    over_tolerance: float = 1.25,
+) -> bool:
+    severe_tol = max(1.40, min(2.20, float(over_tolerance or 1.25) + 0.12))
+    return _is_over_generated_audio(text, audio_bytes, speed=speed, tolerance=severe_tol)
+
+
 def _postprocess_playable_wav_for_text(
     text: str,
     audio_bytes: bytes,
@@ -3115,36 +4057,79 @@ def _postprocess_playable_wav_for_text(
     source = audio_bytes
     out = audio_bytes
 
-    trim_threshold = 24.0 if is_user_trained_voice else 20.0
+    units = _count_text_units(text)
+    if is_user_trained_voice:
+        trim_threshold = 16.0 if units <= 18 else 24.0
+        trim_ratio = 0.20 if units <= 18 else 0.30
+    else:
+        trim_threshold = 20.0
+        trim_ratio = 0.30
+
+    est_min_sec = _estimate_min_duration_sec(text, speed=float(speed or 1.0))
+    if is_user_trained_voice:
+        min_keep_sec = max(0.65, min(2.40, est_min_sec * 0.55))
+    else:
+        min_keep_sec = max(0.45, min(1.80, est_min_sec * 0.35))
+
     out, silence_meta = _trim_wav_silence_edges_if_needed(
         out,
         rms_threshold=trim_threshold,
         window_ms=20,
-        max_trim_ratio=0.30,
-        min_keep_sec=0.45,
+        max_trim_ratio=trim_ratio,
+        min_keep_sec=min_keep_sec,
     )
 
-    units = _count_text_units(text)
     base_trigger = _min_rms_for_text(text)
-    boost_trigger = max(110.0, min(260.0, base_trigger * (1.9 if units >= 8 else 2.2)))
-    boost_target = max(980.0, boost_trigger * 5.6)
-    out, boost_meta = _boost_low_rms_wav_if_needed(
-        out,
-        trigger_rms=boost_trigger,
-        target_rms=boost_target,
-        max_gain=52.0,
+    pre_noise_like = _is_noise_like_generated_audio(text, out)
+    pre_severe_low_energy = bool(
+        is_user_trained_voice and _is_low_energy_generated_audio(text, out, min_rms=48.0)
     )
-
-    rms_after_boost = _estimate_wav_rms(out)
-    if rms_after_boost > 0 and rms_after_boost < max(38.0, base_trigger * 0.72):
-        out, boost_meta2 = _boost_low_rms_wav_if_needed(
-            out,
-            trigger_rms=max(48.0, base_trigger * 0.90),
-            target_rms=max(1200.0, base_trigger * 8.0),
-            max_gain=70.0,
-        )
+    if pre_noise_like or pre_severe_low_energy:
+        if pre_noise_like:
+            skip_reason = "skip_noise_like_before_boost"
+            skip_reason2 = "skip_second_boost_noise_like_before"
+        else:
+            skip_reason = "skip_severe_low_energy_before_boost"
+            skip_reason2 = "skip_second_boost_severe_low_energy_before"
+        boost_meta = {"applied": False, "reason": skip_reason}
+        boost_meta2 = {"applied": False, "reason": skip_reason2}
     else:
-        boost_meta2 = {"applied": False, "reason": "skip_second_boost", "rms": rms_after_boost}
+        boost_trigger = max(100.0, min(220.0, base_trigger * (1.6 if units >= 8 else 1.9)))
+        boost_target = max(640.0, boost_trigger * 3.8)
+        pre_boost = out
+        out, boost_meta = _boost_low_rms_wav_if_needed(
+            out,
+            trigger_rms=boost_trigger,
+            target_rms=boost_target,
+            max_gain=24.0,
+        )
+
+        if boost_meta.get("applied"):
+            post_noise_like = _is_noise_like_generated_audio(text, out)
+            post_severe_low_energy = bool(
+                is_user_trained_voice and _is_low_energy_generated_audio(text, out, min_rms=48.0)
+            )
+            if post_noise_like or post_severe_low_energy:
+                out = pre_boost
+                if post_noise_like:
+                    revert_reason = "revert_noise_like_after_boost"
+                else:
+                    revert_reason = "revert_severe_low_energy_after_boost"
+                boost_meta = {"applied": False, "reason": revert_reason}
+                boost_meta2 = {"applied": False, "reason": "skip_second_boost_reverted"}
+            else:
+                rms_after_boost = _estimate_wav_rms(out)
+                if rms_after_boost > 0 and rms_after_boost < max(42.0, base_trigger * 0.82):
+                    out, boost_meta2 = _boost_low_rms_wav_if_needed(
+                        out,
+                        trigger_rms=max(54.0, base_trigger * 0.95),
+                        target_rms=max(780.0, base_trigger * 5.8),
+                        max_gain=30.0,
+                    )
+                else:
+                    boost_meta2 = {"applied": False, "reason": "skip_second_boost", "rms": rms_after_boost}
+        else:
+            boost_meta2 = {"applied": False, "reason": "skip_second_boost_not_applied"}
 
     if apply_duration_trim:
         out, duration_meta = _trim_over_generated_audio_if_needed(
@@ -3230,6 +4215,138 @@ def _estimate_wav_rms(audio_bytes: bytes) -> float:
         return 0.0
 
 
+def _decode_wav_mono_float(audio_bytes: bytes):
+    if not audio_bytes:
+        return None, 0
+    try:
+        data, sr = sf.read(BytesIO(audio_bytes), dtype="float32", always_2d=False)
+        if data is None:
+            return None, 0
+        y = np.asarray(data, dtype=np.float32)
+        if y.ndim > 1:
+            y = np.mean(y, axis=1)
+        if y.size <= 0:
+            return None, 0
+        return y.reshape(-1), int(sr)
+    except Exception:
+        return None, 0
+
+
+def _estimate_audio_texture_metrics(audio_bytes: bytes) -> dict:
+    y, sr = _decode_wav_mono_float(audio_bytes)
+    if y is None or sr <= 0:
+        return {
+            "flatness": 0.0,
+            "env_cv": 9.99,
+            "voiced_ratio": 1.0,
+            "duration_sec": 0.0,
+        }
+
+    y = np.nan_to_num(np.asarray(y, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    duration_sec = float(len(y)) / float(sr)
+    if y.size <= 0 or duration_sec <= 0.0:
+        return {
+            "flatness": 0.0,
+            "env_cv": 9.99,
+            "voiced_ratio": 1.0,
+            "duration_sec": 0.0,
+        }
+
+    peak = float(np.max(np.abs(y))) if y.size else 0.0
+    if peak > 1e-6:
+        y = y / peak
+
+    frame_len = max(256, int(sr * 0.025))
+    hop_len = max(128, int(sr * 0.0125))
+    if y.size < frame_len:
+        return {
+            "flatness": 0.0,
+            "env_cv": 9.99,
+            "voiced_ratio": 1.0,
+            "duration_sec": duration_sec,
+        }
+
+    fft_len = 1
+    while fft_len < frame_len:
+        fft_len <<= 1
+    win = np.hanning(frame_len).astype(np.float32)
+
+    env_vals = []
+    zcr_vals = []
+    flatness_vals = []
+
+    for st in range(0, y.size - frame_len + 1, hop_len):
+        seg = y[st : st + frame_len]
+        rms_val = float(np.sqrt(np.mean(np.square(seg)) + 1e-12))
+        env_vals.append(rms_val)
+        if seg.size > 1:
+            zcr_vals.append(float(np.mean((seg[:-1] * seg[1:]) < 0.0)))
+        else:
+            zcr_vals.append(0.0)
+
+        if rms_val > 0.006:
+            spec = np.abs(np.fft.rfft(seg * win, n=fft_len)).astype(np.float64)
+            power = np.square(spec) + 1e-12
+            flatness_vals.append(float(np.exp(np.mean(np.log(power))) / np.mean(power)))
+
+    if not env_vals:
+        return {
+            "flatness": 0.0,
+            "env_cv": 9.99,
+            "voiced_ratio": 1.0,
+            "duration_sec": duration_sec,
+        }
+
+    env_arr = np.asarray(env_vals, dtype=np.float64)
+    zcr_arr = np.asarray(zcr_vals, dtype=np.float64)
+
+    energy_gate = max(0.010, float(np.percentile(env_arr, 60)) * 0.40)
+    active_mask = env_arr >= energy_gate
+    if int(np.sum(active_mask)) < max(3, int(env_arr.size * 0.08)):
+        active_mask = env_arr >= max(0.006, float(np.mean(env_arr)) * 0.55)
+    if not np.any(active_mask):
+        active_mask = env_arr > 0.0
+
+    env_active = env_arr[active_mask] if np.any(active_mask) else env_arr
+    env_mean = float(np.mean(env_active)) if env_active.size else 0.0
+    env_std = float(np.std(env_active)) if env_active.size else 0.0
+    env_cv = env_std / max(1e-6, env_mean)
+
+    if zcr_arr.size and np.any(active_mask):
+        voiced_ratio = float(np.mean(zcr_arr[active_mask] <= 0.16))
+    else:
+        voiced_ratio = 1.0
+
+    return {
+        "flatness": float(np.median(flatness_vals)) if flatness_vals else 0.0,
+        "env_cv": float(env_cv),
+        "voiced_ratio": float(voiced_ratio),
+        "duration_sec": duration_sec,
+    }
+
+
+def _is_noise_like_generated_audio(text: str, audio_bytes: bytes) -> bool:
+    info = _try_get_wav_info(audio_bytes)
+    duration = float(info.get("duration_sec") or 0.0)
+    if duration < 0.38:
+        return False
+
+    units = _count_text_units(text)
+    if units <= 2 and duration < 0.75:
+        return False
+
+    metrics = _estimate_audio_texture_metrics(audio_bytes)
+    flatness = float(metrics.get("flatness") or 0.0)
+    env_cv = float(metrics.get("env_cv") or 9.99)
+    voiced_ratio = float(metrics.get("voiced_ratio") or 1.0)
+
+    texture_noise = (flatness >= 0.40 and voiced_ratio <= 0.34 and env_cv <= 0.62)
+    strong_hum = (flatness >= 0.47 and voiced_ratio <= 0.42 and env_cv <= 0.48)
+    if units >= 10:
+        return texture_noise
+    return texture_noise or strong_hum
+
+
 def _min_rms_for_text(text: str) -> float:
     units = _count_text_units(text)
     if units >= 20:
@@ -3257,11 +4374,13 @@ def _is_abnormal_generated_audio(
     speed: float = 1.0,
     under_tolerance: float = 0.90,
     over_tolerance: float = 1.25,
+    include_noise_like: bool = True,
 ) -> bool:
     return (
         _is_under_generated_audio(text, audio_bytes, speed=speed, tolerance=under_tolerance)
         or _is_over_generated_audio(text, audio_bytes, speed=speed, tolerance=over_tolerance)
         or _is_low_energy_generated_audio(text, audio_bytes)
+        or (include_noise_like and _is_noise_like_generated_audio(text, audio_bytes))
     )
 
 
@@ -3407,6 +4526,20 @@ def _create_buffer_task(
                 f"tier={voice_policy.get('tier')}, reasons={voice_policy.get('reasons')}, "
                 f"overrides={list((voice_policy.get('applied_overrides') or {}).keys())}"
             )
+    if is_user_trained_voice and _coerce_bool_param(data.get("hq_user_voice_generic_retry"), False):
+        buffered_units = _count_text_units("\n".join([str(s).strip() for s in (segments or []) if str(s).strip()]))
+        keep_user_guard = (
+            buffered_units >= 34
+            and _coerce_bool_param(data.get("hq_user_voice_buffered_keep_user_controls"), True)
+        )
+        if keep_user_guard:
+            logger.info(
+                f"[buffered] user_trained generic_retry 保留用户兜底: "
+                f"voice_id={voice_id}, tier={voice_policy.get('tier')}, units={buffered_units}"
+            )
+        else:
+            logger.info(f"[buffered] user_trained 启用通用解码重试: voice_id={voice_id}, tier={voice_policy.get('tier')}")
+            is_user_trained_voice = False
     if is_user_trained_voice and _coerce_bool_param(data.get("hq_user_voice_speed_boost"), True):
         try:
             min_speed = float(data.get("hq_user_voice_min_speed", 1.15))
@@ -3437,6 +4570,69 @@ def _create_buffer_task(
     aux_ref_audio_paths = [str(p).strip() for p in (aux_ref_audio_paths or []) if str(p).strip()]
     inp_refs_payload = _build_inp_refs_payload(aux_ref_audio_paths, base_dir=now_dir)
 
+    tier_l = str(voice_policy.get("tier") or "").strip().lower()
+    segment_ref_match_enabled = (
+        is_user_trained_voice
+        and tier_l in ("risky", "strict")
+        and _coerce_bool_param(data.get("hq_user_voice_segment_ref_match"), False)
+    )
+    try:
+        segment_prompt_max_chars = max(16, int(data.get("prompt_max_chars", 40)))
+    except Exception:
+        segment_prompt_max_chars = 40
+
+    segment_ref_samples = []
+    _segment_ref_seen = set()
+
+    def _add_segment_ref_sample(path_value: str, text_value: str = ""):
+        abs_path = _normalize_ref_audio_path(path_value, base_dir=now_dir)
+        if (not abs_path) or (abs_path in _segment_ref_seen):
+            return
+        if not os.path.exists(abs_path):
+            return
+        clean_text = sanitize_text(str(text_value or ""))
+        if not clean_text:
+            txt_path = os.path.splitext(abs_path)[0] + ".txt"
+            if os.path.exists(txt_path):
+                clean_text = _read_text_file_safe(txt_path)
+        segment_ref_samples.append({"audio_path": abs_path, "text": clean_text})
+        _segment_ref_seen.add(abs_path)
+
+    _add_segment_ref_sample(ref_audio_path, ref_text_cleaned)
+    for _p in aux_ref_audio_paths:
+        _add_segment_ref_sample(_p, "")
+
+    def _pick_segment_ref(seg_text: str):
+        if (not segment_ref_match_enabled) or (not segment_ref_samples):
+            return ref_audio_path, ref_text_cleaned
+
+        seg_clean = sanitize_text(str(seg_text or ""))
+        best = None
+        best_score = -1.0
+        seg_len = len(seg_clean)
+        for sample in segment_ref_samples:
+            txt = sanitize_text(str((sample or {}).get("text") or ""))
+            overlap = _text_overlap_score(txt, seg_clean)
+            if seg_len > 0:
+                length_bias = 1.0 - min(abs(len(txt) - seg_len), 80) / 80.0
+            else:
+                length_bias = 0.0
+            score = overlap * 0.85 + max(0.0, length_bias) * 0.15
+            if score > best_score:
+                best = sample
+                best_score = score
+
+        if not best:
+            return ref_audio_path, ref_text_cleaned
+
+        prompt = normalize_ref_text_for_infer(
+            str((best or {}).get("text") or ref_text_cleaned or ""),
+            max_chars=segment_prompt_max_chars,
+        )
+        if not prompt:
+            prompt = ref_text_cleaned
+        return str((best or {}).get("audio_path") or ref_audio_path), prompt
+
     def _gen_once(seg_text: str, profile: dict, attempt_tag: str) -> bytes:
         try:
             import api as official_api_module
@@ -3452,21 +4648,36 @@ def _create_buffer_task(
             is_user_trained_voice=is_user_trained_voice,
             risk_tier=voice_policy.get("tier"),
         )
-        if (
-            is_user_trained_voice
-            and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict")
-            and _coerce_bool_param(data.get("hq_user_voice_relax_max_sec"), True)
-        ):
-            target_max_sec = 0
+        if is_user_trained_voice and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict"):
+            relax_max_sec = _coerce_bool_param(data.get("hq_user_voice_relax_max_sec"), False)
+            if relax_max_sec and (not _coerce_bool_param(data.get("hq_user_voice_allow_hard_max_sec"), False)):
+                seg_units_for_cap = _count_text_units(seg_text)
+                if seg_units_for_cap <= 26:
+                    target_max_sec = 0
+                else:
+                    min_sec_floor = _estimate_min_duration_sec(seg_text, speed=profile_speed)
+                    target_max_sec = max(target_max_sec, int(float(min_sec_floor) + 4.0))
         sec_override_applied = False
         sec_override_old = None
         sec_override_new = None
         with _INFER_MAX_SEC_OVERRIDE_LOCK:
             sec_override_applied, sec_restore_items, sec_override_old, sec_override_new = _apply_temporary_infer_max_sec(target_max_sec)
             try:
+                call_ref_audio_path, call_prompt_text = _pick_segment_ref(seg_text)
+                if debug_id and segment_ref_match_enabled:
+                    _debug_add_segment(
+                        debug_id,
+                        -1,
+                        kind="buffered_ref_pick",
+                        attempt=attempt_tag,
+                        seg_len=len(seg_text),
+                        ref_audio=call_ref_audio_path,
+                        ref_prompt=call_prompt_text,
+                    )
+
                 gen = official_get_tts_wav_api(
-                    ref_wav_path=ref_audio_path,
-                    prompt_text=ref_text_cleaned,
+                    ref_wav_path=call_ref_audio_path,
+                    prompt_text=call_prompt_text,
                     prompt_language=api_prompt_lang,
                     text=seg_text,
                     text_language=api_text_lang,
@@ -3508,6 +4719,26 @@ def _create_buffer_task(
         under_tol = 0.92 if seg_units >= 14 else 0.90
         over_tol = 1.20 if seg_units >= 14 else 1.23
         under_tol, over_tol = _apply_voice_risk_tolerance(under_tol, over_tol, voice_policy.get("tier"))
+        tier_l = str(voice_policy.get("tier") or "").strip().lower()
+        if (
+            is_user_trained_voice
+            and seg_units >= 30
+            and tier_l in ("risky", "strict")
+            and _coerce_bool_param(data.get("hq_user_voice_buffered_under_guard"), True)
+        ):
+            under_tol = max(0.90, under_tol)
+        allow_short_risky_trim = (
+            is_user_trained_voice
+            and tier_l in ("risky", "strict")
+            and seg_units <= 40
+            and _coerce_bool_param(data.get("hq_user_voice_short_trim"), False)
+        )
+        allow_long_risky_trim = (
+            is_user_trained_voice
+            and tier_l == "risky"
+            and seg_units >= 42
+            and _coerce_bool_param(data.get("hq_user_voice_long_trim"), True)
+        )
 
         primary_profile = {
             "top_k": top_k_base,
@@ -3520,12 +4751,26 @@ def _create_buffer_task(
         audio_bytes_wav = _gen_once(seg_text, primary_profile, "base")
 
         def _finalize_segment_audio(candidate_bytes: bytes, profile_speed: float) -> bytes:
+            risky_severe_trim = (
+                is_user_trained_voice
+                and tier_l in ("risky", "strict")
+                and _coerce_bool_param(data.get("hq_user_voice_risky_severe_trim"), True)
+                and _is_severely_over_generated_audio(
+                    seg_text,
+                    candidate_bytes,
+                    speed=float(profile_speed or speed_base),
+                    over_tolerance=over_tol,
+                )
+            )
+            apply_duration_trim = is_user_trained_voice and (
+                tier_l != "risky" or allow_short_risky_trim or allow_long_risky_trim or risky_severe_trim
+            )
             processed_bytes, post_meta = _postprocess_playable_wav_for_text(
                 seg_text,
                 candidate_bytes,
                 speed=float(profile_speed or speed_base),
                 over_tolerance=over_tol,
-                apply_duration_trim=is_user_trained_voice and str(voice_policy.get("tier") or "").strip().lower() != "risky",
+                apply_duration_trim=apply_duration_trim,
                 is_user_trained_voice=is_user_trained_voice,
                 context="buffered_segment",
             )
@@ -3537,6 +4782,30 @@ def _create_buffer_task(
                     f"duration_trim={post_meta.get('duration_trim_applied')}, "
                     f"rms={post_meta.get('rms_before')}->{post_meta.get('rms_after')}"
                 )
+
+            processed_under = _is_under_generated_audio(
+                seg_text,
+                processed_bytes,
+                speed=float(profile_speed or speed_base),
+                tolerance=under_tol,
+            )
+            candidate_under = _is_under_generated_audio(
+                seg_text,
+                candidate_bytes,
+                speed=float(profile_speed or speed_base),
+                tolerance=under_tol,
+            )
+            if processed_under and (not candidate_under):
+                logger.info("[buffered] segment 后处理回退: 裁剪后过短，保留原始候选")
+                return candidate_bytes
+
+            processed_noise_like = _is_noise_like_generated_audio(seg_text, processed_bytes)
+            processed_severe_low_energy = _is_low_energy_generated_audio(seg_text, processed_bytes, min_rms=48.0)
+            candidate_noise_like = _is_noise_like_generated_audio(seg_text, candidate_bytes)
+            candidate_severe_low_energy = _is_low_energy_generated_audio(seg_text, candidate_bytes, min_rms=48.0)
+            if (processed_noise_like or processed_severe_low_energy) and (not candidate_noise_like) and (not candidate_severe_low_energy):
+                logger.info("[buffered] segment 后处理回退: 放大后疑似噪声/低能量，保留原始候选")
+                return candidate_bytes
             return processed_bytes
 
         if not _is_abnormal_generated_audio(seg_text, audio_bytes_wav, speed=primary_profile["speed"], under_tolerance=under_tol, over_tolerance=over_tol):
@@ -3544,6 +4813,8 @@ def _create_buffer_task(
 
         best_audio_bytes = audio_bytes_wav
         best_score = _duration_match_score(seg_text, audio_bytes_wav, speed=primary_profile["speed"])
+        best_asr_score = -1.0
+        best_profile = dict(primary_profile)
 
         is_under_initial = _is_under_generated_audio(
             seg_text,
@@ -3558,10 +4829,40 @@ def _create_buffer_task(
             tolerance=over_tol,
         )
         is_low_energy_initial = _is_low_energy_generated_audio(seg_text, audio_bytes_wav)
+        is_severe_low_energy_initial = _is_low_energy_generated_audio(seg_text, audio_bytes_wav, min_rms=48.0)
+
+        asr_rerank_enabled = (
+            is_user_trained_voice
+            and tier_l in ("risky", "strict")
+            and _coerce_bool_param(data.get("hq_user_voice_asr_rerank"), False)
+        )
+        try:
+            asr_timeout_sec = max(8.0, min(45.0, float(data.get("hq_user_voice_asr_timeout_sec", 18.0))))
+        except Exception:
+            asr_timeout_sec = 18.0
+        try:
+            asr_min_accept = float(data.get("hq_user_voice_asr_min_ratio", 0.72 if tier_l == "strict" else 0.66))
+        except Exception:
+            asr_min_accept = 0.72 if tier_l == "strict" else 0.66
+        asr_min_accept = max(0.35, min(0.95, asr_min_accept))
+
+        if asr_rerank_enabled:
+            best_asr_score = _score_generated_audio_with_readalong(audio_bytes_wav, seg_text, timeout_sec=asr_timeout_sec)
+            _debug_add_segment(
+                debug_id,
+                -1,
+                kind="buffered_asr_score",
+                attempt="base",
+                seg_len=len(seg_text),
+                asr_ratio=best_asr_score,
+            )
+            if best_asr_score >= asr_min_accept:
+                logger.info(f"[buffered] segment ASR重排 base 直接通过，ratio={best_asr_score:.2f}")
+                return _finalize_segment_audio(audio_bytes_wav, float(primary_profile.get("speed", speed_base)))
 
         if is_user_trained_voice:
-            if is_over_initial and (not is_under_initial):
-                if _coerce_bool_param(data.get("hq_user_voice_over_retry"), False):
+            if is_over_initial and (not is_under_initial) and (not is_low_energy_initial) and (not is_severe_low_energy_initial):
+                if _coerce_bool_param(data.get("hq_user_voice_over_retry"), True):
                     retry_profiles = [
                         {
                             "top_k": max(16, top_k_base),
@@ -3571,9 +4872,17 @@ def _create_buffer_task(
                             "speed": max(1.10, speed_base),
                             "sample_steps": max(22, min(28, sample_steps_base)),
                         },
+                        {
+                            "top_k": max(14, top_k_base - 1),
+                            "top_p": min(0.82, max(0.74, top_p_base)),
+                            "temperature": min(0.34, max(0.24, temperature_base)),
+                            "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                            "speed": max(1.22, speed_base),
+                            "sample_steps": max(18, min(24, sample_steps_base)),
+                        },
                     ]
                 else:
-                    logger.info(f"[buffered] user_trained over-generated: skip retry for speed, voice_id={voice_id}")
+                    logger.info(f"[buffered] user_trained over-generated: over_retry=false, voice_id={voice_id}")
                     retry_profiles = []
             elif is_under_initial:
                 retry_profiles = [
@@ -3594,17 +4903,22 @@ def _create_buffer_task(
                         "sample_steps": max(40, sample_steps_base + 8),
                     },
                 ]
-            elif is_low_energy_initial:
-                retry_profiles = [
-                    {
-                        "top_k": max(17, top_k_base),
-                        "top_p": max(0.84, top_p_base),
-                        "temperature": min(0.38, max(0.30, temperature_base)),
-                        "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
-                        "speed": max(0.98, speed_base),
-                        "sample_steps": max(30, min(36, sample_steps_base + 2)),
-                    },
-                ]
+            elif is_low_energy_initial or is_severe_low_energy_initial:
+                allow_low_energy_retry = is_severe_low_energy_initial or _coerce_bool_param(data.get("hq_user_voice_retry_low_energy"), False)
+                if allow_low_energy_retry:
+                    retry_profiles = [
+                        {
+                            "top_k": max(17, top_k_base),
+                            "top_p": max(0.84, top_p_base),
+                            "temperature": min(0.38, max(0.30, temperature_base)),
+                            "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
+                            "speed": max(0.98, speed_base),
+                            "sample_steps": max(30, min(36, sample_steps_base + 2)),
+                        },
+                    ]
+                else:
+                    logger.info(f"[buffered] user_trained low-energy: skip retry and rely on final gain, voice_id={voice_id}")
+                    retry_profiles = []
             else:
                 retry_profiles = [
                     {
@@ -3656,16 +4970,317 @@ def _create_buffer_task(
             retry_info = _try_get_wav_info(retry_audio_bytes)
             retry_duration = float(retry_info.get("duration_sec") or 0.0)
             retry_score = _duration_match_score(seg_text, retry_audio_bytes, speed=rp["speed"])
-            if retry_score < best_score:
-                best_audio_bytes = retry_audio_bytes
-                best_score = retry_score
+            retry_asr_score = -1.0
 
-            if not _is_abnormal_generated_audio(seg_text, retry_audio_bytes, speed=rp["speed"], under_tolerance=under_tol, over_tolerance=over_tol):
+            if asr_rerank_enabled:
+                retry_asr_score = _score_generated_audio_with_readalong(retry_audio_bytes, seg_text, timeout_sec=asr_timeout_sec)
+                _debug_add_segment(
+                    debug_id,
+                    -1,
+                    kind="buffered_asr_score",
+                    attempt=f"retry{ridx}",
+                    seg_len=len(seg_text),
+                    asr_ratio=retry_asr_score,
+                )
+
+                if retry_asr_score >= 0.0:
+                    if (retry_asr_score > best_asr_score + 1e-6) or (
+                        abs(retry_asr_score - best_asr_score) <= 1e-6 and retry_score < best_score
+                    ):
+                        best_audio_bytes = retry_audio_bytes
+                        best_score = retry_score
+                        best_asr_score = retry_asr_score
+                        best_profile = dict(rp)
+                elif best_asr_score < 0.0 and retry_score < best_score:
+                    best_audio_bytes = retry_audio_bytes
+                    best_score = retry_score
+                    best_profile = dict(rp)
+
+                if retry_asr_score >= asr_min_accept:
+                    logger.info(f"[buffered] segment ASR重排第{ridx}轮通过，ratio={retry_asr_score:.2f}, dur={retry_duration:.2f}s")
+                    return _finalize_segment_audio(retry_audio_bytes, float(rp.get("speed", speed_base)))
+            else:
+                if retry_score < best_score:
+                    best_audio_bytes = retry_audio_bytes
+                    best_score = retry_score
+                    best_profile = dict(rp)
+
+            if (not asr_rerank_enabled or retry_asr_score < 0.0) and (not _is_abnormal_generated_audio(seg_text, retry_audio_bytes, speed=rp["speed"], under_tolerance=under_tol, over_tolerance=over_tol)):
                 logger.info(f"[buffered] segment 分级重试第{ridx}轮通过，dur={retry_duration:.2f}s")
                 return _finalize_segment_audio(retry_audio_bytes, float(rp.get("speed", speed_base)))
 
-        logger.warning("[buffered] segment 分级重试后仍异常，返回最接近期望时长版本")
-        return _finalize_segment_audio(best_audio_bytes, float(primary_profile.get("speed", speed_base)))
+        if asr_rerank_enabled and best_asr_score >= 0.0:
+            logger.warning(f"[buffered] segment ASR重排后未达阈值，返回最佳候选: ratio={best_asr_score:.2f}")
+        else:
+            logger.warning("[buffered] segment 分级重试后仍异常，准备保守兜底重生")
+        best_speed = float(best_profile.get("speed", speed_base))
+        post_retry_abnormal = _is_abnormal_generated_audio(
+            seg_text,
+            best_audio_bytes,
+            speed=best_speed,
+            under_tolerance=under_tol,
+            over_tolerance=over_tol,
+        )
+        if (
+            is_user_trained_voice
+            and tier_l in ("risky", "strict")
+            and post_retry_abnormal
+            and _coerce_bool_param(data.get("hq_user_voice_buffered_retry_rescue"), True)
+        ):
+            rescue_profiles = [
+                {
+                    "top_k": max(18, top_k_base),
+                    "top_p": max(0.88, min(0.92, top_p_base)),
+                    "temperature": min(0.30, max(0.22, temperature_base)),
+                    "repetition_penalty": min(1.28, max(1.20, repetition_penalty_base)),
+                    "speed": min(0.96, speed_base),
+                    "sample_steps": max(44, sample_steps_base + 8),
+                },
+                {
+                    "top_k": max(20, top_k_base),
+                    "top_p": max(0.90, min(0.94, top_p_base)),
+                    "temperature": min(0.28, max(0.20, temperature_base)),
+                    "repetition_penalty": min(1.30, max(1.22, repetition_penalty_base)),
+                    "speed": min(0.92, speed_base),
+                    "sample_steps": max(52, sample_steps_base + 14),
+                },
+            ]
+            for rescue_idx, rescue_profile in enumerate(rescue_profiles, start=1):
+                try:
+                    rescue_audio = _gen_once(seg_text, rescue_profile, f"rescue{rescue_idx}")
+                except StopIteration:
+                    continue
+                rescue_speed = float(rescue_profile.get("speed", speed_base))
+                rescue_abnormal = _is_abnormal_generated_audio(
+                    seg_text,
+                    rescue_audio,
+                    speed=rescue_speed,
+                    under_tolerance=under_tol,
+                    over_tolerance=over_tol,
+                )
+                rescue_score = _duration_match_score(seg_text, rescue_audio, speed=rescue_speed)
+                if (not rescue_abnormal) or (rescue_score < best_score):
+                    best_audio_bytes = rescue_audio
+                    best_score = rescue_score
+                    best_profile = dict(rescue_profile)
+                    best_speed = rescue_speed
+                    post_retry_abnormal = rescue_abnormal
+                if not rescue_abnormal:
+                    logger.info(f"[buffered] segment 保守重生第{rescue_idx}轮通过")
+                    break
+        if is_user_trained_voice and _is_under_generated_audio(
+            seg_text,
+            best_audio_bytes,
+            speed=best_speed,
+            tolerance=max(0.90 if seg_units >= 30 else 0.86, under_tol),
+        ):
+            final_under_profiles = [
+                {
+                    "top_k": max(20, top_k_base),
+                    "top_p": max(0.90, top_p_base),
+                    "temperature": min(0.34, max(0.26, temperature_base)),
+                    "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                    "speed": min(0.92, speed_base),
+                    "sample_steps": max(42, sample_steps_base + 8),
+                },
+                {
+                    "top_k": max(22, top_k_base),
+                    "top_p": max(0.92, top_p_base),
+                    "temperature": min(0.32, max(0.24, temperature_base)),
+                    "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                    "speed": min(0.88, speed_base),
+                    "sample_steps": max(50, sample_steps_base + 12),
+                },
+                {
+                    "top_k": max(24, top_k_base),
+                    "top_p": max(0.94, top_p_base),
+                    "temperature": min(0.30, max(0.22, temperature_base)),
+                    "repetition_penalty": min(1.28, max(1.20, repetition_penalty_base)),
+                    "speed": min(0.84, speed_base),
+                    "sample_steps": max(58, sample_steps_base + 16),
+                },
+            ]
+            for fu_idx, final_under_profile in enumerate(final_under_profiles, start=1):
+                try:
+                    final_under_audio = _gen_once(seg_text, final_under_profile, f"under_final{fu_idx}")
+                except StopIteration:
+                    continue
+                final_under_score = _duration_match_score(seg_text, final_under_audio, speed=final_under_profile["speed"])
+                final_under_info = _try_get_wav_info(final_under_audio)
+                final_under_dur = float((final_under_info or {}).get("duration_sec") or 0.0)
+                best_info = _try_get_wav_info(best_audio_bytes)
+                best_dur = float((best_info or {}).get("duration_sec") or 0.0)
+                final_under_is_under = _is_under_generated_audio(
+                    seg_text,
+                    final_under_audio,
+                    speed=float(final_under_profile.get("speed", speed_base)),
+                    tolerance=max(0.90 if seg_units >= 30 else 0.86, under_tol),
+                )
+                if (
+                    ((not final_under_is_under) and final_under_score <= (best_score + 0.45))
+                    or (final_under_score < best_score)
+                    or (final_under_dur > best_dur + 0.45)
+                ):
+                    best_audio_bytes = final_under_audio
+                    best_score = final_under_score
+                    best_profile = dict(final_under_profile)
+                    logger.info(
+                        f"[buffered] segment under 最终兜底通过: attempt=under_final{fu_idx}, "
+                        f"dur={best_dur:.2f}->{final_under_dur:.2f}, fixed={(not final_under_is_under)}"
+                    )
+                    if not final_under_is_under:
+                        break
+        final_speed = float(best_profile.get("speed", speed_base))
+        final_audio = _finalize_segment_audio(best_audio_bytes, final_speed)
+        if (
+            is_user_trained_voice
+            and tier_l in ("risky", "strict")
+            and _coerce_bool_param(data.get("hq_user_voice_block_abnormal_segment"), tier_l == "strict")
+            and _is_abnormal_generated_audio(
+                seg_text,
+                final_audio,
+                speed=final_speed,
+                under_tolerance=under_tol,
+                over_tolerance=over_tol,
+            )
+        ):
+            raise RuntimeError("buffered segment remains abnormal after retries/rescue")
+        return final_audio
+
+    def _maybe_second_chance_under(seg_text: str, candidate_bytes: bytes) -> bytes:
+        if (not is_user_trained_voice) or (not candidate_bytes):
+            return candidate_bytes
+        seg_units = _count_text_units(seg_text)
+        under_tol_local = 0.92 if seg_units >= 14 else 0.90
+        over_tol_local = 1.20 if seg_units >= 14 else 1.23
+        under_tol_local, _ = _apply_voice_risk_tolerance(under_tol_local, over_tol_local, voice_policy.get("tier"))
+        speed_local = float(speed_base or 1.0)
+        under_floor = 0.90 if seg_units >= 30 else 0.88
+        under_tol_local = max(under_floor, under_tol_local)
+        cur_under = _is_under_generated_audio(
+            seg_text,
+            candidate_bytes,
+            speed=speed_local,
+            tolerance=under_tol_local,
+        )
+        if not cur_under:
+            return candidate_bytes
+        cur_info = _try_get_wav_info(candidate_bytes)
+        cur_dur = float((cur_info or {}).get("duration_sec") or 0.0)
+
+        best_bytes = candidate_bytes
+        best_dur = cur_dur
+        best_under = True
+
+        try:
+            reroll_max = int(data.get("hq_user_voice_under_reroll_max", 2))
+        except Exception:
+            reroll_max = 2
+        reroll_max = max(1, min(2, reroll_max))
+        est_min_local = _estimate_min_duration_sec(seg_text, speed=speed_local)
+        severe_under = cur_dur < max(1.0, est_min_local * 0.85)
+        if severe_under:
+            reroll_max = min(2, reroll_max + 1)
+
+        def _concat_wav_bytes(parts: list) -> bytes:
+            if not parts:
+                return b""
+            params = None
+            frames = []
+            try:
+                for pb in parts:
+                    if not pb:
+                        return b""
+                    with wave.open(BytesIO(pb), "rb") as wf:
+                        cur_params = (wf.getnchannels(), wf.getsampwidth(), wf.getframerate())
+                        if params is None:
+                            params = cur_params
+                        elif cur_params != params:
+                            return b""
+                        frames.append(wf.readframes(wf.getnframes()))
+                if not params:
+                    return b""
+                out = BytesIO()
+                with wave.open(out, "wb") as out_wf:
+                    out_wf.setnchannels(params[0])
+                    out_wf.setsampwidth(params[1])
+                    out_wf.setframerate(params[2])
+                    for fr in frames:
+                        out_wf.writeframes(fr)
+                return out.getvalue()
+            except Exception:
+                return b""
+
+        for ridx in range(1, reroll_max + 1):
+            try:
+                reroll_bytes = _gen_one(seg_text)
+            except Exception:
+                continue
+            reroll_info = _try_get_wav_info(reroll_bytes)
+            reroll_dur = float((reroll_info or {}).get("duration_sec") or 0.0)
+            reroll_under = _is_under_generated_audio(
+                seg_text,
+                reroll_bytes,
+                speed=speed_local,
+                tolerance=under_tol_local,
+            )
+            if (best_under and (not reroll_under) and reroll_dur > 0.0) or (reroll_dur > best_dur + 0.12):
+                best_bytes = reroll_bytes
+                best_dur = reroll_dur
+                best_under = reroll_under
+            if (not reroll_under) and reroll_dur > 0.0:
+                break
+
+        if (
+            severe_under
+            and best_under
+            and seg_units >= 34
+            and _coerce_bool_param(data.get("hq_user_voice_buffered_under_split_fallback"), True)
+        ):
+            split_len_default = 22 if seg_units >= 56 else 26
+            try:
+                split_max_len = int(data.get("hq_user_voice_buffered_under_split_max_len", split_len_default))
+            except Exception:
+                split_max_len = split_len_default
+            split_max_len = max(14, min(32, split_max_len))
+            split_cut_punc = str(data.get("cut_punc") or "，。？！；：,.!?;:、…")
+            sub_segments = _split_text_for_buffer(seg_text, max_len=split_max_len, cut_punc=split_cut_punc)
+            if 2 <= len(sub_segments) <= 8:
+                sub_audios = []
+                for sub_text in sub_segments:
+                    try:
+                        sub_audio = _gen_one(sub_text)
+                    except Exception:
+                        sub_audios = []
+                        break
+                    if sub_audio:
+                        sub_audios.append(sub_audio)
+                merged_sub_bytes = _concat_wav_bytes(sub_audios) if len(sub_audios) >= 2 else b""
+                if merged_sub_bytes:
+                    merged_info = _try_get_wav_info(merged_sub_bytes)
+                    merged_dur = float((merged_info or {}).get("duration_sec") or 0.0)
+                    merged_under = _is_under_generated_audio(
+                        seg_text,
+                        merged_sub_bytes,
+                        speed=speed_local,
+                        tolerance=under_tol_local,
+                    )
+                    if (best_under and (not merged_under)) or (merged_dur > best_dur + 0.30):
+                        logger.info(
+                            f"[buffered] segment severe under 分段兜底替换: "
+                            f"voice_id={voice_id}, segs={len(sub_segments)}, src={best_dur:.2f}, dst={merged_dur:.2f}, fixed={(not merged_under)}"
+                        )
+                        best_bytes = merged_sub_bytes
+                        best_dur = merged_dur
+                        best_under = merged_under
+
+        if (best_bytes is not candidate_bytes) and ((not best_under) or (best_dur > cur_dur + 0.22)):
+            logger.info(
+                f"[buffered] segment under 二次生成替换: "
+                f"voice_id={voice_id}, src={cur_dur:.2f}, dst={best_dur:.2f}, reroll_max={reroll_max}, fixed={(not best_under)}"
+            )
+            return best_bytes
+        return candidate_bytes
 
     ready_urls = []
     for i in range(buffer_segments):
@@ -3673,6 +5288,7 @@ def _create_buffer_task(
             logger.info(f"[buffered][{debug_id}] segment.start i={i}/{total} len={len(segments[i])} text={segments[i][:120]!r}")
         _debug_event(debug_id, "buffered.segment.start", index=i, text=segments[i][:120], seg_len=len(segments[i]))
         audio_bytes = _gen_one(segments[i])
+        audio_bytes = _maybe_second_chance_under(segments[i], audio_bytes)
         wav_info = _try_get_wav_info(audio_bytes)
         url = _save_buffer_segment(audio_bytes, voice_id, task_id, i)
         _debug_event(
@@ -3698,6 +5314,7 @@ def _create_buffer_task(
                     logger.info(f"[buffered][{debug_id}] segment.start i={i}/{total} len={len(segments[i])} text={segments[i][:120]!r}")
                 _debug_event(debug_id, "buffered.segment.start", index=i, text=segments[i][:120], seg_len=len(segments[i]))
                 audio_bytes = _gen_one(segments[i])
+                audio_bytes = _maybe_second_chance_under(segments[i], audio_bytes)
                 wav_info = _try_get_wav_info(audio_bytes)
                 url = _save_buffer_segment(audio_bytes, voice_id, task_id, i)
                 _debug_event(
@@ -4215,6 +5832,28 @@ def merge_short_text_in_array(texts, threshold):
     return result
 
 
+def _split_text_with_official_style(inp: str, long_book_text: bool = False):
+    """
+    对齐原项目推理侧切分思路：
+    1) 先按标点切句（split）
+    2) 再按字数窗口合并（long 文本更保守）
+    3) 最后做短句并段，避免碎片段导致推理不稳定
+    """
+    text = str(inp or "").strip()
+    if not text:
+        return []
+    try:
+        # 原项目常用 cut2（约 50 字）在长文本上更稳
+        segmented = cut2(text) if long_book_text else cut1(text)
+        seg_list = [x.strip() for x in str(segmented).split("\n") if str(x).strip()]
+        seg_list = process_text(seg_list)
+        # 原项目会把过短句子继续并段，降低 decoder 抖动
+        seg_list = merge_short_text_in_array(seg_list, 10 if long_book_text else 6)
+        return [x.strip() for x in seg_list if str(x).strip()]
+    except Exception:
+        return []
+
+
 splits = {
     "，",
     "。",
@@ -4612,7 +6251,6 @@ def test_ffmpeg_installation() -> dict:
             return result
         
         result["installed"] = True
-        logger.info(f"[test_ffmpeg] ffmpeg路径: {ffmpeg_path}")
         
         # 2. 获取ffmpeg版本信息
         try:
@@ -4634,7 +6272,6 @@ def test_ffmpeg_installation() -> dict:
                     version_lines = version_output.split('\n')
                     if version_lines:
                         result["version"] = version_lines[0].strip()
-                        logger.info(f"[test_ffmpeg] ffmpeg版本: {result['version']}")
             else:
                 result["error"] = f"无法获取ffmpeg版本信息，返回码: {version_result.returncode}"
                 logger.warning("[test_ffmpeg] " + result["error"])
@@ -4677,7 +6314,7 @@ def test_ffmpeg_installation() -> dict:
                 test_output_path = test_output.name
             
             # 测试转换
-            test_success = convert_to_wav(test_input_path, test_output_path)
+            test_success = convert_to_wav(test_input_path, test_output_path, verbose=False)
             
             # 清理测试文件
             try:
@@ -4691,7 +6328,6 @@ def test_ffmpeg_installation() -> dict:
             if test_success:
                 result["test_convert"] = True
                 result["working"] = True
-                logger.info("[test_ffmpeg] 音频转换测试成功")
             else:
                 result["test_convert_error"] = "音频转换测试失败"
                 logger.error("[test_ffmpeg] " + result["test_convert_error"])
@@ -4717,7 +6353,7 @@ def test_ffmpeg_installation() -> dict:
 
 
 # 音频转码工具函数（必须在wx_upload_audio接口前定义）
-def convert_to_wav(input_path: str, output_path: str) -> bool:
+def convert_to_wav(input_path: str, output_path: str, verbose: bool = True) -> bool:
     """
     音频转码为WAV（16kHz，单声道），返回转码是否成功
     包含完整的调试信息和错误处理
@@ -4730,12 +6366,14 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
         # 检查输入文件是否存在
         if not os.path.exists(input_path):
             logger.error(f"[convert_to_wav] 输入文件不存在: {input_path}")
-            print(f"[convert_to_wav] 输入文件不存在: {input_path}")
+            if verbose:
+                print(f"[convert_to_wav] 输入文件不存在: {input_path}")
             return False
         
         input_size = os.path.getsize(input_path)
-        logger.info(f"[convert_to_wav] 开始转码: {input_path} (大小: {input_size} 字节) -> {output_path}")
-        print(f"[convert_to_wav] 开始转码: {input_path} (大小: {input_size} 字节) -> {output_path}")
+        if verbose:
+            logger.info(f"[convert_to_wav] 开始转码: {input_path} (大小: {input_size} 字节) -> {output_path}")
+            print(f"[convert_to_wav] 开始转码: {input_path} (大小: {input_size} 字节) -> {output_path}")
         
         # 确保输出目录存在
         output_dir = os.path.dirname(output_path)
@@ -4754,8 +6392,9 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
             output_path            # 输出文件路径
         ]
         
-        logger.info(f"[convert_to_wav] 执行命令: {' '.join(ffmpeg_cmd)}")
-        print(f"[convert_to_wav] 执行命令: {' '.join(ffmpeg_cmd)}")
+        if verbose:
+            logger.info(f"[convert_to_wav] 执行命令: {' '.join(ffmpeg_cmd)}")
+            print(f"[convert_to_wav] 执行命令: {' '.join(ffmpeg_cmd)}")
         
         # 执行ffmpeg转码
         # Linux环境不需要shell=True，Windows需要
@@ -4773,11 +6412,13 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
             )
         except subprocess.TimeoutExpired:
             logger.error(f"[convert_to_wav] ffmpeg执行超时（30秒）")
-            print(f"[convert_to_wav] ffmpeg执行超时（30秒）")
+            if verbose:
+                print(f"[convert_to_wav] ffmpeg执行超时（30秒）")
             return False
         
-        logger.info(f"[convert_to_wav] ffmpeg返回码: {result.returncode}")
-        print(f"[convert_to_wav] ffmpeg返回码: {result.returncode}")
+        if verbose:
+            logger.info(f"[convert_to_wav] ffmpeg返回码: {result.returncode}")
+            print(f"[convert_to_wav] ffmpeg返回码: {result.returncode}")
         
         # ffmpeg会将信息输出到stderr，即使成功也会输出，所以主要看返回码
         stderr_output = result.stderr.decode('utf-8', errors='ignore') if result.stderr else ""
@@ -4791,8 +6432,9 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
             error_msg = '\n'.join(error_lines) if error_lines else stderr_output[-500:]  # 取最后500字符
             logger.error(f"[convert_to_wav] ffmpeg执行失败 (返回码: {result.returncode})")
             logger.error(f"[convert_to_wav] 错误信息: {error_msg}")
-            print(f"[convert_to_wav] ffmpeg执行失败 (返回码: {result.returncode})")
-            print(f"[convert_to_wav] 错误信息: {error_msg}")
+            if verbose:
+                print(f"[convert_to_wav] ffmpeg执行失败 (返回码: {result.returncode})")
+                print(f"[convert_to_wav] 错误信息: {error_msg}")
             return False
         
         # 即使返回码为0，也检查输出文件是否存在
@@ -4805,33 +6447,39 @@ def convert_to_wav(input_path: str, output_path: str) -> bool:
         if not os.path.exists(output_path):
             logger.error(f"[convert_to_wav] 输出文件未生成: {output_path}")
             logger.error(f"[convert_to_wav] stderr输出（最后500字符）: {stderr_output[-500:]}")
-            print(f"[convert_to_wav] 输出文件未生成: {output_path}")
+            if verbose:
+                print(f"[convert_to_wav] 输出文件未生成: {output_path}")
             return False
         
         output_size = os.path.getsize(output_path)
         if output_size == 0:
             logger.error(f"[convert_to_wav] 输出文件为空: {output_path}")
-            print(f"[convert_to_wav] 输出文件为空: {output_path}")
+            if verbose:
+                print(f"[convert_to_wav] 输出文件为空: {output_path}")
             return False
         
         # 记录成功信息（只记录关键信息，不记录完整的stderr，因为ffmpeg会将信息输出到stderr）
-        logger.info(f"[convert_to_wav] 转码成功! 输出文件: {output_path} (大小: {output_size} 字节)")
-        print(f"[convert_to_wav] 转码成功! 输出文件: {output_path} (大小: {output_size} 字节)")
+        if verbose:
+            logger.info(f"[convert_to_wav] 转码成功! 输出文件: {output_path} (大小: {output_size} 字节)")
+            print(f"[convert_to_wav] 转码成功! 输出文件: {output_path} (大小: {output_size} 字节)")
         return True
         
     except subprocess.TimeoutExpired as e:
         logger.error(f"[convert_to_wav] ffmpeg执行超时（30秒）")
-        print(f"[convert_to_wav] ffmpeg执行超时（30秒）")
+        if verbose:
+            print(f"[convert_to_wav] ffmpeg执行超时（30秒）")
         return False
     except FileNotFoundError:
         logger.error(f"[convert_to_wav] ffmpeg未安装或不在PATH中")
-        print(f"[convert_to_wav] ffmpeg未安装或不在PATH中")
+        if verbose:
+            print(f"[convert_to_wav] ffmpeg未安装或不在PATH中")
         return False
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
         logger.error(f"[convert_to_wav] 其它异常: {str(e)}\n{error_detail}")
-        print(f"[convert_to_wav] 其它异常: {str(e)}")
+        if verbose:
+            print(f"[convert_to_wav] 其它异常: {str(e)}")
         return False
 
 # --------------------------------
@@ -4925,13 +6573,9 @@ bert_path = args.bert_path
 default_cut_punc = args.cut_punc
 
 # 自动选择空闲GPU（如果指定了cuda但没有指定具体GPU）
-# 注意：在设置了 CUDA_VISIBLE_DEVICES 后，进程内可见索引会重映射为 0..N-1。
 if device == "cuda" and torch.cuda.is_available():
     import subprocess
     try:
-        visible_count = int(torch.cuda.device_count() or 0)
-        if visible_count <= 0:
-            raise RuntimeError("torch.cuda.is_available()=True 但 device_count=0")
         # 使用nvidia-smi查找空闲GPU
         result = subprocess.run(
             ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
@@ -4944,9 +6588,6 @@ if device == "cuda" and torch.cuda.is_available():
                     parts = line.split(', ')
                     if len(parts) >= 3:
                         gpu_idx = int(parts[0])
-                        # 仅保留当前进程可见的逻辑索引，避免 physical index 越界
-                        if gpu_idx < 0 or gpu_idx >= visible_count:
-                            continue
                         mem_used = int(parts[1])
                         mem_total = int(parts[2])
                         mem_free = mem_total - mem_used
@@ -4961,14 +6602,11 @@ if device == "cuda" and torch.cuda.is_available():
                 device = f"cuda:{selected_gpu}"
                 logger.info(f"自动选择GPU {selected_gpu} (空闲内存: {free_gpus[0][1]/1024:.2f}GB)")
             else:
-                logger.warning("所有可见GPU空闲内存不足，尝试使用cuda:0")
-                device = "cuda:0"
+                logger.warning("所有GPU内存不足，尝试使用GPU 0（可能失败）")
         else:
-            logger.warning("无法查询GPU状态，使用cuda:0")
-            device = "cuda:0"
+            logger.warning("无法查询GPU状态，使用默认GPU")
     except Exception as e:
-        logger.warning(f"GPU选择失败: {e}，使用cuda:0")
-        device = "cuda:0"
+        logger.warning(f"GPU选择失败: {e}，使用默认设备")
 
 # 应用参数配置
 default_refer = DefaultRefer(args.default_refer_path, args.default_refer_text, args.default_refer_language)
@@ -5095,7 +6733,7 @@ except Exception as e:
 
 # 设置模型精度和设备（带错误处理和自动切换GPU）
 def load_models_to_device(bert_model, ssl_model, device, is_half):
-    """加载模型到GPU；若GPU不可用则直接报错（不回退CPU）。"""
+    """加载模型到设备，如果内存不足自动切换GPU"""
     max_retries = 3
     current_device = device
     
@@ -5149,25 +6787,22 @@ def load_models_to_device(bert_model, ssl_model, device, is_half):
                     except:
                         pass
                 
-                # 如果无法切换GPU，继续下一次重试（保持GPU语义，不降级到CPU）
-                logger.warning("无法切换到其他GPU，将继续重试当前/默认GPU")
-                if str(current_device) == "cuda":
-                    current_device = "cuda:0"
+                # 如果无法切换GPU，尝试使用CPU
+                logger.warning("无法切换到其他GPU，尝试使用CPU")
+                current_device = "cpu"
                 continue
             else:
-                # 最后一次仍失败：保持GPU要求并抛错，避免静默降级到CPU
-                raise RuntimeError(f"所有可见GPU均内存不足，无法在GPU上加载模型（last_device={current_device}）") from e
+                # 最后一次尝试使用CPU
+                logger.error("所有GPU都内存不足，使用CPU模式")
+                current_device = "cpu"
+                if is_half:
+                    bert_model = bert_model.half().to(current_device)
+                    ssl_model = ssl_model.half().to(current_device)
+                else:
+                    bert_model = bert_model.to(current_device)
+                    ssl_model = ssl_model.to(current_device)
+                return bert_model, ssl_model, current_device
         except Exception as e:
-            err = str(e)
-            # 常见场景：外部按物理卡号设置 CUDA_VISIBLE_DEVICES 后，
-            # 进程内可见设备索引会被重映射，直接用 cuda:N 可能越界。
-            if "invalid device ordinal" in err.lower():
-                # 强制GPU：先改用可见逻辑索引0重试，不允许降级CPU
-                logger.warning(f"设备索引无效({current_device})，改用 cuda:0 重试（不回退CPU）")
-                if torch.cuda.is_available() and int(torch.cuda.device_count() or 0) > 0:
-                    current_device = "cuda:0"
-                    continue
-                raise RuntimeError("未检测到可用CUDA设备，无法按GPU模式运行") from e
             logger.error(f"加载模型到设备失败: {e}")
             raise e
     
@@ -5197,7 +6832,20 @@ try:
     
     # 设置为默认说话人
     speaker_list["default"] = Speaker(name="default", gpt=gpt, sovits=sovits)
-    
+
+    try:
+        gpt_mtime_ns, gpt_size = _get_model_file_fingerprint(gpt_path)
+        sovits_mtime_ns, sovits_size = _get_model_file_fingerprint(sovits_path)
+        with _OFFICIAL_MODEL_CACHE_LOCK:
+            _OFFICIAL_MODEL_CACHE["gpt_path"] = os.path.abspath(str(gpt_path or ""))
+            _OFFICIAL_MODEL_CACHE["sovits_path"] = os.path.abspath(str(sovits_path or ""))
+            _OFFICIAL_MODEL_CACHE["gpt_mtime_ns"] = int(gpt_mtime_ns)
+            _OFFICIAL_MODEL_CACHE["gpt_size"] = int(gpt_size)
+            _OFFICIAL_MODEL_CACHE["sovits_mtime_ns"] = int(sovits_mtime_ns)
+            _OFFICIAL_MODEL_CACHE["sovits_size"] = int(sovits_size)
+    except Exception:
+        pass
+
     # 验证是否成功创建
     if "default" not in speaker_list:
         raise RuntimeError("speaker_list中未找到'default'，模型加载可能失败")
@@ -5233,36 +6881,53 @@ if os.path.isdir(static_dir):
     images_dir = os.path.join(static_dir, "images")
     if os.path.isdir(images_dir):
         app.mount("/images", StaticFiles(directory=images_dir), name="images")
+assets_dir = os.path.join(now_dir, "assets")
+if os.path.isdir(assets_dir):
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    logger.info(f"[static] assets root: {assets_dir}")
 
 admin_static_dir = str(PROJECT_ROOT / "modules" / "user_mgmt_backend" / "static" / "admin")
 if os.path.isdir(admin_static_dir):
     app.mount("/admin/static", StaticFiles(directory=admin_static_dir), name="admin_static")
 
-# 统一资源根目录：你已将静态素材迁移到 assets/*
-assets_dir = str(PROJECT_ROOT / "assets")
-if os.path.isdir(assets_dir):
-    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
-
 # 伴读/宠物 3D 等资源：与小程序 pets-catalog 中 /ar_companion/assets/<物种>/... 对齐
-# 资源已统一迁移到 assets/animal
-animal_dir = str(PROJECT_ROOT / "assets" / "animal")
-if os.path.isdir(animal_dir):
-    app.mount("/ar_companion/assets", StaticFiles(directory=animal_dir), name="ar_companion_assets")
+animal_dir_candidates = [
+    str(PROJECT_ROOT / "animal"),
+    os.path.join(now_dir, "animal"),
+    os.path.join(now_dir, "assets", "animal"),
+]
+for animal_dir in animal_dir_candidates:
+    if os.path.isdir(animal_dir):
+        app.mount("/ar_companion/assets", StaticFiles(directory=animal_dir), name="ar_companion_assets")
+        logger.info(f"[static] ar_companion assets root: {animal_dir}")
+        break
 
 # 练习/题库静态资源（speaker/跟读配图、coloring 静态图等）
-practice_dir = str(PROJECT_ROOT / "assets" / "practice")
-if os.path.isdir(practice_dir):
+practice_dir_candidates = [
+    os.path.join(now_dir, "practice"),
+    os.path.join(now_dir, "assets", "practice"),
+]
+for practice_dir in practice_dir_candidates:
+    if os.path.isdir(practice_dir):
     # 例如：
     # - /practice_static/speaker_images_index.json
     # - /practice_static/speaker_images/q001.png
-    app.mount("/practice_static", StaticFiles(directory=practice_dir), name="practice_static")
+        app.mount("/practice_static", StaticFiles(directory=practice_dir), name="practice_static")
+        logger.info(f"[static] practice root: {practice_dir}")
+        break
 
-# 画图题库静态资源：paint_basement / paint_basement_generated（均在 assets 下）
-paint_basement_dir = str(PROJECT_ROOT / "assets" / "paint_basement")
-if os.path.isdir(paint_basement_dir):
-    app.mount("/paint_basement_static", StaticFiles(directory=paint_basement_dir), name="paint_basement_static")
+# 画图题库静态资源：paint_basement / paint_basement_generated
+paint_basement_dir_candidates = [
+    os.path.join(now_dir, "paint_basement"),
+    os.path.join(now_dir, "assets", "paint_basement"),
+]
+for paint_basement_dir in paint_basement_dir_candidates:
+    if os.path.isdir(paint_basement_dir):
+        app.mount("/paint_basement_static", StaticFiles(directory=paint_basement_dir), name="paint_basement_static")
+        logger.info(f"[static] paint_basement root: {paint_basement_dir}")
+        break
 
-paint_gen_dir = str(PROJECT_ROOT / "assets" / "paint_basement_generated")
+paint_gen_dir = os.path.join(now_dir, "assets", "paint_basement_generated")
 paint_regionmap_dir = os.path.join(paint_gen_dir, "regionmap")
 if os.path.isdir(paint_regionmap_dir):
     app.mount(
@@ -5279,9 +6944,15 @@ if os.path.isdir(paint_offsets_dir):
         name="paint_basement_gen_static_offsets",
     )
 
-paint_masks_dir = str(PROJECT_ROOT / "assets" / "paint_basement_masks")
-if os.path.isdir(paint_masks_dir):
-    app.mount("/paint_basement_masks", StaticFiles(directory=paint_masks_dir), name="paint_basement_masks")
+paint_masks_dir_candidates = [
+    os.path.join(now_dir, "paint_basement_masks"),
+    os.path.join(now_dir, "assets", "paint_basement_masks"),
+]
+for paint_masks_dir in paint_masks_dir_candidates:
+    if os.path.isdir(paint_masks_dir):
+        app.mount("/paint_basement_masks", StaticFiles(directory=paint_masks_dir), name="paint_basement_masks")
+        logger.info(f"[static] paint_masks root: {paint_masks_dir}")
+        break
 
 # 配置跨域（允许小程序请求）
 app.add_middleware(
@@ -5329,6 +7000,84 @@ def _is_weak_caption_text(text):
         "当前为兜底描述",
     ]
     return any(h in t for h in weak_hints)
+
+
+def _is_qwen_caption_source(source):
+    s = str(source or "").strip().lower()
+    if not s:
+        return False
+    return ("safety_ai" in s) or ("qwen" in s) or ("dashscope" in s)
+
+
+def _split_description_sentences(text, max_len=42):
+    src = str(text or "").strip()
+    if not src:
+        return []
+
+    src = re.sub(r"\s+", "", src)
+    parts = [p.strip() for p in re.split(r"[。！？!?；;]+", src) if p.strip()]
+    out = []
+    for p in parts:
+        if len(p) <= max_len:
+            out.append(p + "。")
+            continue
+        for i in range(0, len(p), max_len):
+            chunk = p[i:i + max_len].strip()
+            if chunk:
+                suffix = "。" if (i + max_len >= len(p)) else "，"
+                out.append(chunk + suffix)
+    return out
+
+
+def _build_age_description_from_caption(caption, age_label, tone):
+    age = str(age_label or "4-5岁")
+    cap = str(caption or "").strip().rstrip("。！？!?")
+    if not cap:
+        cap = "画面里有清晰的主体和动作"
+
+    if age == "2-3岁":
+        return f"画面里有{cap}。人物和动作都很清楚，故事就发生在这幅画面里。"
+    if age == "6-8岁":
+        return f"这张图里，{cap}。随着画面推进，动作变化和情绪细节逐渐展开。"
+    return f"从这张图可以看到{cap}。人物、动作和环境细节自然连在一起。"
+
+
+def _build_story_pages_from_description(description, caption, age_label, align_keywords):
+    age = str(age_label or "4-5岁")
+    cap = str(caption or "").strip().rstrip("。！？!?")
+    desc = str(description or "").strip()
+
+    if not desc:
+        desc = _build_age_description_from_caption(cap, age, "温暖鼓励")
+
+    max_len = 30 if age == "2-3岁" else (50 if age == "6-8岁" else 40)
+    pages = _split_description_sentences(desc, max_len=max_len)
+
+    if cap:
+        anchor = f"画面中可以看到{cap}。"
+        if not pages or cap[:8] not in pages[0]:
+            pages.insert(0, anchor)
+
+    keywords = []
+    for k in str(align_keywords or "").split(','):
+        kk = str(k).strip()
+        if kk and kk not in keywords:
+            keywords.append(kk)
+    if keywords and not any(k in ''.join(pages) for k in keywords[:2]):
+        pages.append(f"画面里还能看到{'、'.join(keywords[:3])}这些细节。")
+
+    if len(pages) < 4:
+        tail = [
+            "人物继续在这个场景里活动，故事始终围绕眼前画面展开。",
+            "光线、颜色和表情让这一刻更生动，也让故事更真实。",
+            "最后，画面停在温暖的一瞬间，故事在这里轻轻收尾。",
+        ]
+        i = 0
+        while len(pages) < 4:
+            pages.append(tail[i % len(tail)])
+            i += 1
+
+    return pages[:4]
 
 
 def _heuristic_image_caption(file_bytes):
@@ -5427,29 +7176,49 @@ async def _proxy_readalong_evaluate(
         return resp
 
 
+async def _build_science_feedback_audio_url(feedback_text: str) -> str:
+    text = sanitize_text(feedback_text)
+    if not has_speakable_content(text):
+        return ""
+
+    load_voice_library_from_file()
+    candidate_ids = [
+        QWEN_BASE_SCIENCE_VOICE_ID,
+        QWEN_BASE_FEMALE_VOICE_ID,
+        QWEN_BASE_MALE_VOICE_ID,
+    ]
+    errs = []
+    for vid in candidate_ids:
+        profile = VOICE_LIBRARY.get(vid) or {}
+        if not _is_qwen_voice_profile(profile):
+            continue
+        try:
+            audio_bytes_wav, _used_voice, _source_tag = await _qwen_tts_generate_wav(text, profile)
+            if not audio_bytes_wav:
+                continue
+            tts_dir = _resolve_tts_static_dir()
+            os.makedirs(tts_dir, exist_ok=True)
+            fname = f"eval_feedback_{vid}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
+            fpath = os.path.join(tts_dir, fname)
+            with open(fpath, "wb") as f:
+                f.write(audio_bytes_wav)
+            return f"/static/tts/{fname}"
+        except Exception as e:
+            errs.append(f"{vid}:{str(e)[:100]}")
+            continue
+
+    if errs:
+        logger.warning(f"[readalong/evaluate] 科普反馈音频生成失败: {'; '.join(errs)[:420]}")
+    return ""
+
+
 def _build_story_pages_from_caption(caption, age_label, align_keywords):
-    age = str(age_label or "4-5岁")
-    hero = "小宝贝" if age == "2-3岁" else ("小小探险家" if age == "6-8岁" else "小朋友")
-
-    kws = []
-    for k in str(align_keywords or "").split(','):
-        kk = str(k).strip()
-        if kk and kk not in kws:
-            kws.append(kk)
-    kw_text = "、".join(kws[:3])
-
-    p1 = f"今天，{hero}看到这样一幕：{caption}"
-    p2 = f"{hero}仔细观察，发现画面里的细节都在讲述一个真实的小故事。"
-    if kw_text:
-        p3 = f"故事里还出现了{kw_text}，让这次经历更加生动。"
-    else:
-        p3 = f"{hero}把看到的景象和感受慢慢串起来，故事变得越来越完整。"
-    p4 = f"最后，{hero}把这段经历分享给家人，大家都说：明天还要继续探索！"
-    return [p1, p2, p3, p4]
+    description = _build_age_description_from_caption(caption, age_label, "温暖鼓励")
+    return _build_story_pages_from_description(description, caption, age_label, align_keywords)
 
 
 async def _generate_story_from_llm(caption, age, tone, lang, custom_prompt, align_keywords):
-    """调用 openai-compatible 模型生成绘本，返回 {title, pages, model}。失败抛异常。"""
+    """调用 openai-compatible 模型生成绘本，返回 {title, age_description, pages, model}。失败抛异常。"""
     if not STORY_GEN_ENABLED:
         raise RuntimeError("story generation disabled")
 
@@ -5463,19 +7232,19 @@ async def _generate_story_from_llm(caption, age, tone, lang, custom_prompt, alig
     keyword_line = f"关键词锚点：{'、'.join(keywords[:6])}。" if keywords else ""
 
     user_prompt = (
-        "请基于以下图片描述，生成4页儿童绘本故事。\n"
+        "请基于以下图片描述，先生成一段与年龄匹配的描述，再生成4页儿童绘本。\n"
         f"图片描述：{caption}\n"
         f"年龄段：{age}\n"
         f"语气风格：{tone}\n"
         f"语言：{lang}\n"
         f"{keyword_line}\n"
         "硬性要求：\n"
-        "1) 必须紧贴图片描述，不可臆造未出现的关键角色/地点/事件。\n"
-        "2) 必须输出4页，且每页1-2句。\n"
-        "3) 要有起承转合，结尾温暖完整，不要开放式。\n"
-        "4) 用词符合儿童理解。\n"
+        "1) age_description 必须直接来自图片可见元素，不得空泛。\n"
+        "2) pages 必须4页，每页1-2句，内容和 age_description 一致。\n"
+        "3) 不可臆造未出现的关键角色/地点/事件，禁止偏离图片主线。\n"
+        "4) 禁止使用‘小宝贝探索’‘小小探险家’等模板化句式。\n"
         "5) 仅输出JSON，不要解释。\n"
-        "JSON格式：{\"title\":\"...\",\"pages\":[\"...\",\"...\",\"...\",\"...\"]}\n"
+        "JSON格式：{\"title\":\"...\",\"age_description\":\"...\",\"pages\":[\"...\",\"...\",\"...\",\"...\"]}\n"
     )
     if str(custom_prompt or "").strip():
         user_prompt += f"补充要求：{str(custom_prompt).strip()}\n"
@@ -5487,7 +7256,7 @@ async def _generate_story_from_llm(caption, age, tone, lang, custom_prompt, alig
         "messages": [
             {
                 "role": "system",
-                "content": "你是高质量儿童绘本作者。严格按用户给定JSON格式输出。禁止输出JSON以外文本。",
+                "content": "你是图像事实优先的儿童绘本作者。先事实后想象，严禁脱离图片内容。严格按用户给定JSON格式输出，禁止输出JSON以外文本。",
             },
             {"role": "user", "content": user_prompt},
         ],
@@ -5531,8 +7300,13 @@ async def _generate_story_from_llm(caption, age, tone, lang, custom_prompt, alig
     if len(norm_pages) < 4:
         raise RuntimeError("story pages too short")
 
+    age_description = str(parsed.get("age_description") or "").strip()
+    if not age_description:
+        age_description = "".join(norm_pages[:2])[:220]
+
     return {
         "title": title,
+        "age_description": age_description,
         "pages": norm_pages[:4],
         "model": model,
     }
@@ -5548,15 +7322,28 @@ async def wx_readalong_image_caption(file: UploadFile = File(...)):
     content_type = getattr(file, "content_type", None) or "application/octet-stream"
 
     # 优先转发到 9881 readalong；若不可用或返回弱描述，则本地启发式兜底
+    proxy_error = ""
     try:
         resp = await _proxy_readalong_image_caption(data, filename, content_type)
         if resp.status_code < 300:
             payload = resp.json()
             cap = str((payload or {}).get("caption") or "").strip()
             if cap and not _is_weak_caption_text(cap):
-                payload["source"] = payload.get("source") or "readalong_proxy"
-                return payload
+                source = str((payload or {}).get("source") or "readalong_proxy")
+                from_qwen = _is_qwen_caption_source(source)
+                return {
+                    "ok": True,
+                    "caption": cap,
+                    "source": source,
+                    "caption_from_qwen": from_qwen,
+                    "degraded": (not from_qwen),
+                    "error": str((payload or {}).get("error") or "")[:220],
+                }
+            proxy_error = str((payload or {}).get("error") or "weak_caption")
+        else:
+            proxy_error = f"status={resp.status_code}:{str(resp.text or '')[:120]}"
     except Exception as e:
+        proxy_error = str(e)
         logger.warning(f"[/readalong/image_caption] proxy failed, fallback to local heuristic: {e}")
 
     local_caption = _heuristic_image_caption(data)
@@ -5564,6 +7351,9 @@ async def wx_readalong_image_caption(file: UploadFile = File(...)):
         "ok": True,
         "caption": local_caption,
         "source": "wx_local_heuristic",
+        "caption_from_qwen": False,
+        "degraded": True,
+        "error": str(proxy_error or "")[:220],
     }
 
 
@@ -5757,6 +7547,15 @@ async def wx_readalong_evaluate(
             payload = resp.json()
             if isinstance(payload, dict):
                 payload["source"] = payload.get("source") or "readalong_proxy"
+                mode = str(eval_mode or "").strip().lower()
+                feedback_audio_url = str(payload.get("feedback_audio_url") or "").strip()
+                feedback_text = str(payload.get("feedback_text") or payload.get("feedback") or "").strip()
+                if mode == "free_description" and (not feedback_audio_url) and feedback_text:
+                    local_audio_url = await _build_science_feedback_audio_url(feedback_text)
+                    if local_audio_url:
+                        payload["feedback_audio_url"] = local_audio_url
+                        payload["feedback_voice_id"] = QWEN_BASE_SCIENCE_VOICE_ID
+                        payload["source"] = f"{payload.get('source') or 'readalong_proxy'}+qwen_science"
             return payload
         raise HTTPException(status_code=resp.status_code, detail=resp.text[:500])
     except HTTPException:
@@ -5784,8 +7583,14 @@ async def ai_story_from_image(
         raise HTTPException(status_code=400, detail="empty file")
 
     caption = str(image_caption or "").strip()
+    caption_source = "client_input" if caption else ""
+    caption_from_qwen = bool(caption)
+    caption_error = ""
+
     if _is_weak_caption_text(caption):
         caption = ""
+        caption_source = ""
+        caption_from_qwen = False
 
     if not caption:
         try:
@@ -5793,18 +7598,30 @@ async def ai_story_from_image(
             if resp.status_code < 300:
                 payload = resp.json()
                 cap = str((payload or {}).get("caption") or "").strip()
+                src = str((payload or {}).get("source") or "readalong_proxy")
                 if cap and not _is_weak_caption_text(cap):
                     caption = cap
+                    caption_source = src
+                    caption_from_qwen = _is_qwen_caption_source(src)
+                else:
+                    caption_error = str((payload or {}).get("error") or "weak_caption")
+            else:
+                caption_error = f"status={resp.status_code}:{str(resp.text or '')[:120]}"
         except Exception as e:
+            caption_error = str(e)
             logger.warning(f"[/ai_story_from_image] readalong proxy failed: {e}")
 
     if not caption:
         caption = _heuristic_image_caption(data)
+        caption_source = "wx_local_heuristic"
+        caption_from_qwen = False
+
+    age_description = _build_age_description_from_caption(caption, age, tone)
+    age_description_source = "rule"
 
     llm_used = False
     story_model = None
-    title_age = "小宝贝" if str(age) == "2-3岁" else ("小小探险家" if str(age) == "6-8岁" else "小朋友")
-    title = f"{title_age}的真实照片故事"
+    title = "真实画面绘本"
 
     pages = None
     story_err = None
@@ -5821,6 +7638,11 @@ async def ai_story_from_image(
         title = str(out.get("title") or title)
         story_model = out.get("model")
         llm_used = True
+
+        llm_age_desc = str(out.get("age_description") or "").strip()
+        if llm_age_desc:
+            age_description = llm_age_desc
+            age_description_source = "llm"
     except Exception as e:
         story_err = str(e)
         logger.warning(f"[/ai_story_from_image] llm story failed: {e}")
@@ -5834,7 +7656,16 @@ async def ai_story_from_image(
                     "请检查 wx_api.env 中 SAFETY_AI_BASE_URL / SAFETY_AI_MODEL / SAFETY_AI_API_KEY。"
                 ),
             )
-        pages = _build_story_pages_from_caption(caption, age, align_keywords)
+        pages = _build_story_pages_from_description(age_description, caption, age, align_keywords)
+
+    degraded_reasons = []
+    if not caption_from_qwen:
+        degraded_reasons.append("caption_not_from_qwen")
+    if not llm_used:
+        degraded_reasons.append("story_llm_unavailable")
+        account_issue = _classify_provider_account_issue(story_err)
+        if account_issue:
+            degraded_reasons.append(account_issue)
 
     # 返回结构与前端 normalize 逻辑兼容
     return {
@@ -5843,7 +7674,12 @@ async def ai_story_from_image(
         "title": title,
         "pages": pages,
         "caption": caption,
+        "caption_source": caption_source,
+        "caption_from_qwen": bool(caption_from_qwen),
+        "age_description": age_description,
+        "age_description_source": age_description_source,
         "ai_used": bool(llm_used),
+        "degraded": bool(degraded_reasons),
         "source": "wx_story_bridge",
         "meta": {
             "tone": str(tone or ""),
@@ -5854,9 +7690,16 @@ async def ai_story_from_image(
             "story_model": story_model,
             "story_llm_used": bool(llm_used),
             "story_error": story_err,
+            "caption_error": str(caption_error or "")[:220],
+            "caption_source": caption_source,
+            "caption_from_qwen": bool(caption_from_qwen),
+            "age_description_source": age_description_source,
             "heuristic_fallback_enabled": bool(STORY_GEN_ALLOW_HEURISTIC_FALLBACK),
+            "degraded": bool(degraded_reasons),
+            "degraded_reasons": degraded_reasons,
         },
     }
+
 
 # [ai_story_bridge_end]
 
@@ -5869,10 +7712,8 @@ import re
 from fastapi.responses import FileResponse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# 统一以 book_new 为绘本主库（文本 + 图片都从这里读取）
-MAGIC_BOOK_ROOT = PROJECT_ROOT / "modules" / "books_library" / "book_new"
-MAGIC_IMAGE_ROOT = MAGIC_BOOK_ROOT
-MAGIC_TEXT_ROOT_NEW = MAGIC_BOOK_ROOT
+MAGIC_IMAGE_ROOT = PROJECT_ROOT / "modules" / "books_library" / "绘本集"
+MAGIC_TEXT_ROOT_NEW = PROJECT_ROOT / "modules" / "books_library" / "book_new"
 MAGIC_TEXT_ROOT_OLD = PROJECT_ROOT / "modules" / "books_library" / "绘本集"
 MAGIC_INDEX_JSON = PROJECT_ROOT / "modules" / "books_library" / "library" / "magic_books_index.json"
 
@@ -5881,58 +7722,16 @@ _magic_index_mtime = None
 
 
 def load_magic_books_index():
-    """优先从 book_new 动态扫描绘本索引；静态 json 仅用于补充 tags/icon。"""
+    """读取 magic_books_index.json（带简单缓存）"""
     global _magic_index_cache, _magic_index_mtime
     try:
-        # 动态索引以 book_new 目录变更时间为主，保证搬运/修复后即时生效
-        stat = MAGIC_BOOK_ROOT.stat()
+        stat = MAGIC_INDEX_JSON.stat()
         mtime = stat.st_mtime
         if _magic_index_cache is not None and _magic_index_mtime == mtime:
             return _magic_index_cache
 
-        meta_json = {}
-        try:
-            with open(MAGIC_INDEX_JSON, "r", encoding="utf-8") as f:
-                meta_json = json.load(f) or {}
-        except Exception:
-            meta_json = {}
-
-        data = {}
-        if MAGIC_BOOK_ROOT.is_dir():
-            for p in sorted(MAGIC_BOOK_ROOT.iterdir(), key=lambda x: x.name):
-                if not p.is_dir():
-                    continue
-                title = p.name
-                txt = p / f"{title}.txt"
-                if not txt.is_file():
-                    txts = sorted([x for x in p.iterdir() if x.is_file() and x.suffix.lower() == ".txt"], key=lambda x: x.name)
-                    if not txts:
-                        continue
-                    txt = txts[0]
-
-                pages = {}
-                for f in p.iterdir():
-                    if not f.is_file():
-                        continue
-                    if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
-                        continue
-                    m = re.match(r"^第(\d+)段(?:_\d+)?\.(jpg|jpeg|png|webp)$", f.name, flags=re.IGNORECASE)
-                    if not m:
-                        continue
-                    k = str(int(m.group(1)))
-                    pages.setdefault(k, []).append(f.name)
-                for k in list(pages.keys()):
-                    pages[k] = sorted(pages[k])
-
-                meta = meta_json.get(title) if isinstance(meta_json, dict) else None
-                meta = meta if isinstance(meta, dict) else {}
-                data[title] = {
-                    "dir": title,
-                    "file": txt.name,
-                    "tags": meta.get("tags") or [],
-                    "icon": meta.get("icon") or "",
-                    "pages": pages,
-                }
+        with open(MAGIC_INDEX_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
         _magic_index_cache = data
         _magic_index_mtime = mtime
@@ -5969,6 +7768,216 @@ def _resolve_magic_text_path(book_dir: str, txt_filename: str, title: str):
         if p.is_file():
             return p
     return None
+
+
+def _resolve_magic_book_page_text(req: dict) -> tuple[str, dict]:
+    """
+    从请求中解析“当前绘本页文案”。
+    支持字段：
+      - book_id / book_title / title
+      - page_index(0-based) 或 page_no/page_num(1-based)
+      - use_book_page_text: true 时优先使用书页文案覆盖 text
+    返回：(text, meta)
+    """
+    req = req or {}
+    meta = {"used": False, "book_title": "", "page_index": None, "source": ""}
+
+    raw_text = str(req.get("text") or "").strip()
+    raw_title = str(req.get("book_title") or req.get("book_id") or req.get("title") or "").strip()
+    if not raw_title:
+        return raw_text, meta
+
+    page_no_raw = req.get("page_no")
+    if page_no_raw is None:
+        page_no_raw = req.get("page_num")
+    page_index_raw = req.get("page_index")
+    if page_index_raw is None:
+        page_index_raw = req.get("current_page_index")
+
+    page_idx = None
+    if page_no_raw is not None and str(page_no_raw).strip() != "":
+        try:
+            page_idx = max(0, int(page_no_raw) - 1)
+        except Exception:
+            page_idx = None
+    elif page_index_raw is not None and str(page_index_raw).strip() != "":
+        try:
+            page_idx = max(0, int(page_index_raw))
+        except Exception:
+            page_idx = None
+
+    if page_idx is None:
+        return raw_text, meta
+
+    use_book_page_text = _coerce_bool_param(req.get("use_book_page_text"), False)
+    # 默认兼容：当 text 为空时自动回退到绘本文案；显式 use_book_page_text=true 时强制覆盖 text。
+    if (not use_book_page_text) and raw_text:
+        return raw_text, meta
+
+    index_data = load_magic_books_index() or {}
+    entry = index_data.get(raw_title)
+    if not entry or (not isinstance(entry, dict)):
+        if use_book_page_text:
+            raise HTTPException(status_code=404, detail=f"绘本不存在: {raw_title}")
+        return raw_text, meta
+
+    book_dir = str(entry.get("dir") or raw_title)
+    txt_filename = str(entry.get("file") or "")
+    txt_path = _resolve_magic_text_path(book_dir, txt_filename, str(raw_title))
+    if txt_path is None:
+        if use_book_page_text:
+            raise HTTPException(status_code=404, detail=f"绘本文本不存在: {raw_title}")
+        return raw_text, meta
+
+    try:
+        text_map = _read_magic_text_map(txt_path)
+    except Exception as e:
+        logger.error(f"[magic_books] 读取绘本页文案失败: title={raw_title}, err={e}")
+        if use_book_page_text:
+            raise HTTPException(status_code=500, detail="绘本文案解析失败")
+        return raw_text, meta
+
+    page_num = page_idx + 1
+    page_text = str(text_map.get(page_num) or "").strip()
+    if not page_text:
+        if use_book_page_text:
+            raise HTTPException(status_code=404, detail=f"绘本页文案不存在: {raw_title}#page={page_num}")
+        return raw_text, meta
+
+    meta.update(
+        {
+            "used": True,
+            "book_title": raw_title,
+            "page_index": page_idx,
+            "source": "magic_books_page_text",
+        }
+    )
+    return page_text, meta
+
+
+def _resolve_profile_no_fallback(voice_id: str, user_id: str = "") -> tuple[str, dict]:
+    load_voice_library_from_file()
+    vid = str(voice_id or "").strip()
+    if not vid and user_id:
+        vid = _resolve_voice_id_by_name(str(user_id).strip()) or ""
+    if not vid:
+        raise HTTPException(status_code=400, detail="请提供有效 voice_id")
+    if vid not in VOICE_LIBRARY:
+        raise HTTPException(status_code=404, detail=f"未找到 voice_id 对应的模型: {vid}")
+    return vid, dict(VOICE_LIBRARY.get(vid) or {})
+
+
+def _collect_official_minimal_wav_bytes(
+    ref_audio_path: str,
+    ref_text: str,
+    prompt_language: str,
+    text_final: str,
+    text_language: str,
+    inp_refs_payload: list,
+    data: dict,
+    gpt_model_path: str = "",
+    sovits_model_path: str = "",
+):
+    def _to_api_lang(x: str) -> str:
+        s = str(x or "").strip().lower()
+        if s in {"zh", "all_zh", "chinese", "中文"}:
+            return "Chinese"
+        if s in {"en", "english", "英文"}:
+            return "English"
+        return "Chinese"
+
+    prompt_language = _to_api_lang(prompt_language)
+    text_language = _to_api_lang(text_language)
+
+    # test1 环境下优先使用 inference_webui（api.py 可能不存在）。
+    try:
+        if str(gpt_model_path or "").strip():
+            os.environ["gpt_path"] = str(gpt_model_path).strip()
+        if str(sovits_model_path or "").strip():
+            os.environ["sovits_path"] = str(sovits_model_path).strip()
+        os.environ["DISABLE_TORCHAUDIO"] = "1"
+        from GPT_SoVITS.inference_webui import get_tts_wav as official_get_tts_wav_api
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"无法加载官方推理模块: {e}")
+
+    base_kwargs = dict(
+        ref_wav_path=ref_audio_path,
+        prompt_text=ref_text,
+        prompt_language=prompt_language,
+        text=text_final,
+        text_language=text_language,
+        top_k=int(data.get("top_k", 15)),
+        top_p=float(data.get("top_p", 1.0)),
+        temperature=float(data.get("temperature", 1.0)),
+        repetition_penalty=float(data.get("repetition_penalty", 1.18)),
+        speed=float(data.get("speed", 1.0)),
+        inp_refs=inp_refs_payload or None,
+        sample_steps=int(data.get("sample_steps", 32)),
+        if_sr=False,
+        spk="default",
+    )
+    try:
+        gen = official_get_tts_wav_api(**base_kwargs)
+    except TypeError:
+        # 兼容不同版本 inference_webui 的函数签名差异
+        base_kwargs.pop("repetition_penalty", None)
+        base_kwargs.pop("spk", None)
+        base_kwargs.pop("if_sr", None)
+        gen = official_get_tts_wav_api(**base_kwargs)
+    audio_bytes_wav, _gen_stats = _collect_generator_bytes_with_stats(gen)
+    if not audio_bytes_wav:
+        raise HTTPException(status_code=500, detail="官方推理返回空音频")
+    return audio_bytes_wav
+
+
+def _make_synth_cache_key(voice_id: str, text: str, data: dict) -> str:
+    payload = {
+        "voice_id": str(voice_id or "").strip(),
+        "text": str(text or "").strip(),
+        "top_k": int(data.get("top_k", 15)),
+        "top_p": float(data.get("top_p", 1.0)),
+        "temperature": float(data.get("temperature", 1.0)),
+        "repetition_penalty": float(data.get("repetition_penalty", 1.18)),
+        "speed": float(data.get("speed", 1.0)),
+        "sample_steps": int(data.get("sample_steps", 32)),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _get_cached_synth_url(cache_key: str) -> str:
+    now = time.time()
+    with SYNTH_RESULT_CACHE_LOCK:
+        item = SYNTH_RESULT_CACHE.get(cache_key)
+        if not item:
+            return ""
+        if now - float(item.get("ts", 0.0)) > SYNTH_RESULT_CACHE_TTL_SEC:
+            SYNTH_RESULT_CACHE.pop(cache_key, None)
+            return ""
+        url = str(item.get("audio_url") or "").strip()
+    if not url:
+        return ""
+    rel = url.replace("/static/tts/", "").strip()
+    if not rel:
+        return ""
+    fpath = os.path.join(_resolve_tts_static_dir(), rel)
+    if not os.path.exists(fpath):
+        with SYNTH_RESULT_CACHE_LOCK:
+            SYNTH_RESULT_CACHE.pop(cache_key, None)
+        return ""
+    return url
+
+
+def _put_cached_synth_url(cache_key: str, audio_url: str):
+    if not cache_key or not audio_url:
+        return
+    with SYNTH_RESULT_CACHE_LOCK:
+        SYNTH_RESULT_CACHE[cache_key] = {"audio_url": str(audio_url), "ts": time.time()}
+        if len(SYNTH_RESULT_CACHE) > SYNTH_RESULT_CACHE_MAX:
+            # 简单按时间淘汰最旧项
+            oldest = sorted(SYNTH_RESULT_CACHE.items(), key=lambda kv: float((kv[1] or {}).get("ts", 0.0)))[:32]
+            for k, _ in oldest:
+                SYNTH_RESULT_CACHE.pop(k, None)
 
 
 @app.get("/magic_books/index")
@@ -6122,9 +8131,9 @@ except Exception as e:
 # 尝试挂载 coloring_artist：让“小画家”能读取题库线稿
 try:
     try:
-        from modules.coloring_artist.backend.coloring_api import router as coloring_router
-    except Exception:
         from coloring_api import router as coloring_router
+    except Exception:
+        from modules.coloring_artist.backend.coloring_api import router as coloring_router
 
     app.include_router(coloring_router)
     logger.info("[magic_books] 已注册 coloring_api 路由: /coloring/*")
@@ -6149,7 +8158,9 @@ def practice_speaker_questions(limit: int = 200, skip: int = 0, locale: str = "z
     小程序“题库选图”读取接口。
     返回结构：{ ok: bool, items: [...], total: int, count: int }
     """
-    questions_file = str(PROJECT_ROOT / "assets" / "practice" / "speaker_questions_zh.json")
+    questions_file = os.path.join(now_dir, "practice", "speaker_questions_zh.json")
+    if not os.path.isfile(questions_file):
+        questions_file = os.path.join(now_dir, "assets", "practice", "speaker_questions_zh.json")
     try:
         if not os.path.isfile(questions_file):
             raise FileNotFoundError(f"questions file not found: {questions_file}")
@@ -6172,8 +8183,8 @@ def practice_speaker_questions(limit: int = 200, skip: int = 0, locale: str = "z
         return {"ok": False, "items": [], "total": 0, "count": 0, "error": str(e)}
 
 # 临时目录配置（确保目录存在，使用绝对路径）
-TEMP_RAW_DIR = os.path.abspath("./train/temp_raw_audio")  # 原始音频（MP3/AMR）
-TEMP_WAV_DIR = os.path.abspath("./train/temp_wav_audio")  # 转码后的WAV
+TEMP_RAW_DIR = os.path.abspath("./temp_raw_audio")  # 原始音频（MP3/AMR）
+TEMP_WAV_DIR = os.path.abspath("./temp_wav_audio")  # 转码后的WAV
 os.makedirs(TEMP_RAW_DIR, exist_ok=True)
 os.makedirs(TEMP_WAV_DIR, exist_ok=True)
 logger.info(f"[初始化] 临时目录配置 - RAW: {TEMP_RAW_DIR}, WAV: {TEMP_WAV_DIR}")
@@ -6421,6 +8432,7 @@ async def synthesize(request: Request):
     voice_id = data.get("voice_id")
     user_id = data.get("user_id") or data.get("model_name")
     text = data.get("text")
+    text, book_text_meta = _resolve_magic_book_page_text(data)
     text_language = data.get("text_language") or data.get("language") or "zh"
     speed = float(data.get("speed", 1.0))
     
@@ -6434,8 +8446,105 @@ async def synthesize(request: Request):
     if raw_aux_refs is None:
         raw_aux_refs = data.get("ref_audio_paths")
 
-    if not text or not text.strip():
+    if not text or not str(text).strip():
         raise HTTPException(status_code=400, detail="缺少要合成的文本 text")
+    if (book_text_meta or {}).get("used"):
+        logger.info(
+            f"[synthesize] 使用绘本页文案: title={book_text_meta.get('book_title')}, "
+            f"page_index={book_text_meta.get('page_index')}"
+        )
+
+    # 精简单通道：优先走官方最小推理链路；若遇到已知不兼容权重（如 gpt_model.ckpt 缺 config['data']），自动回退到本地推理链路。
+    strict_official = _coerce_bool_param(data.get("strict_official_infer"), True)
+    if strict_official:
+        resolved_voice_id, profile = _resolve_profile_no_fallback(voice_id=voice_id, user_id=user_id)
+        if resolved_voice_id not in {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID}:
+            ref_audio_path = str(profile.get("ref_audio_path") or "").strip()
+            ref_text = str(profile.get("ref_text") or "").strip()
+            ref_language_raw = str(profile.get("ref_language") or "中文").strip() or "中文"
+            gpt_path = str(profile.get("gpt_path") or "").strip()
+            sovits_path = str(profile.get("sovits_path") or "").strip()
+            if (not _is_model_pair_valid(gpt_path, sovits_path)) or (not ref_audio_path) or (not os.path.exists(ref_audio_path)):
+                raise HTTPException(status_code=400, detail=f"模型或参考音频缺失: {resolved_voice_id}")
+            if not ref_text:
+                raise HTTPException(status_code=400, detail=f"参考文本缺失: {resolved_voice_id}")
+
+            _ensure_official_model_loaded(change_gpt_sovits_weights, gpt_path, sovits_path)
+            ref_language = dict_language.get(ref_language_raw, "all_zh")
+            if ref_language not in dict_language.values():
+                ref_language = "all_zh"
+            inp_refs_payload = _build_inp_refs_payload([], base_dir=now_dir)
+            text_final = sanitize_text(text)
+            ref_text_cleaned = normalize_ref_text_for_infer(ref_text, max_chars=max(20, int(data.get("prompt_max_chars", 40))))
+            if not has_speakable_content(text_final):
+                raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
+            cache_key = _make_synth_cache_key(resolved_voice_id, text_final, data)
+            cached_url = _get_cached_synth_url(cache_key)
+            if cached_url:
+                return JSONResponse({"code": 0, "audio_url": cached_url, "size": 0, "cache_hit": True}, status_code=200)
+            _ensure_official_model_loaded(change_gpt_sovits_weights, gpt_path, sovits_path)
+            api_prompt_lang = detect_text_language(ref_text_cleaned or "你好")
+            api_text_lang = detect_text_language(text_final)
+            try:
+                audio_bytes_wav = _collect_official_minimal_wav_bytes(
+                    ref_audio_path=ref_audio_path,
+                    ref_text=ref_text_cleaned,
+                    prompt_language=api_prompt_lang,
+                    text_final=text_final,
+                    text_language=api_text_lang,
+                    inp_refs_payload=inp_refs_payload,
+                    data=data,
+                    gpt_model_path=gpt_path,
+                    sovits_model_path=sovits_path,
+                )
+            except HTTPException as e:
+                # inference_webui 在 import 阶段会加载 gpt_path；当权重是本项目的 gpt_model.ckpt（精简包）时，
+                # 可能缺少 config['data'] 导致 KeyError: 'data'。此时回退到本地推理链路。
+                detail = str(getattr(e, "detail", "") or "")
+                if ("无法加载官方推理模块" in detail) and ("'data'" in detail or "data" in detail):
+                    logger.warning(f"[synthesize] official infer incompatible, fallback to local pipeline: {detail}")
+                    strict_official = False
+                else:
+                    raise
+            if not strict_official:
+                # 跳出 strict 分支，走下方 legacy 本地推理链路
+                pass
+            else:
+                return_url = bool(data.get("return_url", True))
+                if return_url or len(audio_bytes_wav) > 10 * 1024 * 1024:
+                    tts_dir = _resolve_tts_static_dir()
+                    os.makedirs(tts_dir, exist_ok=True)
+                    fname = f"synth_{resolved_voice_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
+                    fpath = os.path.join(tts_dir, fname)
+                    with open(fpath, "wb") as f:
+                        f.write(audio_bytes_wav)
+                    audio_url = f"/static/tts/{fname}"
+                    _put_cached_synth_url(cache_key, audio_url)
+                    return JSONResponse({"code": 0, "audio_url": audio_url, "size": len(audio_bytes_wav), "cache_hit": False}, status_code=200)
+                return StreamingResponse(BytesIO(audio_bytes_wav), media_type="audio/wav")
+        else:
+            text_cleaned = sanitize_text(text)
+            if not has_speakable_content(text_cleaned):
+                raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
+            try:
+                audio_bytes_wav, used_voice, source_tag = await _qwen_tts_generate_wav(text_cleaned, profile)
+            except Exception as q_err:
+                logger.warning(f"[synthesize] Qwen基础音色合成失败(严格模式): {q_err}")
+                raise HTTPException(status_code=503, detail="Qwen基础音色服务暂不可用，请稍后重试")
+            return_url = bool(data.get("return_url", True))
+            if return_url or len(audio_bytes_wav) > 10 * 1024 * 1024:
+                tts_dir = _resolve_tts_static_dir()
+                os.makedirs(tts_dir, exist_ok=True)
+                fname = f"synth_{resolved_voice_id}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
+                fpath = os.path.join(tts_dir, fname)
+                with open(fpath, "wb") as f:
+                    f.write(audio_bytes_wav)
+                return JSONResponse(
+                    {"code": 0, "audio_url": f"/static/tts/{fname}", "size": len(audio_bytes_wav), "source": source_tag, "voice_used": used_voice},
+                    status_code=200,
+                )
+            return StreamingResponse(BytesIO(audio_bytes_wav), media_type="audio/wav")
+    # 若 strict_official 被关闭（或因不兼容自动回退），继续走旧的本地推理链路（支持 user_models/unlogged/* 的精简包权重）。
 
     ok, reason, _hit = _check_text_safety(text)
     if not ok:
@@ -6476,10 +8585,16 @@ async def synthesize(request: Request):
         # 使用 voice_id 或 user_id 从 VOICE_LIBRARY 获取
         load_voice_library_from_file()
         if not voice_id and user_id:
-            for vid, info in VOICE_LIBRARY.items():
-                if info.get("name") == user_id:
-                    voice_id = vid
-                    break
+            voice_id = _resolve_voice_id_by_name(user_id)
+            if not voice_id:
+                derived_name, _derived_role = _normalize_train_model_name(
+                    user_id=str(user_id),
+                    requested_model_name=str(user_id),
+                    role_key=None,
+                    custom_role_name=None,
+                )
+                if derived_name and str(derived_name) != str(user_id):
+                    voice_id = _resolve_voice_id_by_name(derived_name)
 
         if not voice_id:
             raise HTTPException(status_code=400, detail="请提供 voice_id/user_id/model_name 或 refer_wav_path+prompt_text 来选择声音模型")
@@ -6498,102 +8613,106 @@ async def synthesize(request: Request):
             text_cleaned = sanitize_text(text)
             if not has_speakable_content(text_cleaned):
                 raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
-
-            if bool(data.get("buffered")):
-                strict_segmented = _coerce_bool_param(data.get("strict_segmented"), False)
-                long_text_stream = _coerce_bool_param(data.get("long_text_stream"), False)
-                long_book_text = _is_long_book_text(text_cleaned) or long_text_stream
-                default_cut_punc = "，。？！；：,.!?;:、…" if strict_segmented else ("。？！；：!?;:…" if long_book_text else "。？！!?；;")
-                cut_punc = data.get("cut_punc", None) or default_cut_punc
-                max_text_len = int(data.get("max_text_len", 72 if long_book_text else 96))
-                max_text_len = max(24, min(160, max_text_len))
-                segments = _split_text_for_buffer(text_cleaned, max_len=max_text_len, cut_punc=cut_punc)
-                if not segments:
-                    segments = [text_cleaned]
-
-                _cleanup_buffer_tasks()
-                task_id = uuid.uuid4().hex
-                task = {
-                    "created_at": time.time(),
-                    "total": len(segments),
-                    "segments": [None] * len(segments),
-                    "done": False,
-                    "error": None,
-                    "debug_id": None,
-                    "voice_id": voice_id,
-                    "merged_url": None,
-                    "adaptive_text": text_cleaned,
-                    "is_user_trained_voice": False,
-                    "speed_base": float(data.get("speed", 1.0) or 1.0),
-                }
-                with BUFFER_TASKS_LOCK:
-                    BUFFER_TASKS[task_id] = task
-
-                ready_urls = []
-                used_voice = ""
-                source_tag = "qwen_tts"
-                for i, seg in enumerate(segments):
-                    try:
-                        seg_audio_wav, seg_voice, seg_source = await _qwen_tts_generate_wav(seg, profile)
-                    except Exception as qe:
-                        err_msg = f"Qwen基础音色分段合成失败: {qe}"
-                        with BUFFER_TASKS_LOCK:
-                            task["error"] = err_msg
-                            task["done"] = True
-                        raise HTTPException(status_code=503, detail=err_msg)
-                    used_voice = used_voice or seg_voice
-                    source_tag = seg_source or source_tag
-                    url = _save_buffer_segment(seg_audio_wav, voice_id, task_id, i)
-                    with BUFFER_TASKS_LOCK:
-                        task["segments"][i] = url
-                    ready_urls.append(url)
-
-                with BUFFER_TASKS_LOCK:
-                    task["done"] = True
-
-                merged_url = ""
-                try:
-                    merged_url = _merge_wav_segments_to_static(task_id)
-                except Exception as merge_err:
-                    logger.warning(f"[qwen_buffered] 合并分片失败(可忽略): {merge_err}")
-
-                return JSONResponse({
-                    "code": 0,
-                    "task_id": task_id,
-                    "segments": ready_urls,
-                    "total_segments": len(segments),
-                    "merged_url": merged_url,
-                    "source": source_tag,
-                    "voice_used": used_voice,
-                }, status_code=200)
+            is_qwen_base_voice = str(voice_id or "").strip() in {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID}
 
             try:
+                if bool(data.get("buffered")) and (not is_qwen_base_voice):
+                    strict_segmented = _coerce_bool_param(data.get("strict_segmented"), False)
+                    long_text_stream = _coerce_bool_param(data.get("long_text_stream"), False)
+                    long_book_text = _is_long_book_text(text_cleaned) or long_text_stream
+                    default_cut_punc = "，。？！；：,.!?;:、…" if strict_segmented else ("。？！；：!?;:…" if long_book_text else "。？！!?；;")
+                    cut_punc = data.get("cut_punc", None) or default_cut_punc
+                    max_text_len = int(data.get("max_text_len", 72 if long_book_text else 96))
+                    max_text_len = max(24, min(160, max_text_len))
+                    segments = _split_text_for_buffer(text_cleaned, max_len=max_text_len, cut_punc=cut_punc)
+                    if not segments:
+                        segments = [text_cleaned]
+
+                    _cleanup_buffer_tasks()
+                    task_id = uuid.uuid4().hex
+                    task = {
+                        "created_at": time.time(),
+                        "total": len(segments),
+                        "segments": [None] * len(segments),
+                        "done": False,
+                        "error": None,
+                        "debug_id": None,
+                        "voice_id": voice_id,
+                        "merged_url": None,
+                        "adaptive_text": text_cleaned,
+                        "is_user_trained_voice": False,
+                        "speed_base": float(data.get("speed", 1.0) or 1.0),
+                    }
+                    with BUFFER_TASKS_LOCK:
+                        BUFFER_TASKS[task_id] = task
+
+                    ready_urls = []
+                    used_voice = ""
+                    source_tag = "qwen_tts"
+                    for i, seg in enumerate(segments):
+                        try:
+                            seg_audio_wav, seg_voice, seg_source = await _qwen_tts_generate_wav(seg, profile)
+                        except Exception as qe:
+                            logger.warning(f"[synthesize] Qwen基础音色分段合成失败: {qe}")
+                            err_msg = "Qwen基础音色分段合成失败，请稍后重试或切换音色"
+                            with BUFFER_TASKS_LOCK:
+                                task["error"] = err_msg
+                                task["done"] = True
+                            raise RuntimeError(err_msg)
+                        used_voice = used_voice or seg_voice
+                        source_tag = seg_source or source_tag
+                        url = _save_buffer_segment(seg_audio_wav, voice_id, task_id, i)
+                        with BUFFER_TASKS_LOCK:
+                            task["segments"][i] = url
+                        ready_urls.append(url)
+
+                    with BUFFER_TASKS_LOCK:
+                        task["done"] = True
+
+                    merged_url = ""
+                    try:
+                        merged_url = _merge_wav_segments_to_static(task_id)
+                    except Exception as merge_err:
+                        logger.warning(f"[qwen_buffered] 合并分片失败(可忽略): {merge_err}")
+
+                    return JSONResponse({
+                        "code": 0,
+                        "task_id": task_id,
+                        "segments": ready_urls,
+                        "total_segments": len(segments),
+                        "merged_url": merged_url,
+                        "source": source_tag,
+                        "voice_used": used_voice,
+                    }, status_code=200)
+
                 audio_bytes_wav, used_voice, source_tag = await _qwen_tts_generate_wav(text_cleaned, profile)
+                return_url = bool(data.get("return_url"))
+                if return_url or len(audio_bytes_wav) > 10 * 1024 * 1024:
+                    tts_dir = _resolve_tts_static_dir()
+                    os.makedirs(tts_dir, exist_ok=True)
+                    fname = f"synth_{voice_id or 'default'}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
+                    fpath = os.path.join(tts_dir, fname)
+                    with open(fpath, "wb") as f:
+                        f.write(audio_bytes_wav)
+                    audio_url = f"/static/tts/{fname}"
+                    return JSONResponse({
+                        "code": 0,
+                        "audio_url": audio_url,
+                        "size": len(audio_bytes_wav),
+                        "source": source_tag,
+                        "voice_used": used_voice,
+                    }, status_code=200)
+
+                return StreamingResponse(
+                    BytesIO(audio_bytes_wav),
+                    media_type="audio/wav",
+                    headers={"Content-Disposition": f"attachment; filename=synthesized_{voice_id}.wav"},
+                )
+            except HTTPException:
+                raise
             except Exception as qe:
-                raise HTTPException(status_code=503, detail=f"Qwen基础音色合成失败: {qe}")
-
-            return_url = bool(data.get("return_url"))
-            if return_url or len(audio_bytes_wav) > 10 * 1024 * 1024:
-                tts_dir = _resolve_tts_static_dir()
-                os.makedirs(tts_dir, exist_ok=True)
-                fname = f"synth_{voice_id or 'default'}_{int(time.time())}_{uuid.uuid4().hex[:8]}.wav"
-                fpath = os.path.join(tts_dir, fname)
-                with open(fpath, "wb") as f:
-                    f.write(audio_bytes_wav)
-                audio_url = f"/static/tts/{fname}"
-                return JSONResponse({
-                    "code": 0,
-                    "audio_url": audio_url,
-                    "size": len(audio_bytes_wav),
-                    "source": source_tag,
-                    "voice_used": used_voice,
-                }, status_code=200)
-
-            return StreamingResponse(
-                BytesIO(audio_bytes_wav),
-                media_type="audio/wav",
-                headers={"Content-Disposition": f"attachment; filename=synthesized_{voice_id}.wav"},
-            )
+                logger.warning(f"[synthesize] Qwen基础音色直连失败(禁止回退): voice_id={voice_id}, err={qe}")
+                raise HTTPException(status_code=503, detail="Qwen基础音色服务暂不可用，请稍后重试")
 
         ref_audio_path = profile.get("ref_audio_path")
         ref_text = profile.get("ref_text")
@@ -6628,7 +8747,24 @@ async def synthesize(request: Request):
                 f"dataset_scan_enabled={dataset_scan_enabled}"
             )
 
+    if pre_ref_risk_tier in ("risky", "strict") and (not _coerce_bool_param(data.get("hq_user_voice_keep_aux_refs"), False)):
+        effective_max_aux_refs = 0
+
     text_for_ref_match = sanitize_text(text)
+    short_units_for_ref = _count_text_units(text_for_ref_match)
+    if (
+        pre_ref_risk_tier in ("risky", "strict")
+        and short_units_for_ref <= 40
+        and _coerce_bool_param(data.get("hq_user_voice_short_ref_widen"), True)
+    ):
+        widened_refs = max(6, int(effective_max_refs or 0))
+        if widened_refs != effective_max_refs:
+            logger.info(
+                f"[ref_guard] risky/strict 短句扩参考: voice_id={voice_id}, "
+                f"max_refs {effective_max_refs}->{widened_refs}, text_units={short_units_for_ref}"
+            )
+            effective_max_refs = widened_refs
+
     ref_bundle = _resolve_reference_bundle(
         ref_audio_path=ref_audio_path,
         ref_text=ref_text,
@@ -6640,7 +8776,8 @@ async def synthesize(request: Request):
         prompt_max_chars=int(data.get("prompt_max_chars", 40)),
         dataset_scan_enabled=dataset_scan_enabled,
         prefer_primary_sentence_text=bool(profile_ref_guard),
-        prefer_target_primary_sample=bool(profile_ref_guard) and pre_ref_risk_tier in ("risky", "strict"),
+        prefer_target_primary_sample=_coerce_bool_param(data.get("hq_user_voice_prefer_target_primary_sample"), False),
+        risk_tier=pre_ref_risk_tier,
     )
     ref_audio_path = ref_bundle.get("primary_ref_audio")
     aux_ref_audio_paths = ref_bundle.get("aux_ref_audio_paths") or []
@@ -6677,9 +8814,11 @@ async def synthesize(request: Request):
         if not os.path.exists(sovits_path):
             raise HTTPException(status_code=400, detail=f"SoVITS模型文件不存在: {sovits_path}")
         
-        # 设置 GPU（与 simple_inference.py 一致，从环境变量或配置获取，默认 "0"）
-        gpu_id = data.get("gpu", "0")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # 可选设置 GPU：仅在请求显式指定时覆盖，避免每次请求硬绑定到 0 号卡。
+        gpu_id = data.get("gpu", None)
+        gpu_id_str = str(gpu_id or "").strip()
+        if gpu_id_str:
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id_str
         
         # 设置模型路径到环境变量（与 simple_inference.py 完全一致）
         os.environ["gpt_path"] = gpt_path
@@ -6856,10 +8995,22 @@ async def synthesize(request: Request):
             else:
                 max_text_len = max(20, int(_max_text_len_val))
 
-            segments = _split_text_for_buffer(text_cleaned, max_len=max_text_len, cut_punc=cut_punc)
+            use_official_split = _coerce_bool_param(
+                data.get("use_official_split"),
+                True if long_book_text else False,
+            )
+            if use_official_split:
+                segments = _split_text_with_official_style(text_cleaned, long_book_text=long_book_text)
+                if not segments:
+                    segments = _split_text_for_buffer(text_cleaned, max_len=max_text_len, cut_punc=cut_punc)
+            else:
+                segments = _split_text_for_buffer(text_cleaned, max_len=max_text_len, cut_punc=cut_punc)
             text_final = "\n".join(segments) if segments else text_cleaned
             if len(segments) > 1:
-                logger.info(f"[synthesize] 目标文本已切分为 {len(segments)} 段，max_len={max_text_len}, strict={strict_segmented}")
+                logger.info(
+                    f"[synthesize] 目标文本已切分为 {len(segments)} 段，max_len={max_text_len}, "
+                    f"strict={strict_segmented}, use_official_split={use_official_split}"
+                )
 
             is_user_trained_voice = str((profile or {}).get("model_type") or "").strip().lower() == "user_trained"
             runtime_data = dict(data or {})
@@ -6877,27 +9028,138 @@ async def synthesize(request: Request):
                         f"tier={voice_policy.get('tier')}, reasons={voice_policy.get('reasons')}, "
                         f"overrides={list((voice_policy.get('applied_overrides') or {}).keys())}"
                     )
+            if is_user_trained_voice and _coerce_bool_param(runtime_data.get("hq_user_voice_generic_retry"), False):
+                logger.info(f"[synthesize] user_trained 启用通用解码重试: voice_id={voice_id}, tier={voice_policy.get('tier')}")
+                is_user_trained_voice = False
 
-            if is_user_trained_voice and voice_policy.get("tier") in ("risky", "strict") and len(segments) < 2:
+            tier_l_micro = str(voice_policy.get("tier") or "").strip().lower()
+            force_micro_cfg = _coerce_bool_param(runtime_data.get("hq_user_voice_force_micro_segments"), False)
+            buffered_force_split = (
+                bool(runtime_data.get("buffered"))
+                and is_user_trained_voice
+                and _count_text_units(text_cleaned) >= 48
+                and _coerce_bool_param(runtime_data.get("hq_user_voice_buffered_force_split"), True)
+            )
+            need_micro_segments = (
+                (tier_l_micro in ("strict", "risky") and force_micro_cfg)
+                or buffered_force_split
+            )
+            if need_micro_segments and len(segments) < 2:
+                default_forced_len = 24 if tier_l_micro == "strict" else (32 if buffered_force_split else 28)
                 try:
-                    forced_max_len = int(runtime_data.get("max_text_len", 24 if voice_policy.get("tier") == "strict" else 28))
+                    forced_max_len = int(runtime_data.get("max_text_len", default_forced_len))
                 except Exception:
-                    forced_max_len = 24 if voice_policy.get("tier") == "strict" else 28
+                    forced_max_len = default_forced_len
                 forced_max_len = max(16, min(56, forced_max_len))
-                forced_cut_punc = runtime_data.get("cut_punc") or "，。？！；：,.!?;:、…"
+                if buffered_force_split and (not runtime_data.get("cut_punc")):
+                    forced_cut_punc = "。？！；：!?;:…"
+                else:
+                    forced_cut_punc = runtime_data.get("cut_punc") or "，。？！；：,.!?;:、…"
                 forced_segments = _split_text_for_buffer(text_cleaned, max_len=forced_max_len, cut_punc=forced_cut_punc)
                 if len(forced_segments) >= 2:
                     segments = forced_segments
                     text_final = "\n".join(segments)
                     logger.info(
-                        f"[synthesize] user_trained 高风险音色启用细粒度分段: "
+                        f"[synthesize] user_trained 启用细粒度分段: "
                         f"voice_id={voice_id}, tier={voice_policy.get('tier')}, "
-                        f"segments={len(segments)}, max_len={forced_max_len}"
+                        f"segments={len(segments)}, max_len={forced_max_len}, "
+                        f"reason={'buffered_force_split' if buffered_force_split else 'risk_policy'}"
                     )
 
             adaptive_text_payload = text_cleaned if text_cleaned else text_final
 
             inp_refs_payload = _build_inp_refs_payload(aux_ref_audio_paths, base_dir=now_dir)
+            if runtime_data.get("buffered"):
+                tier_l_for_bridge = str(voice_policy.get("tier") or "").strip().lower()
+                short_units_for_bridge = _count_text_units(text_cleaned)
+                default_bridge_max_units = 30 if tier_l_for_bridge in ("strict", "risky") else 72
+                try:
+                    bridge_max_units = int(runtime_data.get("hq_user_voice_buffered_bridge_max_units", default_bridge_max_units))
+                except Exception:
+                    bridge_max_units = default_bridge_max_units
+                bridge_max_units = max(20, min(180, bridge_max_units))
+                default_bridge_max_segments = 1 if tier_l_for_bridge in ("strict", "risky") else 2
+                try:
+                    bridge_max_segments = int(runtime_data.get("hq_user_voice_buffered_bridge_max_segments", default_bridge_max_segments))
+                except Exception:
+                    bridge_max_segments = default_bridge_max_segments
+                bridge_max_segments = max(1, min(3, bridge_max_segments))
+                buffered_short_sync_bridge = (
+                    is_user_trained_voice
+                    and short_units_for_bridge <= bridge_max_units
+                    and len(segments) <= bridge_max_segments
+                    and (
+                        tier_l_for_bridge in ("risky", "strict")
+                        or _coerce_bool_param(runtime_data.get("hq_user_voice_buffered_short_sync_bridge_all_tiers"), True)
+                    )
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_buffered_short_sync_bridge"), True)
+                )
+                if buffered_short_sync_bridge:
+                    runtime_data["buffered"] = False
+                    runtime_data["return_url"] = True
+                    runtime_data["_buffered_short_sync_bridge"] = True
+                    # 桥接默认关闭 ASR 打分，避免高成本 readalong 调用；需要时可显式打开。
+                    runtime_data.setdefault("hq_user_voice_main_asr_guard", False)
+                    runtime_data.setdefault("hq_user_voice_main_asr_max_candidates", 2)
+                    runtime_data.setdefault("hq_user_voice_asr_rerank", False)
+                    runtime_data.setdefault("hq_user_voice_buffered_short_final_probe_asr", False)
+                    if short_units_for_bridge <= 40:
+                        _default_bridge_top_p = 0.70
+                        _default_bridge_temp = 0.20
+                        _default_bridge_rp = 1.28
+                        _default_bridge_spd = 1.08
+                        _default_bridge_steps = 28
+                        runtime_data.setdefault("hq_user_voice_short_trim", True)
+                    else:
+                        _default_bridge_top_p = 0.72
+                        _default_bridge_temp = 0.22
+                        _default_bridge_rp = 1.26
+                        _default_bridge_spd = 1.02
+                        _default_bridge_steps = 30
+                    if _coerce_bool_param(runtime_data.get("hq_user_voice_buffered_short_safe_decode"), True):
+                        try:
+                            _tk = int(runtime_data.get("hq_user_voice_buffered_short_top_k", 16))
+                        except Exception:
+                            _tk = 16
+                        runtime_data["top_k"] = max(8, min(24, _tk))
+                        try:
+                            _tp = float(runtime_data.get("hq_user_voice_buffered_short_top_p", _default_bridge_top_p))
+                        except Exception:
+                            _tp = _default_bridge_top_p
+                        runtime_data["top_p"] = max(0.50, min(0.90, _tp))
+                        try:
+                            _temp = float(runtime_data.get("hq_user_voice_buffered_short_temperature", _default_bridge_temp))
+                        except Exception:
+                            _temp = _default_bridge_temp
+                        runtime_data["temperature"] = max(0.05, min(0.40, _temp))
+                        try:
+                            _rp = float(runtime_data.get("hq_user_voice_buffered_short_repetition_penalty", _default_bridge_rp))
+                        except Exception:
+                            _rp = _default_bridge_rp
+                        runtime_data["repetition_penalty"] = max(1.05, min(1.45, _rp))
+                        try:
+                            _spd = float(runtime_data.get("hq_user_voice_buffered_short_speed", _default_bridge_spd))
+                        except Exception:
+                            _spd = _default_bridge_spd
+                        runtime_data["speed"] = max(0.90, min(1.20, _spd))
+                        try:
+                            _steps = int(runtime_data.get("hq_user_voice_buffered_short_sample_steps", _default_bridge_steps))
+                        except Exception:
+                            _steps = _default_bridge_steps
+                        runtime_data["sample_steps"] = max(20, min(40, _steps))
+                    logger.info(
+                        f"[synthesize] buffered 短句桥接到 sync: voice_id={voice_id}, "
+                        f"tier={tier_l_for_bridge}, text_units={short_units_for_bridge}"
+                    )
+                    if debug_id:
+                        _debug_event(
+                            debug_id,
+                            "buffered.short_bridge",
+                            enabled=True,
+                            tier=tier_l_for_bridge,
+                            text_units=short_units_for_bridge,
+                        )
+
             if runtime_data.get("buffered"):
                 buffered_data = dict(runtime_data or {})
                 buffered_data["_is_user_trained_voice"] = is_user_trained_voice
@@ -6971,7 +9233,12 @@ async def synthesize(request: Request):
                         )
 
                     if voice_id and (voice_id not in QWEN_BASE_VOICE_IDS):
-                        audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(audio_bytes_wav)
+                        audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(
+                            audio_bytes_wav,
+                            trigger_rms=(110.0 if is_user_trained_voice else 180.0),
+                            target_rms=(420.0 if is_user_trained_voice else 920.0),
+                            max_gain=(12.0 if is_user_trained_voice else 26.0),
+                        )
                         if boost_meta.get("applied"):
                             logger.info(
                                 f"[synthesize] 低音量补偿已应用 voice_id={voice_id}: "
@@ -7066,12 +9333,10 @@ async def synthesize(request: Request):
                     is_user_trained_voice=is_user_trained_voice,
                     risk_tier=voice_policy.get("tier"),
                 )
-                if (
-                    is_user_trained_voice
-                    and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict")
-                    and _coerce_bool_param(runtime_data.get("hq_user_voice_relax_max_sec"), True)
-                ):
-                    target_max_sec = 0
+                if is_user_trained_voice and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict"):
+                    relax_max_sec = _coerce_bool_param(runtime_data.get("hq_user_voice_relax_max_sec"), False)
+                    if relax_max_sec and (not _coerce_bool_param(runtime_data.get("hq_user_voice_allow_hard_max_sec"), False)):
+                        target_max_sec = 0
                 sec_override_applied = False
                 sec_override_old = None
                 sec_override_new = None
@@ -7126,14 +9391,27 @@ async def synthesize(request: Request):
             effective_primary_profile = dict(primary_profile)
             hint_source = ""
             if is_user_trained_voice and voice_id:
+
+                tier_hint = str(voice_policy.get("tier") or "normal").strip().lower()
+
+                allow_cache_hint = _coerce_bool_param(runtime_data.get("hq_user_voice_allow_cache_hint"), tier_hint == "normal")
+
                 cached_profile = _get_cached_voice_gen_profile(voice_id, primary_profile)
-                if cached_profile:
+
+                if cached_profile and allow_cache_hint:
+
                     effective_primary_profile = _clamp_cached_user_voice_profile(cached_profile, primary_profile, cache_mode=voice_policy.get("cache_mode", "speed"))
+
                     hint_source = "cache"
+
                 elif _coerce_bool_param(runtime_data.get("hq_user_voice_bootstrap"), True):
+
                     boot_profile = _build_recent_user_voice_bootstrap_profile(primary_profile, profile)
+
                     if boot_profile != primary_profile:
+
                         effective_primary_profile = boot_profile
+
                         hint_source = "recent_voice_bootstrap"
             if hint_source:
                 logger.info(f"[synthesize] user_trained 使用参数提示: voice_id={voice_id}, source={hint_source}, profile={effective_primary_profile}")
@@ -7145,6 +9423,51 @@ async def synthesize(request: Request):
 
             audio_bytes_wav = _gen_once_with_profile(effective_primary_profile, "base")
             best_profile = dict(effective_primary_profile)
+
+            tier_l = str(voice_policy.get("tier") or "").strip().lower()
+            main_asr_guard_enabled = (
+                is_user_trained_voice
+                and tier_l in ("risky", "strict")
+                and _coerce_bool_param(runtime_data.get("hq_user_voice_main_asr_guard"), True)
+            )
+            try:
+                main_asr_timeout_sec = max(8.0, min(45.0, float(runtime_data.get("hq_user_voice_main_asr_timeout_sec", 18.0))))
+            except Exception:
+                main_asr_timeout_sec = 18.0
+            try:
+                main_asr_accept = float(runtime_data.get("hq_user_voice_main_asr_accept", 0.64 if tier_l == "strict" else 0.56))
+            except Exception:
+                main_asr_accept = 0.64 if tier_l == "strict" else 0.56
+            main_asr_accept = max(0.25, min(0.95, main_asr_accept))
+            try:
+                main_asr_rescue = float(runtime_data.get("hq_user_voice_main_asr_rescue", 0.52 if tier_l == "strict" else 0.45))
+            except Exception:
+                main_asr_rescue = 0.52 if tier_l == "strict" else 0.45
+            main_asr_rescue = max(0.20, min(main_asr_accept, main_asr_rescue))
+            try:
+                main_asr_margin = float(runtime_data.get("hq_user_voice_main_asr_margin", 0.03))
+            except Exception:
+                main_asr_margin = 0.03
+            main_asr_margin = max(0.0, min(0.20, main_asr_margin))
+            try:
+                main_asr_max_candidates = int(runtime_data.get("hq_user_voice_main_asr_max_candidates", 3))
+            except Exception:
+                main_asr_max_candidates = 3
+            main_asr_max_candidates = max(1, min(6, main_asr_max_candidates))
+            main_asr_scored = {"count": 0}
+
+            def _score_main_candidate(audio_bytes: bytes, attempt_tag: str) -> float:
+                if not main_asr_guard_enabled:
+                    return -1.0
+                if main_asr_scored["count"] >= main_asr_max_candidates:
+                    return -1.0
+                main_asr_scored["count"] += 1
+                asr_score = _score_generated_audio_with_readalong(audio_bytes, text_final, timeout_sec=main_asr_timeout_sec)
+                if debug_id:
+                    _debug_event(debug_id, "synthesize.main_asr.score", attempt=attempt_tag, asr_score=asr_score)
+                return asr_score
+
+            best_asr_score = _score_main_candidate(audio_bytes_wav, "base")
 
             seg_units = _count_text_units(text_final)
             under_tol = 0.92 if seg_units >= 14 else 0.90
@@ -7167,11 +9490,12 @@ async def synthesize(request: Request):
                     tolerance=over_tol,
                 )
                 is_low_energy_initial = _is_low_energy_generated_audio(text_final, audio_bytes_wav)
+                is_severe_low_energy_initial = _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0)
 
                 if is_user_trained_voice:
-                    if is_over_initial and (not is_under_initial):
-                        # 对“明显偏长”默认直接返回 base，避免重试纯增时延；需要时可显式开启重试。
-                        if _coerce_bool_param(runtime_data.get("hq_user_voice_over_retry"), False):
+                    if is_over_initial and (not is_under_initial) and (not is_low_energy_initial) and (not is_severe_low_energy_initial):
+                        # 用户训练音色默认启用 over 补救重试，可通过 hq_user_voice_over_retry=false 显式关闭。
+                        if _coerce_bool_param(runtime_data.get("hq_user_voice_over_retry"), True):
                             retry_profiles = [
                                 {
                                     "top_k": max(16, top_k_base),
@@ -7181,10 +9505,18 @@ async def synthesize(request: Request):
                                     "speed": max(1.10, speed_base),
                                     "sample_steps": max(22, min(28, sample_steps_base)),
                                 },
+                                {
+                                    "top_k": max(14, top_k_base - 1),
+                                    "top_p": min(0.82, max(0.74, top_p_base)),
+                                    "temperature": min(0.34, max(0.24, temperature_base)),
+                                    "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                                    "speed": max(1.22, speed_base),
+                                    "sample_steps": max(18, min(24, sample_steps_base)),
+                                },
                             ]
                         else:
                             retry_profiles = []
-                            logger.info(f"[synthesize] user_trained over-generated: skip retry for speed, voice_id={voice_id}")
+                            logger.info(f"[synthesize] user_trained over-generated: over_retry=false, voice_id={voice_id}")
                     elif is_under_initial:
                         # 过短时再做“稳质补偿”，但最多两轮。
                         retry_profiles = [
@@ -7205,17 +9537,22 @@ async def synthesize(request: Request):
                                 "sample_steps": max(36, sample_steps_base + 4),
                             },
                         ]
-                    elif is_low_energy_initial:
-                        retry_profiles = [
-                            {
-                                "top_k": max(17, top_k_base),
-                                "top_p": max(0.84, top_p_base),
-                                "temperature": min(0.38, max(0.30, temperature_base)),
-                                "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
-                                "speed": max(0.98, speed_base),
-                                "sample_steps": max(30, min(36, sample_steps_base + 2)),
-                            },
-                        ]
+                    elif is_low_energy_initial or is_severe_low_energy_initial:
+                        allow_low_energy_retry = is_severe_low_energy_initial or _coerce_bool_param(runtime_data.get("hq_user_voice_retry_low_energy"), False)
+                        if allow_low_energy_retry:
+                            retry_profiles = [
+                                {
+                                    "top_k": max(17, top_k_base),
+                                    "top_p": max(0.84, top_p_base),
+                                    "temperature": min(0.38, max(0.30, temperature_base)),
+                                    "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
+                                    "speed": max(0.98, speed_base),
+                                    "sample_steps": max(30, min(36, sample_steps_base + 2)),
+                                },
+                            ]
+                        else:
+                            logger.info(f"[synthesize] user_trained low-energy: skip retry and rely on final gain, voice_id={voice_id}")
+                            retry_profiles = []
                     else:
                         retry_profiles = [
                             {
@@ -7260,40 +9597,369 @@ async def synthesize(request: Request):
                     except StopIteration:
                         continue
                     retry_score = _duration_match_score(text_final, retry_audio_bytes, speed=rp["speed"])
-                    if retry_score < best_score:
+                    retry_asr_score = _score_main_candidate(retry_audio_bytes, f"retry{ridx}")
+                    if _is_better_candidate_by_recognition(
+                        best_asr_score,
+                        best_score,
+                        retry_asr_score,
+                        retry_score,
+                        asr_margin=main_asr_margin,
+                    ):
                         best_audio_bytes = retry_audio_bytes
                         best_score = retry_score
+                        best_asr_score = retry_asr_score
                         best_profile = dict(rp)
-                    if not _is_abnormal_generated_audio(text_final, retry_audio_bytes, speed=rp["speed"], under_tolerance=under_tol, over_tolerance=over_tol):
-                        logger.info(f"[synthesize] 分级重试第{ridx}轮通过")
-                        best_audio_bytes = retry_audio_bytes
-                        best_profile = dict(rp)
-                        break
+                    retry_is_abnormal = _is_abnormal_generated_audio(
+                        text_final,
+                        retry_audio_bytes,
+                        speed=rp["speed"],
+                        under_tolerance=under_tol,
+                        over_tolerance=over_tol,
+                    )
+                    if not retry_is_abnormal:
+                        best_is_abnormal = _is_abnormal_generated_audio(
+                            text_final,
+                            best_audio_bytes,
+                            speed=float(best_profile.get("speed", speed_base)),
+                            under_tolerance=under_tol,
+                            over_tolerance=over_tol,
+                        )
+                        if best_is_abnormal:
+                            best_audio_bytes = retry_audio_bytes
+                            best_score = retry_score
+                            best_asr_score = retry_asr_score
+                            best_profile = dict(rp)
+                        if (not main_asr_guard_enabled) or (best_asr_score < 0.0) or (best_asr_score >= main_asr_accept):
+                            logger.info(f"[synthesize] 分级重试第{ridx}轮通过")
+                            break
 
-                # 兜底：若仍明显漏读，再做一轮更保守参数尝试。
-                if _is_under_generated_audio(text_final, best_audio_bytes, speed=float(best_profile.get("speed", speed_base)), tolerance=0.85):
+                # 兜底：若仍明显漏读，或识别质量偏低，再做一轮更保守参数尝试。
+                need_rescue_by_under = _is_under_generated_audio(
+                    text_final,
+                    best_audio_bytes,
+                    speed=float(best_profile.get("speed", speed_base)),
+                    tolerance=0.85,
+                )
+                need_rescue_by_asr = main_asr_guard_enabled and best_asr_score >= 0.0 and best_asr_score < main_asr_rescue
+                if need_rescue_by_under or need_rescue_by_asr:
                     rescue_speed = min(0.94, speed_base) if is_user_trained_voice else min(0.88, speed_base)
                     rescue_steps = max(40, sample_steps_base + 6) if is_user_trained_voice else max(60, sample_steps_base)
-                    rescue_profile = {
-                        "top_k": max(20, top_k_base),
-                        "top_p": max(0.92, top_p_base),
-                        "temperature": min(0.34, max(0.26, temperature_base)),
-                        "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
-                        "speed": rescue_speed,
-                        "sample_steps": rescue_steps,
-                    }
-                    try:
-                        rescue_audio = _gen_once_with_profile(rescue_profile, "rescue")
+                    rescue_profiles = [
+                        {
+                            "top_k": max(20, top_k_base),
+                            "top_p": max(0.92, top_p_base),
+                            "temperature": min(0.34, max(0.26, temperature_base)),
+                            "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                            "speed": rescue_speed,
+                            "sample_steps": rescue_steps,
+                        }
+                    ]
+                    if is_user_trained_voice and need_rescue_by_asr:
+                        rescue_profiles.insert(
+                            0,
+                            {
+                                "top_k": max(18, top_k_base),
+                                "top_p": max(0.88, top_p_base),
+                                "temperature": min(0.32, max(0.26, temperature_base)),
+                                "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                                "speed": min(0.98, speed_base),
+                                "sample_steps": max(36, sample_steps_base + 4),
+                            },
+                        )
+                    for r_idx, rescue_profile in enumerate(rescue_profiles, start=1):
+                        rescue_tag = "rescue" if len(rescue_profiles) == 1 else f"rescue{r_idx}"
+                        try:
+                            rescue_audio = _gen_once_with_profile(rescue_profile, rescue_tag)
+                        except StopIteration:
+                            continue
                         rescue_score = _duration_match_score(text_final, rescue_audio, speed=rescue_profile["speed"])
-                        if (rescue_score <= best_score * 1.20) or (not _is_under_generated_audio(text_final, rescue_audio, speed=rescue_profile["speed"], tolerance=0.90)):
-                            logger.info("[synthesize] 兜底重试通过")
+                        rescue_asr_score = _score_main_candidate(rescue_audio, rescue_tag)
+                        if _is_better_candidate_by_recognition(
+                            best_asr_score,
+                            best_score,
+                            rescue_asr_score,
+                            rescue_score,
+                            asr_margin=main_asr_margin,
+                        ):
+                            logger.info(f"[synthesize] 兜底重试通过: attempt={rescue_tag}")
                             best_audio_bytes = rescue_audio
+                            best_score = rescue_score
+                            best_asr_score = rescue_asr_score
                             best_profile = dict(rescue_profile)
-                    except StopIteration:
-                        pass
+
+                bridge_units = _count_text_units(text_final)
+                try:
+                    bridge_final_max_units = int(runtime_data.get("hq_user_voice_buffered_short_final_max_units", 72))
+                except Exception:
+                    bridge_final_max_units = 72
+                bridge_final_max_units = max(20, min(180, bridge_final_max_units))
+                bridge_final_rescue_enabled = (
+                    bool(runtime_data.get("_buffered_short_sync_bridge"))
+                    and is_user_trained_voice
+                    and tier_l in ("risky", "strict")
+                    and bridge_units <= bridge_final_max_units
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_buffered_short_final_rescue"), True)
+                )
+                if bridge_final_rescue_enabled:
+                    bridge_probe_asr_enabled = _coerce_bool_param(
+                        runtime_data.get("hq_user_voice_buffered_short_final_probe_asr"),
+                        False,
+                    )
+                    bridge_probe_asr = best_asr_score
+                    if bridge_probe_asr_enabled and bridge_probe_asr < 0.0:
+                        bridge_probe_asr = _score_generated_audio_with_readalong(
+                            best_audio_bytes,
+                            text_final,
+                            timeout_sec=main_asr_timeout_sec,
+                        )
+                        if debug_id:
+                            _debug_event(
+                                debug_id,
+                                "synthesize.main_asr.score",
+                                attempt="bridge_probe",
+                                asr_score=bridge_probe_asr,
+                            )
+                    try:
+                        bridge_asr_floor = float(runtime_data.get("hq_user_voice_buffered_short_final_asr_floor", 0.48))
+                    except Exception:
+                        bridge_asr_floor = 0.48
+                    bridge_asr_floor = max(0.20, min(0.95, bridge_asr_floor))
+
+                    bridge_need_rescue = (
+                        _is_under_generated_audio(
+                            text_final,
+                            best_audio_bytes,
+                            speed=float(best_profile.get("speed", speed_base)),
+                            tolerance=0.88,
+                        )
+                        or _is_over_generated_audio(
+                            text_final,
+                            best_audio_bytes,
+                            speed=float(best_profile.get("speed", speed_base)),
+                            tolerance=1.18,
+                        )
+                        or _is_low_energy_generated_audio(text_final, best_audio_bytes)
+                    )
+                    if bridge_probe_asr >= 0.0 and bridge_probe_asr < bridge_asr_floor:
+                        bridge_need_rescue = True
+
+                    if bridge_need_rescue:
+                        if bridge_units <= 40:
+                            bridge_rescue_profiles = [
+                                {"top_k": 16, "top_p": 0.70, "temperature": 0.20, "repetition_penalty": 1.28, "speed": 1.08, "sample_steps": 28},
+                                {"top_k": 16, "top_p": 0.66, "temperature": 0.18, "repetition_penalty": 1.30, "speed": 1.10, "sample_steps": 30},
+                            ]
+                        else:
+                            bridge_rescue_profiles = [
+                                {"top_k": 16, "top_p": 0.72, "temperature": 0.22, "repetition_penalty": 1.26, "speed": 1.02, "sample_steps": 30},
+                                {"top_k": 16, "top_p": 0.68, "temperature": 0.20, "repetition_penalty": 1.28, "speed": 1.00, "sample_steps": 32},
+                            ]
+                        for b_idx, bridge_profile in enumerate(bridge_rescue_profiles, start=1):
+                            bridge_tag = f"bridge_rescue{b_idx}"
+                            try:
+                                bridge_audio = _gen_once_with_profile(bridge_profile, bridge_tag)
+                            except StopIteration:
+                                continue
+                            bridge_score = _duration_match_score(text_final, bridge_audio, speed=bridge_profile["speed"] )
+                            bridge_asr_score = -1.0
+                            if bridge_probe_asr_enabled:
+                                bridge_asr_score = _score_generated_audio_with_readalong(
+                                    bridge_audio,
+                                    text_final,
+                                    timeout_sec=main_asr_timeout_sec,
+                                )
+                                if debug_id:
+                                    _debug_event(
+                                        debug_id,
+                                        "synthesize.main_asr.score",
+                                        attempt=bridge_tag,
+                                        asr_score=bridge_asr_score,
+                                    )
+                            if _is_better_candidate_by_recognition(
+                                best_asr_score,
+                                best_score,
+                                bridge_asr_score,
+                                bridge_score,
+                                asr_margin=main_asr_margin,
+                            ):
+                                best_audio_bytes = bridge_audio
+                                best_score = bridge_score
+                                best_asr_score = bridge_asr_score
+                                best_profile = dict(bridge_profile)
+                                logger.info(f"[synthesize] buffered 桥接二次兜底通过: attempt={bridge_tag}")
+
+                final_under_tol = max(0.86, under_tol)
+                if is_user_trained_voice and _is_under_generated_audio(
+                    text_final,
+                    best_audio_bytes,
+                    speed=float(best_profile.get("speed", speed_base)),
+                    tolerance=final_under_tol,
+                ):
+                    final_under_profiles = [
+                        {
+                            "top_k": max(20, top_k_base),
+                            "top_p": max(0.90, top_p_base),
+                            "temperature": min(0.34, max(0.26, temperature_base)),
+                            "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                            "speed": min(0.92, speed_base),
+                            "sample_steps": max(42, sample_steps_base + 8),
+                        },
+                        {
+                            "top_k": max(22, top_k_base),
+                            "top_p": max(0.92, top_p_base),
+                            "temperature": min(0.32, max(0.24, temperature_base)),
+                            "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                            "speed": min(0.90, speed_base),
+                            "sample_steps": max(46, sample_steps_base + 10),
+                        },
+                    ]
+                    for fu_idx, fu_profile in enumerate(final_under_profiles, start=1):
+                        fu_tag = f"under_final{fu_idx}"
+                        try:
+                            fu_audio = _gen_once_with_profile(fu_profile, fu_tag)
+                        except StopIteration:
+                            continue
+                        fu_score = _duration_match_score(text_final, fu_audio, speed=fu_profile["speed"])
+                        fu_is_under = _is_under_generated_audio(
+                            text_final,
+                            fu_audio,
+                            speed=float(fu_profile.get("speed", speed_base)),
+                            tolerance=final_under_tol,
+                        )
+                        if ((not fu_is_under) and fu_score <= (best_score + 0.35)) or (fu_score < best_score):
+                            best_audio_bytes = fu_audio
+                            best_score = fu_score
+                            best_profile = dict(fu_profile)
+                            logger.info(f"[synthesize] under 最终兜底通 过: attempt={fu_tag}")
+                            if not fu_is_under:
+                                break
+
+                still_under_final = _is_under_generated_audio(
+                    text_final,
+                    best_audio_bytes,
+                    speed=float(best_profile.get("speed", speed_base)),
+                    tolerance=final_under_tol,
+                )
+                if is_user_trained_voice and still_under_final:
+                    best_info = _try_get_wav_info(best_audio_bytes)
+                    best_dur = float((best_info or {}).get("duration_sec") or 0.0)
+                    est_min = _estimate_min_duration_sec(
+                        text_final,
+                        speed=float(best_profile.get("speed", speed_base)),
+                    )
+                    severe_under = best_dur < max(1.0, est_min * 0.82)
+                    try:
+                        under_reroll_max = int(runtime_data.get("hq_user_voice_under_reroll_max", 2))
+                    except Exception:
+                        under_reroll_max = 2
+                    under_reroll_max = max(1, min(3, under_reroll_max + (1 if severe_under else 0)))
+                    under_reroll_profiles = [
+                        {
+                            "top_k": max(20, top_k_base),
+                            "top_p": max(0.90, top_p_base),
+                            "temperature": min(0.34, max(0.24, temperature_base)),
+                            "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                            "speed": min(0.92, speed_base),
+                            "sample_steps": max(44, sample_steps_base + 8),
+                        },
+                        {
+                            "top_k": max(22, top_k_base),
+                            "top_p": max(0.92, top_p_base),
+                            "temperature": min(0.32, max(0.22, temperature_base)),
+                            "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                            "speed": min(0.90, speed_base),
+                            "sample_steps": max(48, sample_steps_base + 10),
+                        },
+                        {
+                            "top_k": max(24, top_k_base),
+                            "top_p": max(0.93, top_p_base),
+                            "temperature": min(0.30, max(0.20, temperature_base)),
+                            "repetition_penalty": min(1.28, max(1.20, repetition_penalty_base)),
+                            "speed": min(0.88, speed_base),
+                            "sample_steps": max(52, sample_steps_base + 12),
+                        },
+                    ]
+                    for rr_idx in range(under_reroll_max):
+                        rr_base = under_reroll_profiles[rr_idx % len(under_reroll_profiles)]
+                        rr_profile = dict(rr_base)
+                        if rr_idx >= len(under_reroll_profiles):
+                            rr_profile["sample_steps"] = int(rr_profile["sample_steps"]) + 2
+                        if rr_idx % 2 == 1:
+                            rr_profile["temperature"] = min(0.40, max(0.20, float(rr_profile["temperature"]) + 0.01))
+                        if rr_idx % 3 == 2:
+                            rr_profile["top_p"] = max(0.82, min(0.94, float(rr_profile["top_p"]) - 0.01))
+                        rr_tag = f"under_reroll{rr_idx + 1}"
+                        try:
+                            rr_audio = _gen_once_with_profile(rr_profile, rr_tag)
+                        except StopIteration:
+                            continue
+                        rr_score = _duration_match_score(
+                            text_final,
+                            rr_audio,
+                            speed=float(rr_profile.get("speed", speed_base)),
+                        )
+                        rr_asr_score = _score_main_candidate(rr_audio, rr_tag)
+                        rr_info = _try_get_wav_info(rr_audio)
+                        rr_dur = float((rr_info or {}).get("duration_sec") or 0.0)
+                        rr_under = _is_under_generated_audio(
+                            text_final,
+                            rr_audio,
+                            speed=float(rr_profile.get("speed", speed_base)),
+                            tolerance=final_under_tol,
+                        )
+                        pick_by_asr = _is_better_candidate_by_recognition(
+                            best_asr_score,
+                            best_score,
+                            rr_asr_score,
+                            rr_score,
+                            asr_margin=main_asr_margin,
+                        )
+                        if (
+                            pick_by_asr
+                            or ((not rr_under) and rr_score <= (best_score + 0.50))
+                            or (rr_dur > best_dur + 0.20)
+                            or (rr_score < best_score - 0.05)
+                        ):
+                            src_dur = best_dur
+                            best_audio_bytes = rr_audio
+                            best_score = rr_score
+                            if rr_asr_score >= 0.0:
+                                best_asr_score = rr_asr_score
+                            best_profile = dict(rr_profile)
+                            best_dur = rr_dur
+                            logger.info(
+                                f"[synthesize] under 多轮重生替换: attempt={rr_tag}, "
+                                f"dur={src_dur:.2f}->{rr_dur:.2f}, fixed={(not rr_under)}"
+                            )
+                            if not rr_under:
+                                break
 
                 audio_bytes_wav = best_audio_bytes
-                if is_user_trained_voice and str(voice_policy.get("tier") or "").strip().lower() != "risky":
+                tier_l_for_trim = str(voice_policy.get("tier") or "").strip().lower()
+                allow_short_risky_trim = (
+                    is_user_trained_voice
+                    and tier_l_for_trim == "risky"
+                    and _count_text_units(text_final) <= 40
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_short_trim"), False)
+                )
+                allow_long_risky_trim = (
+                    is_user_trained_voice
+                    and tier_l_for_trim == "risky"
+                    and _count_text_units(text_final) >= 42
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_long_trim"), True)
+                )
+                risky_severe_trim = (
+                    is_user_trained_voice
+                    and tier_l_for_trim == "risky"
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_risky_severe_trim"), True)
+                    and _is_severely_over_generated_audio(
+                        text_final,
+                        audio_bytes_wav,
+                        speed=float(best_profile.get("speed", speed_base)),
+                        over_tolerance=over_tol,
+                    )
+                )
+                if is_user_trained_voice and (tier_l_for_trim != "risky" or allow_short_risky_trim or allow_long_risky_trim or risky_severe_trim):
                     audio_bytes_wav, trim_meta = _trim_over_generated_audio_if_needed(
                         text_final,
                         audio_bytes_wav,
@@ -7312,13 +9978,67 @@ async def synthesize(request: Request):
                 _remember_voice_gen_profile(voice_id, cache_profile, source=source)
 
             # 仅对训练音色做低音量兜底放大，避免“有时几乎听不见”。
+            pre_boost_noise_like = False
+            pre_boost_low_energy = False
             if voice_id and (voice_id not in QWEN_BASE_VOICE_IDS):
-                audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(audio_bytes_wav)
-                if boost_meta.get("applied"):
-                    logger.info(
-                        f"[synthesize] 低音量补偿已应用 voice_id={voice_id}: "
-                        f"gain={boost_meta.get('gain'):.2f}, rms {boost_meta.get('rms_before'):.1f}->{boost_meta.get('rms_after'):.1f}"
+                pre_boost_noise_like = bool(is_user_trained_voice and _is_noise_like_generated_audio(text_final, audio_bytes_wav))
+                pre_boost_low_energy = bool(is_user_trained_voice and _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0))
+                if pre_boost_noise_like or pre_boost_low_energy:
+                    boost_meta = {"applied": False, "reason": "skip_severe_guard_before_boost"}
+                else:
+                    audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(
+                        audio_bytes_wav,
+                        trigger_rms=(110.0 if is_user_trained_voice else 180.0),
+                        target_rms=(420.0 if is_user_trained_voice else 920.0),
+                        max_gain=(12.0 if is_user_trained_voice else 26.0),
                     )
+                    if boost_meta.get("applied"):
+                        logger.info(
+                            f"[synthesize] 低音量补偿已应用 voice_id={voice_id}: "
+                            f"gain={boost_meta.get('gain'):.2f}, rms {boost_meta.get('rms_before'):.1f}->{boost_meta.get('rms_after'):.1f}"
+                        )
+
+            # 质量硬兜底：若最终音频仍呈现“电流噪声/极低能量”，先强制重载模型再保守重生一次；仍失败则阻断返回。
+            if is_user_trained_voice and voice_id and (voice_id not in QWEN_BASE_VOICE_IDS):
+                severe_noise_like = bool(pre_boost_noise_like or _is_noise_like_generated_audio(text_final, audio_bytes_wav))
+                severe_low_energy = bool(pre_boost_low_energy or _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0))
+                if severe_noise_like or severe_low_energy:
+                    logger.warning(
+                        f"[synthesize] 检测到疑似电流噪声/低能量，触发硬兜底: "
+                        f"voice_id={voice_id}, noise_like={severe_noise_like}, low_energy={severe_low_energy}"
+                    )
+                    hard_recovered = False
+                    hard_profile = {
+                        "top_k": max(14, min(22, int(top_k_base))),
+                        "top_p": max(0.60, min(0.78, float(top_p_base))),
+                        "temperature": max(0.14, min(0.28, float(temperature_base))),
+                        "repetition_penalty": max(1.20, min(1.35, float(repetition_penalty_base))),
+                        "speed": max(0.95, min(1.12, float(speed_base))),
+                        "sample_steps": max(40, int(sample_steps_base)),
+                    }
+                    try:
+                        _clear_official_model_cache()
+                        _ensure_official_model_loaded(official_change_gpt_sovits_weights, gpt_path, sovits_path)
+                        rescue_audio = _gen_once_with_profile(hard_profile, "hard_rescue_reload")
+                        rescue_noise_like = _is_noise_like_generated_audio(text_final, rescue_audio)
+                        rescue_low_energy = _is_low_energy_generated_audio(text_final, rescue_audio, min_rms=48.0)
+                        if (not rescue_noise_like) and (not rescue_low_energy):
+                            audio_bytes_wav = rescue_audio
+                            best_profile = dict(hard_profile)
+                            hard_recovered = True
+                            logger.info(f"[synthesize] 硬兜底重生成功: voice_id={voice_id}")
+                        else:
+                            logger.warning(
+                                f"[synthesize] 硬兜底重生仍异常: voice_id={voice_id}, "
+                                f"noise_like={rescue_noise_like}, low_energy={rescue_low_energy}"
+                            )
+                    except Exception as hard_err:
+                        logger.warning(f"[synthesize] 硬兜底流程异常: {hard_err}")
+                    if not hard_recovered:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="该训练音色输出质量异常（疑似电流噪声/低能量），已阻断返回。请重新训练或更换音色。",
+                        )
 
             logger.info(f"[synthesize] 推理成功（使用官方 api.py），WAV 音频大小: {len(audio_bytes_wav)} 字节")
 
@@ -7335,6 +10055,7 @@ async def synthesize(request: Request):
 
             # 大文件可返回URL（避免小程序内存/解码限制）
             return_url = bool(runtime_data.get("return_url"))
+            buffered_short_sync_bridge = bool(runtime_data.get("_buffered_short_sync_bridge"))
             if return_url or len(audio_bytes_wav) > 10 * 1024 * 1024:
                 tts_dir = _resolve_tts_static_dir()
                 os.makedirs(tts_dir, exist_ok=True)
@@ -7343,6 +10064,49 @@ async def synthesize(request: Request):
                 with open(fpath, "wb") as f:
                     f.write(audio_bytes_wav)
                 audio_url = f"/static/tts/{fname}"
+                if buffered_short_sync_bridge:
+                    _cleanup_buffer_tasks()
+                    bridge_task_id = uuid.uuid4().hex
+                    bridge_task = {
+                        "created_at": time.time(),
+                        "total": 1,
+                        "segments": [audio_url],
+                        "done": True,
+                        "error": None,
+                        "debug_id": debug_id,
+                        "voice_id": voice_id,
+                        "merged_url": audio_url,
+                        "adaptive_text": adaptive_text_payload,
+                        "is_user_trained_voice": bool(is_user_trained_voice),
+                        "speed_base": float(best_profile.get("speed", speed_base)),
+                    }
+                    with BUFFER_TASKS_LOCK:
+                        BUFFER_TASKS[bridge_task_id] = bridge_task
+                    if debug_id:
+                        _debug_set(
+                            debug_id,
+                            task_id=bridge_task_id,
+                            total_segments=1,
+                            segments_preview=[str(text_cleaned)[:120]],
+                        )
+                        _debug_event(
+                            debug_id,
+                            "buffered.created",
+                            task_id=bridge_task_id,
+                            total=1,
+                            bridge=True,
+                            merged_url=audio_url,
+                        )
+                    return JSONResponse(
+                        {
+                            "code": 0,
+                            "task_id": bridge_task_id,
+                            "debug_id": debug_id,
+                            "segments": [audio_url],
+                            "total_segments": 1,
+                        },
+                        status_code=200,
+                    )
                 return JSONResponse({"code": 0, "audio_url": audio_url, "size": len(audio_bytes_wav), "debug_id": debug_id}, status_code=200)
 
             # 直接返回 WAV 字节流
@@ -7404,6 +10168,9 @@ async def synthesize(request: Request):
     except StopIteration:
         logger.error("[synthesize] get_tts_wav generator 没有返回数据")
         raise HTTPException(status_code=500, detail="推理失败：生成器未返回音频数据")
+    except HTTPException as e:
+        logger.error(f"[synthesize] 推理失败(HTTP): {e.status_code} {e.detail}")
+        raise
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
@@ -7552,12 +10319,47 @@ def _normalize_stream_request_data(data: dict, format_hint: str = "wav") -> dict
     return payload
 
 
+def _stream_wav_bytes_response(audio_bytes_wav: bytes, request: Request, chunk_ms: int = 200, _format: str = "wav"):
+    wav_reader = wave.open(BytesIO(audio_bytes_wav), "rb")
+    sample_rate = wav_reader.getframerate()
+    channels = wav_reader.getnchannels()
+    sample_width = wav_reader.getsampwidth()
+    frames_per_chunk = max(1, int(sample_rate * (max(50, min(1000, int(chunk_ms or 200))) / 1000.0)))
+    media_type = "audio/wav" if (_format or "wav").lower() in ["wav", "wave"] else "application/octet-stream"
+    headers = {
+        "X-Sample-Rate": str(sample_rate),
+        "X-Channels": str(channels),
+        "X-Sample-Width": str(sample_width),
+        "X-PCM-Format": "s16le",
+    }
+
+    async def generator():
+        try:
+            if (_format or "wav").lower() in ["wav", "wave"]:
+                yield _wave_header_chunk(channels=channels, sample_width=sample_width, sample_rate=sample_rate)
+            while True:
+                if await request.is_disconnected():
+                    break
+                data_chunk = wav_reader.readframes(frames_per_chunk)
+                if not data_chunk:
+                    break
+                yield data_chunk
+        finally:
+            try:
+                wav_reader.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(generator(), media_type=media_type, headers=headers)
+
+
 async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 200, format: str = "wav", route_name: str = "synthesize/stream"):
     data = _normalize_stream_request_data(data, format_hint=format)
 
     voice_id = data.get("voice_id")
     user_id = data.get("user_id") or data.get("model_name")
     text = data.get("text")
+    text, book_text_meta = _resolve_magic_book_page_text(data)
     text_language = data.get("text_language") or data.get("language") or "zh"
     _format = (data.get("format") or format or "wav").lower()
     chunk_ms = int(data.get("chunk_ms", chunk_ms or 200))
@@ -7584,6 +10386,59 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
 
     if not text or not str(text).strip():
         raise HTTPException(status_code=400, detail="缺少要合成的文本 text")
+    if (book_text_meta or {}).get("used"):
+        logger.info(
+            f"[{route_name}] 使用绘本页文案: title={book_text_meta.get('book_title')}, "
+            f"page_index={book_text_meta.get('page_index')}"
+        )
+
+    strict_official = _coerce_bool_param(data.get("strict_official_infer"), True)
+    if strict_official:
+        resolved_voice_id, profile = _resolve_profile_no_fallback(voice_id=voice_id, user_id=user_id)
+        if resolved_voice_id not in {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID}:
+            ref_audio_path = str(profile.get("ref_audio_path") or "").strip()
+            ref_text = str(profile.get("ref_text") or "").strip()
+            ref_language_raw = str(profile.get("ref_language") or "中文").strip() or "中文"
+            gpt_path_local = str(profile.get("gpt_path") or "").strip()
+            sovits_path_local = str(profile.get("sovits_path") or "").strip()
+            if (not _is_model_pair_valid(gpt_path_local, sovits_path_local)) or (not ref_audio_path) or (not os.path.exists(ref_audio_path)):
+                raise HTTPException(status_code=400, detail=f"模型或参考音频缺失: {resolved_voice_id}")
+            if not ref_text:
+                raise HTTPException(status_code=400, detail=f"参考文本缺失: {resolved_voice_id}")
+
+            ref_language = dict_language.get(ref_language_raw, "all_zh")
+            if ref_language not in dict_language.values():
+                ref_language = "all_zh"
+            text_final = sanitize_text(text)
+            ref_text_cleaned = normalize_ref_text_for_infer(ref_text, max_chars=max(20, int(data.get("prompt_max_chars", 40))))
+            if not has_speakable_content(text_final):
+                raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
+            _ensure_official_model_loaded(change_gpt_sovits_weights, gpt_path_local, sovits_path_local)
+            api_prompt_lang = detect_text_language(ref_text_cleaned or "你好")
+            api_text_lang = detect_text_language(text_final)
+            audio_bytes_wav = _collect_official_minimal_wav_bytes(
+                ref_audio_path=ref_audio_path,
+                ref_text=ref_text_cleaned,
+                prompt_language=api_prompt_lang,
+                text_final=text_final,
+                text_language=api_text_lang,
+                inp_refs_payload=[],
+                data=data,
+                gpt_model_path=gpt_path_local,
+                sovits_model_path=sovits_path_local,
+            )
+            return _stream_wav_bytes_response(audio_bytes_wav, request=request, chunk_ms=chunk_ms, _format=_format)
+        else:
+            text_cleaned = sanitize_text(text)
+            if not has_speakable_content(text_cleaned):
+                raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
+            try:
+                audio_bytes_wav, _used_voice, _source_tag = await _qwen_tts_generate_wav(text_cleaned, profile)
+            except Exception as q_err:
+                logger.warning(f"[synthesize/stream] Qwen基础音色合成失败(严格模式): {q_err}")
+                raise HTTPException(status_code=503, detail="Qwen基础音色服务暂不可用，请稍后重试")
+            return _stream_wav_bytes_response(audio_bytes_wav, request=request, chunk_ms=chunk_ms, _format=_format)
+    raise HTTPException(status_code=400, detail="legacy synthesize stream path disabled: strict_official_infer must be true")
 
     profile_ref_guard = None
     profile = {}
@@ -7608,10 +10463,16 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
     else:
         load_voice_library_from_file()
         if not voice_id and user_id:
-            for vid, info in VOICE_LIBRARY.items():
-                if info.get("name") == user_id:
-                    voice_id = vid
-                    break
+            voice_id = _resolve_voice_id_by_name(user_id)
+            if not voice_id:
+                derived_name, _derived_role = _normalize_train_model_name(
+                    user_id=str(user_id),
+                    requested_model_name=str(user_id),
+                    role_key=None,
+                    custom_role_name=None,
+                )
+                if derived_name and str(derived_name) != str(user_id):
+                    voice_id = _resolve_voice_id_by_name(derived_name)
         if not voice_id:
             raise HTTPException(status_code=400, detail="请提供 voice_id/user_id/model_name 或 refer_wav_path+prompt_text 来选择声音模型")
         if voice_id not in VOICE_LIBRARY:
@@ -7627,45 +10488,49 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
             text_cleaned = sanitize_text(text)
             if not has_speakable_content(text_cleaned):
                 raise HTTPException(status_code=400, detail="目标文本缺少可发音字符，请输入完整句子后重试")
+            is_qwen_base_voice = str(voice_id or "").strip() in {QWEN_BASE_FEMALE_VOICE_ID, QWEN_BASE_MALE_VOICE_ID}
             try:
                 audio_bytes_wav, used_voice, source_tag = await _qwen_tts_generate_wav(text_cleaned, profile)
-            except Exception as qe:
-                raise HTTPException(status_code=503, detail=f"Qwen基础音色流式合成失败: {qe}")
 
-            wav_reader = wave.open(BytesIO(audio_bytes_wav), "rb")
-            sample_rate = wav_reader.getframerate()
-            channels = wav_reader.getnchannels()
-            sample_width = wav_reader.getsampwidth()
-            frames_per_chunk = max(1, int(sample_rate * (chunk_ms / 1000.0)))
+                wav_reader = wave.open(BytesIO(audio_bytes_wav), "rb")
+                sample_rate = wav_reader.getframerate()
+                channels = wav_reader.getnchannels()
+                sample_width = wav_reader.getsampwidth()
+                frames_per_chunk = max(1, int(sample_rate * (chunk_ms / 1000.0)))
 
-            media_type = "audio/wav" if _format in ["wav", "wave"] else "application/octet-stream"
-            headers = {
-                "X-Sample-Rate": str(sample_rate),
-                "X-Channels": str(channels),
-                "X-Sample-Width": str(sample_width),
-                "X-PCM-Format": "s16le",
-                "X-Qwen-Voice": str(used_voice or ""),
-                "X-Qwen-Source": str(source_tag or "qwen_tts"),
-            }
+                media_type = "audio/wav" if _format in ["wav", "wave"] else "application/octet-stream"
+                headers = {
+                    "X-Sample-Rate": str(sample_rate),
+                    "X-Channels": str(channels),
+                    "X-Sample-Width": str(sample_width),
+                    "X-PCM-Format": "s16le",
+                    "X-Qwen-Voice": str(used_voice or ""),
+                    "X-Qwen-Source": str(source_tag or "qwen_tts"),
+                }
 
-            async def generator():
-                try:
-                    if _format in ["wav", "wave"]:
-                        yield _wave_header_chunk(channels=channels, sample_width=sample_width, sample_rate=sample_rate)
-                    while True:
-                        if await request.is_disconnected():
-                            break
-                        data_chunk = wav_reader.readframes(frames_per_chunk)
-                        if not data_chunk:
-                            break
-                        yield data_chunk
-                finally:
+                async def generator():
                     try:
-                        wav_reader.close()
-                    except Exception:
-                        pass
+                        if _format in ["wav", "wave"]:
+                            yield _wave_header_chunk(channels=channels, sample_width=sample_width, sample_rate=sample_rate)
+                        while True:
+                            if await request.is_disconnected():
+                                break
+                            data_chunk = wav_reader.readframes(frames_per_chunk)
+                            if not data_chunk:
+                                break
+                            yield data_chunk
+                    finally:
+                        try:
+                            wav_reader.close()
+                        except Exception:
+                            pass
 
-            return StreamingResponse(generator(), media_type=media_type, headers=headers)
+                return StreamingResponse(generator(), media_type=media_type, headers=headers)
+            except HTTPException:
+                raise
+            except Exception as qe:
+                logger.warning(f"[synthesize/stream] Qwen基础音色直连失败(禁止回退): voice_id={voice_id}, err={qe}")
+                raise HTTPException(status_code=503, detail="Qwen基础音色服务暂不可用，请稍后重试")
 
         ref_audio_path = profile.get("ref_audio_path")
         ref_text = profile.get("ref_text")
@@ -7700,7 +10565,24 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                 f"dataset_scan_enabled={dataset_scan_enabled}"
             )
 
+    if pre_ref_risk_tier in ("risky", "strict") and (not _coerce_bool_param(data.get("hq_user_voice_keep_aux_refs"), False)):
+        effective_max_aux_refs = 0
+
     text_for_ref_match = sanitize_text(text)
+    short_units_for_ref = _count_text_units(text_for_ref_match)
+    if (
+        pre_ref_risk_tier in ("risky", "strict")
+        and short_units_for_ref <= 40
+        and _coerce_bool_param(data.get("hq_user_voice_short_ref_widen"), True)
+    ):
+        widened_refs = max(6, int(effective_max_refs or 0))
+        if widened_refs != effective_max_refs:
+            logger.info(
+                f"[ref_guard] risky/strict 短句扩参考: voice_id={voice_id}, "
+                f"max_refs {effective_max_refs}->{widened_refs}, text_units={short_units_for_ref}"
+            )
+            effective_max_refs = widened_refs
+
     ref_bundle = _resolve_reference_bundle(
         ref_audio_path=ref_audio_path,
         ref_text=ref_text,
@@ -7712,7 +10594,8 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
         prompt_max_chars=int(data.get("prompt_max_chars", 40)),
         dataset_scan_enabled=dataset_scan_enabled,
         prefer_primary_sentence_text=bool(profile_ref_guard),
-        prefer_target_primary_sample=bool(profile_ref_guard) and pre_ref_risk_tier in ("risky", "strict"),
+        prefer_target_primary_sample=_coerce_bool_param(data.get("hq_user_voice_prefer_target_primary_sample"), False),
+        risk_tier=pre_ref_risk_tier,
     )
     ref_audio_path = ref_bundle.get("primary_ref_audio")
     aux_ref_audio_paths = ref_bundle.get("aux_ref_audio_paths") or []
@@ -7844,8 +10727,17 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                     f"tier={voice_policy.get('tier')}, reasons={voice_policy.get('reasons')}, "
                     f"overrides={list((voice_policy.get('applied_overrides') or {}).keys())}"
                 )
+        if is_user_trained_voice and _coerce_bool_param(runtime_data.get("hq_user_voice_generic_retry"), False):
+            logger.info(f"[synthesize/stream] user_trained 启用通用解码重试: voice_id={voice_id}, tier={voice_policy.get('tier')}")
+            is_user_trained_voice = False
 
-        if is_user_trained_voice and voice_policy.get("tier") in ("risky", "strict") and len(segments) < 2:
+        if is_user_trained_voice and (
+                voice_policy.get("tier") == "strict"
+                or (
+                    voice_policy.get("tier") == "risky"
+                    and _coerce_bool_param(runtime_data.get("hq_user_voice_force_micro_segments"), False)
+                )
+            ) and len(segments) < 2:
             try:
                 forced_max_len = int(runtime_data.get("max_text_len", 24 if voice_policy.get("tier") == "strict" else 28))
             except Exception:
@@ -7942,12 +10834,10 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                     is_user_trained_voice=is_user_trained_voice,
                     risk_tier=voice_policy.get("tier"),
                 )
-                if (
-                    is_user_trained_voice
-                    and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict")
-                    and _coerce_bool_param(runtime_data.get("hq_user_voice_relax_max_sec"), True)
-                ):
-                    target_max_sec = 0
+                if is_user_trained_voice and str(voice_policy.get("tier") or "").strip().lower() in ("risky", "strict"):
+                    relax_max_sec = _coerce_bool_param(runtime_data.get("hq_user_voice_relax_max_sec"), False)
+                    if relax_max_sec and (not _coerce_bool_param(runtime_data.get("hq_user_voice_allow_hard_max_sec"), False)):
+                        target_max_sec = 0
                 sec_override_applied = False
                 sec_override_old = None
                 sec_override_new = None
@@ -8002,14 +10892,27 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
             effective_primary_profile = dict(primary_profile)
             hint_source = ""
             if is_user_trained_voice and voice_id:
+
+                tier_hint = str(voice_policy.get("tier") or "normal").strip().lower()
+
+                allow_cache_hint = _coerce_bool_param(runtime_data.get("hq_user_voice_allow_cache_hint"), tier_hint == "normal")
+
                 cached_profile = _get_cached_voice_gen_profile(voice_id, primary_profile)
-                if cached_profile:
+
+                if cached_profile and allow_cache_hint:
+
                     effective_primary_profile = _clamp_cached_user_voice_profile(cached_profile, primary_profile, cache_mode=voice_policy.get("cache_mode", "speed"))
+
                     hint_source = "cache"
+
                 elif _coerce_bool_param(runtime_data.get("hq_user_voice_bootstrap"), True):
+
                     boot_profile = _build_recent_user_voice_bootstrap_profile(primary_profile, profile)
+
                     if boot_profile != primary_profile:
+
                         effective_primary_profile = boot_profile
+
                         hint_source = "recent_voice_bootstrap"
             if hint_source:
                 logger.info(f"[synthesize/stream] user_trained 使用参数提示: voice_id={voice_id}, source={hint_source}, profile={effective_primary_profile}")
@@ -8024,6 +10927,51 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
             except StopIteration:
                 raise HTTPException(status_code=500, detail="推理失败：生成器未返回音频数据")
             best_profile = dict(effective_primary_profile)
+
+            tier_l = str(voice_policy.get("tier") or "").strip().lower()
+            main_asr_guard_enabled = (
+                is_user_trained_voice
+                and tier_l in ("risky", "strict")
+                and _coerce_bool_param(runtime_data.get("hq_user_voice_main_asr_guard"), True)
+            )
+            try:
+                main_asr_timeout_sec = max(8.0, min(45.0, float(runtime_data.get("hq_user_voice_main_asr_timeout_sec", 18.0))))
+            except Exception:
+                main_asr_timeout_sec = 18.0
+            try:
+                main_asr_accept = float(runtime_data.get("hq_user_voice_main_asr_accept", 0.64 if tier_l == "strict" else 0.56))
+            except Exception:
+                main_asr_accept = 0.64 if tier_l == "strict" else 0.56
+            main_asr_accept = max(0.25, min(0.95, main_asr_accept))
+            try:
+                main_asr_rescue = float(runtime_data.get("hq_user_voice_main_asr_rescue", 0.52 if tier_l == "strict" else 0.45))
+            except Exception:
+                main_asr_rescue = 0.52 if tier_l == "strict" else 0.45
+            main_asr_rescue = max(0.20, min(main_asr_accept, main_asr_rescue))
+            try:
+                main_asr_margin = float(runtime_data.get("hq_user_voice_main_asr_margin", 0.03))
+            except Exception:
+                main_asr_margin = 0.03
+            main_asr_margin = max(0.0, min(0.20, main_asr_margin))
+            try:
+                main_asr_max_candidates = int(runtime_data.get("hq_user_voice_main_asr_max_candidates", 2))
+            except Exception:
+                main_asr_max_candidates = 2
+            main_asr_max_candidates = max(1, min(5, main_asr_max_candidates))
+            main_asr_scored = {"count": 0}
+
+            def _score_stream_candidate(audio_bytes: bytes, attempt_tag: str) -> float:
+                if not main_asr_guard_enabled:
+                    return -1.0
+                if main_asr_scored["count"] >= main_asr_max_candidates:
+                    return -1.0
+                main_asr_scored["count"] += 1
+                asr_score = _score_generated_audio_with_readalong(audio_bytes, text_final, timeout_sec=main_asr_timeout_sec)
+                if debug_id:
+                    _debug_event(debug_id, "synthesize.main_asr.score", attempt=attempt_tag, asr_score=asr_score)
+                return asr_score
+
+            best_asr_score = _score_stream_candidate(audio_bytes_wav, "base")
 
             if is_user_trained_voice:
                 seg_units = _count_text_units(text_final)
@@ -8046,8 +10994,9 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                         tolerance=over_tol,
                     )
                     is_low_energy_initial = _is_low_energy_generated_audio(text_final, audio_bytes_wav)
-                    if is_over_initial and (not is_under_initial):
-                        if _coerce_bool_param(runtime_data.get("hq_user_voice_over_retry"), False):
+                    is_severe_low_energy_initial = _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0)
+                    if is_over_initial and (not is_under_initial) and (not is_low_energy_initial) and (not is_severe_low_energy_initial):
+                        if _coerce_bool_param(runtime_data.get("hq_user_voice_over_retry"), True):
                             retry_profile = {
                                 "top_k": max(16, top_k_base),
                                 "top_p": min(0.86, max(0.80, top_p_base)),
@@ -8058,7 +11007,7 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                             }
                         else:
                             retry_profile = None
-                            logger.info(f"[synthesize/stream] user_trained over-generated: skip retry for speed, voice_id={voice_id}")
+                            logger.info(f"[synthesize/stream] user_trained over-generated: over_retry=false, voice_id={voice_id}")
                     elif is_under_initial:
                         retry_profile = {
                             "top_k": max(18, top_k_base),
@@ -8068,15 +11017,20 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                             "speed": min(0.97, speed_base),
                             "sample_steps": max(34, sample_steps_base),
                         }
-                    elif is_low_energy_initial:
-                        retry_profile = {
-                            "top_k": max(17, top_k_base),
-                            "top_p": max(0.84, top_p_base),
-                            "temperature": min(0.38, max(0.30, temperature_base)),
-                            "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
-                            "speed": max(0.99, speed_base),
-                            "sample_steps": max(30, min(36, sample_steps_base + 2)),
-                        }
+                    elif is_low_energy_initial or is_severe_low_energy_initial:
+                        allow_low_energy_retry = is_severe_low_energy_initial or _coerce_bool_param(runtime_data.get("hq_user_voice_retry_low_energy"), False)
+                        if allow_low_energy_retry:
+                            retry_profile = {
+                                "top_k": max(17, top_k_base),
+                                "top_p": max(0.84, top_p_base),
+                                "temperature": min(0.38, max(0.30, temperature_base)),
+                                "repetition_penalty": min(1.22, max(1.14, repetition_penalty_base)),
+                                "speed": max(0.99, speed_base),
+                                "sample_steps": max(30, min(36, sample_steps_base + 2)),
+                            }
+                        else:
+                            logger.info(f"[synthesize/stream] user_trained low-energy: skip retry and rely on final gain, voice_id={voice_id}")
+                            retry_profile = None
                     else:
                         retry_profile = {
                             "top_k": max(17, top_k_base),
@@ -8090,21 +11044,261 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
                         try:
                             retry_audio = _stream_gen_once(retry_profile, "retry1")
                             retry_score = _duration_match_score(text_final, retry_audio, speed=retry_profile["speed"])
-                            if retry_score < best_score:
+                            retry_asr_score = _score_stream_candidate(retry_audio, "retry1")
+                            if _is_better_candidate_by_recognition(
+                                best_asr_score,
+                                best_score,
+                                retry_asr_score,
+                                retry_score,
+                                asr_margin=main_asr_margin,
+                            ):
                                 best_audio_bytes = retry_audio
                                 best_score = retry_score
+                                best_asr_score = retry_asr_score
                                 best_profile = dict(retry_profile)
-                            if not _is_abnormal_generated_audio(text_final, retry_audio, speed=retry_profile["speed"], under_tolerance=under_tol, over_tolerance=over_tol):
-                                logger.info("[synthesize/stream] user_trained 质量重试通过")
-                                best_audio_bytes = retry_audio
-                                best_profile = dict(retry_profile)
+                            retry_is_abnormal = _is_abnormal_generated_audio(
+                                text_final,
+                                retry_audio,
+                                speed=retry_profile["speed"],
+                                under_tolerance=under_tol,
+                                over_tolerance=over_tol,
+                            )
+                            if not retry_is_abnormal:
+                                if (not main_asr_guard_enabled) or (best_asr_score < 0.0) or (best_asr_score >= main_asr_accept):
+                                    logger.info("[synthesize/stream] user_trained 质量重试通过")
+                                else:
+                                    logger.warning("[synthesize/stream] user_trained 重试后时长正常但识别分仍偏低，继续保留最佳候选")
                             else:
-                                logger.warning("[synthesize/stream] user_trained 质量重试后仍异常，返回更优时长版本")
+                                logger.warning("[synthesize/stream] user_trained 质量重试后仍异常，返回最佳候选")
+                                if is_over_initial and (not is_under_initial):
+                                    aggressive_profile = {
+                                        "top_k": max(14, top_k_base - 1),
+                                        "top_p": min(0.80, max(0.72, top_p_base)),
+                                        "temperature": min(0.32, max(0.24, temperature_base)),
+                                        "repetition_penalty": min(1.28, max(1.20, repetition_penalty_base)),
+                                        "speed": max(1.24, speed_base),
+                                        "sample_steps": max(18, min(24, sample_steps_base)),
+                                    }
+                                    try:
+                                        retry2_audio = _stream_gen_once(aggressive_profile, "retry2")
+                                        retry2_score = _duration_match_score(text_final, retry2_audio, speed=aggressive_profile["speed"])
+                                        retry2_asr_score = _score_stream_candidate(retry2_audio, "retry2")
+                                        retry2_is_abnormal = _is_abnormal_generated_audio(
+                                            text_final,
+                                            retry2_audio,
+                                            speed=aggressive_profile["speed"],
+                                            under_tolerance=under_tol,
+                                            over_tolerance=over_tol,
+                                        )
+                                        if _is_better_candidate_by_recognition(
+                                            best_asr_score,
+                                            best_score,
+                                            retry2_asr_score,
+                                            retry2_score,
+                                            asr_margin=main_asr_margin,
+                                        ) or ((not retry2_is_abnormal) and retry2_score < best_score):
+                                            best_audio_bytes = retry2_audio
+                                            best_score = retry2_score
+                                            best_asr_score = retry2_asr_score
+                                            best_profile = dict(aggressive_profile)
+                                        if not retry2_is_abnormal:
+                                            logger.info("[synthesize/stream] user_trained over 二次重试通过")
+                                        else:
+                                            logger.warning("[synthesize/stream] user_trained over 二次重试后仍偏长")
+                                    except StopIteration:
+                                        logger.warning("[synthesize/stream] user_trained over 二次重试无音频返回")
+                                elif is_under_initial:
+                                    conservative_profile = {
+                                        "top_k": max(20, top_k_base),
+                                        "top_p": max(0.90, top_p_base),
+                                        "temperature": min(0.34, max(0.26, temperature_base)),
+                                        "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                                        "speed": min(0.92, speed_base),
+                                        "sample_steps": max(40, sample_steps_base + 6),
+                                    }
+                                    try:
+                                        retry2_audio = _stream_gen_once(conservative_profile, "retry2")
+                                        retry2_score = _duration_match_score(text_final, retry2_audio, speed=conservative_profile["speed"])
+                                        retry2_asr_score = _score_stream_candidate(retry2_audio, "retry2")
+                                        retry2_is_abnormal = _is_abnormal_generated_audio(
+                                            text_final,
+                                            retry2_audio,
+                                            speed=conservative_profile["speed"],
+                                            under_tolerance=under_tol,
+                                            over_tolerance=over_tol,
+                                        )
+                                        if _is_better_candidate_by_recognition(
+                                            best_asr_score,
+                                            best_score,
+                                            retry2_asr_score,
+                                            retry2_score,
+                                            asr_margin=main_asr_margin,
+                                        ) or ((not retry2_is_abnormal) and retry2_score < best_score):
+                                            best_audio_bytes = retry2_audio
+                                            best_score = retry2_score
+                                            best_asr_score = retry2_asr_score
+                                            best_profile = dict(conservative_profile)
+                                        if not retry2_is_abnormal:
+                                            logger.info("[synthesize/stream] user_trained under 二次重试通过")
+                                        else:
+                                            logger.warning("[synthesize/stream] user_trained under 二次重试后仍异常")
+                                    except StopIteration:
+                                        logger.warning("[synthesize/stream] user_trained under 二次重试无音频返回")
                         except StopIteration:
                             logger.warning("[synthesize/stream] user_trained 质量重试无音频返回，沿用基础结果")
 
+                    need_rescue_by_asr = main_asr_guard_enabled and best_asr_score >= 0.0 and best_asr_score < main_asr_rescue
+                    if need_rescue_by_asr:
+                        rescue_profile = {
+                            "top_k": max(20, top_k_base),
+                            "top_p": max(0.90, top_p_base),
+                            "temperature": min(0.32, max(0.26, temperature_base)),
+                            "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                            "speed": min(0.97, speed_base),
+                            "sample_steps": max(38, sample_steps_base + 6),
+                        }
+                        try:
+                            rescue_audio = _stream_gen_once(rescue_profile, "rescue")
+                            rescue_score = _duration_match_score(text_final, rescue_audio, speed=rescue_profile["speed"])
+                            rescue_asr_score = _score_stream_candidate(rescue_audio, "rescue")
+                            if _is_better_candidate_by_recognition(
+                                best_asr_score,
+                                best_score,
+                                rescue_asr_score,
+                                rescue_score,
+                                asr_margin=main_asr_margin,
+                            ):
+                                logger.info("[synthesize/stream] user_trained ASR兜底重试通过")
+                                best_audio_bytes = rescue_audio
+                                best_score = rescue_score
+                                best_asr_score = rescue_asr_score
+                                best_profile = dict(rescue_profile)
+                        except StopIteration:
+                            logger.warning("[synthesize/stream] user_trained ASR兜底重试无音频返回")
+
+                    final_under_tol = max(0.86, under_tol)
+                    if _is_under_generated_audio(
+                        text_final,
+                        best_audio_bytes,
+                        speed=float(best_profile.get("speed", speed_base)),
+                        tolerance=final_under_tol,
+                    ):
+                        best_info = _try_get_wav_info(best_audio_bytes)
+                        best_dur = float((best_info or {}).get("duration_sec") or 0.0)
+                        est_min = _estimate_min_duration_sec(
+                            text_final,
+                            speed=float(best_profile.get("speed", speed_base)),
+                        )
+                        severe_under = best_dur < max(1.0, est_min * 0.82)
+                        try:
+                            under_reroll_max = int(runtime_data.get("hq_user_voice_under_reroll_max", 2))
+                        except Exception:
+                            under_reroll_max = 2
+                        under_reroll_max = max(1, min(3, under_reroll_max + (1 if severe_under else 0)))
+                        under_reroll_profiles = [
+                            {
+                                "top_k": max(20, top_k_base),
+                                "top_p": max(0.90, top_p_base),
+                                "temperature": min(0.34, max(0.24, temperature_base)),
+                                "repetition_penalty": min(1.24, max(1.16, repetition_penalty_base)),
+                                "speed": min(0.92, speed_base),
+                                "sample_steps": max(42, sample_steps_base + 8),
+                            },
+                            {
+                                "top_k": max(22, top_k_base),
+                                "top_p": max(0.92, top_p_base),
+                                "temperature": min(0.32, max(0.22, temperature_base)),
+                                "repetition_penalty": min(1.26, max(1.18, repetition_penalty_base)),
+                                "speed": min(0.90, speed_base),
+                                "sample_steps": max(46, sample_steps_base + 10),
+                            },
+                            {
+                                "top_k": max(24, top_k_base),
+                                "top_p": max(0.93, top_p_base),
+                                "temperature": min(0.30, max(0.20, temperature_base)),
+                                "repetition_penalty": min(1.28, max(1.20, repetition_penalty_base)),
+                                "speed": min(0.88, speed_base),
+                                "sample_steps": max(50, sample_steps_base + 12),
+                            },
+                        ]
+                        for rr_idx in range(under_reroll_max):
+                            rr_base = under_reroll_profiles[rr_idx % len(under_reroll_profiles)]
+                            rr_profile = dict(rr_base)
+                            if rr_idx >= len(under_reroll_profiles):
+                                rr_profile["sample_steps"] = int(rr_profile["sample_steps"]) + 2
+                            if rr_idx % 2 == 1:
+                                rr_profile["temperature"] = min(0.40, max(0.20, float(rr_profile["temperature"]) + 0.01))
+                            if rr_idx % 3 == 2:
+                                rr_profile["top_p"] = max(0.82, min(0.94, float(rr_profile["top_p"]) - 0.01))
+                            rr_tag = f"under_reroll{rr_idx + 1}"
+                            try:
+                                rr_audio = _stream_gen_once(rr_profile, rr_tag)
+                            except StopIteration:
+                                continue
+                            rr_score = _duration_match_score(
+                                text_final,
+                                rr_audio,
+                                speed=float(rr_profile.get("speed", speed_base)),
+                            )
+                            rr_asr_score = _score_stream_candidate(rr_audio, rr_tag)
+                            rr_info = _try_get_wav_info(rr_audio)
+                            rr_dur = float((rr_info or {}).get("duration_sec") or 0.0)
+                            rr_under = _is_under_generated_audio(
+                                text_final,
+                                rr_audio,
+                                speed=float(rr_profile.get("speed", speed_base)),
+                                tolerance=final_under_tol,
+                            )
+                            pick_by_asr = _is_better_candidate_by_recognition(
+                                best_asr_score,
+                                best_score,
+                                rr_asr_score,
+                                rr_score,
+                                asr_margin=main_asr_margin,
+                            )
+                            if (
+                                pick_by_asr
+                                or ((not rr_under) and rr_score <= (best_score + 0.50))
+                                or (rr_dur > best_dur + 0.20)
+                                or (rr_score < best_score - 0.05)
+                            ):
+                                src_dur = best_dur
+                                best_audio_bytes = rr_audio
+                                best_score = rr_score
+                                if rr_asr_score >= 0.0:
+                                    best_asr_score = rr_asr_score
+                                best_profile = dict(rr_profile)
+                                best_dur = rr_dur
+                                logger.info(
+                                    f"[synthesize/stream] under 多轮重生替换: attempt={rr_tag}, "
+                                    f"dur={src_dur:.2f}->{rr_dur:.2f}, fixed={(not rr_under)}"
+                                )
+                                if not rr_under:
+                                    break
+
                     audio_bytes_wav = best_audio_bytes
-                    if str(voice_policy.get("tier") or "").strip().lower() != "risky":
+                    tier_l_for_trim = str(voice_policy.get("tier") or "").strip().lower()
+                    allow_short_risky_trim = (
+                        tier_l_for_trim == "risky"
+                        and _count_text_units(text_final) <= 40
+                        and _coerce_bool_param(runtime_data.get("hq_user_voice_short_trim"), False)
+                    )
+                    allow_long_risky_trim = (
+                        tier_l_for_trim == "risky"
+                        and _count_text_units(text_final) >= 42
+                        and _coerce_bool_param(runtime_data.get("hq_user_voice_long_trim"), True)
+                    )
+                    risky_severe_trim = (
+                        tier_l_for_trim == "risky"
+                        and _coerce_bool_param(runtime_data.get("hq_user_voice_risky_severe_trim"), True)
+                        and _is_severely_over_generated_audio(
+                            text_final,
+                            audio_bytes_wav,
+                            speed=float(best_profile.get("speed", speed_base)),
+                            over_tolerance=over_tol,
+                        )
+                    )
+                    if tier_l_for_trim != "risky" or allow_short_risky_trim or allow_long_risky_trim or risky_severe_trim:
                         audio_bytes_wav, trim_meta = _trim_over_generated_audio_if_needed(
                             text_final,
                             audio_bytes_wav,
@@ -8147,13 +11341,66 @@ async def _synthesize_stream_impl(request: Request, data: dict, chunk_ms: int = 
         audio_buf.seek(0)
         audio_bytes_wav = audio_buf.read()
 
+    stream_pre_boost_noise_like = False
+    stream_pre_boost_low_energy = False
     if voice_id and (voice_id not in QWEN_BASE_VOICE_IDS):
-        audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(audio_bytes_wav)
-        if boost_meta.get("applied"):
-            logger.info(
-                f"[synthesize/stream] 低音量补偿已应用 voice_id={voice_id}: "
-                f"gain={boost_meta.get('gain'):.2f}, rms {boost_meta.get('rms_before'):.1f}->{boost_meta.get('rms_after'):.1f}"
+        stream_pre_boost_noise_like = bool(is_user_trained_voice and _is_noise_like_generated_audio(text_final, audio_bytes_wav))
+        stream_pre_boost_low_energy = bool(is_user_trained_voice and _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0))
+        if stream_pre_boost_noise_like or stream_pre_boost_low_energy:
+            boost_meta = {"applied": False, "reason": "skip_severe_guard_before_boost"}
+        else:
+            audio_bytes_wav, boost_meta = _boost_low_rms_wav_if_needed(
+                audio_bytes_wav,
+                trigger_rms=(110.0 if is_user_trained_voice else 180.0),
+                target_rms=(420.0 if is_user_trained_voice else 920.0),
+                max_gain=(12.0 if is_user_trained_voice else 26.0),
             )
+            if boost_meta.get("applied"):
+                logger.info(
+                    f"[synthesize/stream] 低音量补偿已应用 voice_id={voice_id}: "
+                    f"gain={boost_meta.get('gain'):.2f}, rms {boost_meta.get('rms_before'):.1f}->{boost_meta.get('rms_after'):.1f}"
+                )
+
+    if is_user_trained_voice and voice_id and (voice_id not in QWEN_BASE_VOICE_IDS):
+        stream_noise_like = bool(stream_pre_boost_noise_like or _is_noise_like_generated_audio(text_final, audio_bytes_wav))
+        stream_low_energy = bool(stream_pre_boost_low_energy or _is_low_energy_generated_audio(text_final, audio_bytes_wav, min_rms=48.0))
+        if stream_noise_like or stream_low_energy:
+            logger.warning(
+                f"[synthesize/stream] 检测到疑似电流噪声/低能量，触发硬兜底: "
+                f"voice_id={voice_id}, noise_like={stream_noise_like}, low_energy={stream_low_energy}"
+            )
+            stream_hard_recovered = False
+            stream_hard_profile = {
+                "top_k": max(14, min(22, int(top_k_base))),
+                "top_p": max(0.60, min(0.78, float(top_p_base))),
+                "temperature": max(0.14, min(0.28, float(temperature_base))),
+                "repetition_penalty": max(1.20, min(1.35, float(repetition_penalty_base))),
+                "speed": max(0.95, min(1.12, float(speed_base))),
+                "sample_steps": max(40, int(sample_steps_base)),
+            }
+            try:
+                _clear_official_model_cache()
+                _ensure_official_model_loaded(official_change_gpt_sovits_weights, gpt_path_local, sovits_path_local)
+                rescue_audio = _stream_gen_once(stream_hard_profile, "hard_rescue_reload")
+                rescue_noise_like = _is_noise_like_generated_audio(text_final, rescue_audio)
+                rescue_low_energy = _is_low_energy_generated_audio(text_final, rescue_audio, min_rms=48.0)
+                if (not rescue_noise_like) and (not rescue_low_energy):
+                    audio_bytes_wav = rescue_audio
+                    best_profile = dict(stream_hard_profile)
+                    stream_hard_recovered = True
+                    logger.info(f"[synthesize/stream] 硬兜底重生成功: voice_id={voice_id}")
+                else:
+                    logger.warning(
+                        f"[synthesize/stream] 硬兜底重生仍异常: voice_id={voice_id}, "
+                        f"noise_like={rescue_noise_like}, low_energy={rescue_low_energy}"
+                    )
+            except Exception as hard_err:
+                logger.warning(f"[synthesize/stream] 硬兜底流程异常: {hard_err}")
+            if not stream_hard_recovered:
+                raise HTTPException(
+                    status_code=422,
+                    detail="该训练音色流式输出质量异常（疑似电流噪声/低能量），已阻断返回。请重新训练或更换音色。",
+                )
 
     # 解析 WAV，分块输出
     wav_reader = wave.open(BytesIO(audio_bytes_wav), "rb")
@@ -8311,6 +11558,8 @@ async def list_voices(authorization: Optional[str] = Header(None, alias="Authori
             )
             if not allow:
                 continue
+        if bool((info or {}).get("hide_in_voice_list")):
+            continue
         protected = _is_protected_voice(vid, info)
         can_rename = (info or {}).get("can_rename", True) is not False
         data.append(
@@ -8336,27 +11585,6 @@ async def list_voices(authorization: Optional[str] = Header(None, alias="Authori
         f"返回 {len(data)} 个模型（库内共 {len(VOICE_LIBRARY)}）"
     )
     return JSONResponse({"code": 0, "voices": data}, status_code=200)
-
-
-@app.get("/debug/voice_library")
-async def debug_voice_library():
-    """用于排查部署环境实际读取的 voice_library.json 路径与当前内存库内容。"""
-    try:
-        load_voice_library_from_file()
-    except Exception:
-        pass
-    try:
-        return JSONResponse(
-            {
-                "code": 0,
-                "voice_library_file": VOICE_LIBRARY_FILE,
-                "count": len(VOICE_LIBRARY),
-                "voice_ids": list(VOICE_LIBRARY.keys()),
-            },
-            status_code=200,
-        )
-    except Exception as e:
-        return JSONResponse({"code": 500, "message": str(e)}, status_code=500)
 
 
 @app.post("/voices/rename")
@@ -8427,8 +11655,8 @@ async def list_history_models():
             "has_trained_model": True,
         }
 
-    # 2. 再从 train/user_datasets 目录中扫描所有已有数据集的用户ID/模型名
-    user_datasets_root = os.path.join(now_dir, "train", "user_datasets")
+    # 2. 再从 user_datasets 目录中扫描所有已有数据集的用户ID/模型名
+    user_datasets_root = os.path.join(now_dir, "user_datasets")
     if os.path.isdir(user_datasets_root):
         for entry in os.listdir(user_datasets_root):
             dataset_dir = os.path.join(user_datasets_root, entry)
@@ -8508,42 +11736,13 @@ async def use_voice(request: Request):
     """
     try:
         json_post_raw = await request.json()
-    except Exception as e:
-        logger.warning(f"[use_voice] 非法JSON请求: err={e}")
-        return JSONResponse({"code": 400, "message": "请求体必须为 JSON"}, status_code=400)
-
-    if not isinstance(json_post_raw, dict):
-        logger.warning(f"[use_voice] 请求体类型错误: type={type(json_post_raw).__name__}")
-        return JSONResponse({"code": 400, "message": "请求体必须为对象"}, status_code=400)
-
-    raw_voice_id = json_post_raw.get("voice_id")
-    voice_id = str(raw_voice_id or "").strip()
-    req_keys = sorted([str(k) for k in json_post_raw.keys()])
-
-    if not voice_id:
-        logger.warning(f"[use_voice] 缺少voice_id: keys={req_keys}, payload={json_post_raw}")
-        return JSONResponse({"code": 400, "message": "缺少参数: voice_id"}, status_code=400)
-
-    load_voice_library_from_file()
-    if voice_id not in VOICE_LIBRARY:
-        logger.warning(
-            f"[use_voice] 未找到voice_id: voice_id={voice_id}, "
-            f"keys={req_keys}, available={list(VOICE_LIBRARY.keys())[:12]}"
-        )
-        return JSONResponse({"code": 400, "message": f"未知的 voice_id: {voice_id}"}, status_code=400)
-
-    profile = VOICE_LIBRARY.get(voice_id) or {}
-    logger.info(
-        f"[use_voice] 请求切换: voice_id={voice_id}, "
-        f"name={profile.get('name')}, model_type={profile.get('model_type')}, provider={profile.get('provider')}"
-    )
-    resp = load_voice_profile(voice_id)
-    try:
-        code = getattr(resp, "status_code", None)
-        logger.info(f"[use_voice] 切换结果: voice_id={voice_id}, status_code={code}")
     except Exception:
-        pass
-    return resp
+        json_post_raw = {}
+
+    voice_id = str((json_post_raw or {}).get("voice_id") or "").strip()
+    if not voice_id:
+        return JSONResponse({"code": 400, "message": "缺少参数: voice_id"}, status_code=400)
+    return load_voice_profile(voice_id)
 
 
 @app.get("/set_model")
@@ -8769,8 +11968,25 @@ try:
         # uuid 和 os 已在文件顶部导入，无需重复导入
         
         MIN_TRAIN_SENTENCE_COUNT = max(1, int(os.getenv("WX_MIN_TRAIN_SENTENCE_COUNT", "5")))
-        MIN_TRAIN_AUDIO_SECONDS = float(os.getenv("WX_MIN_TRAIN_AUDIO_SECONDS", "4.0"))
+        WX_UPLOAD_MIN_RECORD_SECONDS = max(2.0, float(os.getenv("WX_UPLOAD_MIN_RECORD_SECONDS", "15.0")))
+        WX_ENFORCE_LONG_RECORDING = str(os.getenv("WX_ENFORCE_LONG_RECORDING", "1")).strip().lower() in ("1", "true", "yes", "on")
+        _default_min_sentence_seconds = 3.0
+        MIN_TRAIN_AUDIO_SECONDS = max(2.0, float(os.getenv("WX_MIN_TRAIN_AUDIO_SECONDS", str(_default_min_sentence_seconds))))
+        _default_min_total_seconds = WX_UPLOAD_MIN_RECORD_SECONDS if WX_ENFORCE_LONG_RECORDING else 0.0
+        MIN_TRAIN_TOTAL_AUDIO_SECONDS = max(0.0, float(os.getenv("WX_MIN_TRAIN_TOTAL_AUDIO_SECONDS", str(_default_min_total_seconds))))
         MIN_TRAIN_TEXT_MIN_CHARS = max(1, int(os.getenv("WX_MIN_TRAIN_TEXT_CHARS", "2")))
+
+        def _min_sentence_duration_by_text(text: str) -> float:
+            units = _count_text_units(sanitize_text(text or ""))
+            if units >= 30:
+                dyn_min = 4.5
+            elif units >= 20:
+                dyn_min = 3.8
+            elif units >= 12:
+                dyn_min = 3.2
+            else:
+                dyn_min = 2.8
+            return max(float(MIN_TRAIN_AUDIO_SECONDS), float(dyn_min))
 
         def _safe_wav_duration_seconds(audio_path: str) -> float:
             try:
@@ -8827,8 +12043,9 @@ try:
                     weak_pairs += 1
                     continue
 
+                min_audio_seconds = _min_sentence_duration_by_text(text_content)
                 audio_seconds = _safe_wav_duration_seconds(audio_path)
-                if audio_seconds < MIN_TRAIN_AUDIO_SECONDS:
+                if audio_seconds < min_audio_seconds:
                     weak_pairs += 1
                     continue
 
@@ -8836,17 +12053,238 @@ try:
                     "audio_path": audio_path,
                     "text_path": text_path,
                     "audio_seconds": audio_seconds,
+                    "min_audio_seconds": min_audio_seconds,
                 })
 
             valid_pairs.sort(key=lambda x: x["audio_path"])
             return valid_pairs, weak_pairs
 
+        def _sum_valid_audio_seconds(valid_pairs: list) -> float:
+            total = 0.0
+            for item in (valid_pairs or []):
+                try:
+                    total += float(item.get("audio_seconds") or 0.0)
+                except Exception:
+                    continue
+            return total
+
         def _build_train_min_sentence_message(valid_count: int, weak_pairs: int) -> str:
             extra = f"，另有{weak_pairs}句因时长/文本不达标未计入" if weak_pairs > 0 else ""
             return (
-                f"训练至少需要{MIN_TRAIN_SENTENCE_COUNT}句有效录音（每句>= {MIN_TRAIN_AUDIO_SECONDS:.1f}s）"
+                f"训练至少需要{MIN_TRAIN_SENTENCE_COUNT}句有效录音（按句长动态校验，且每句>= {MIN_TRAIN_AUDIO_SECONDS:.1f}s）"
                 f"，当前仅{valid_count}句{extra}。请继续补录后再训练。"
             )
+
+        def _build_train_min_total_audio_message(total_audio_seconds: float) -> str:
+            return (
+                f"有效录音总时长不足，至少需要{MIN_TRAIN_TOTAL_AUDIO_SECONDS:.1f}s，"
+                f"当前仅{total_audio_seconds:.1f}s。请继续补录后再训练。"
+            )
+
+        FIXED_TRAIN_SENTENCES = [
+            "很久很久以前，在森林深处有一座会发光的小木屋。",
+            "小熊兜兜决定去寻找传说中的魔法星星。",
+            "一只会说话的彩色蝴蝶飞到了他的面前。",
+            "他深吸一口气，小声说：今天一定会有好消息。",
+            "月光洒在树叶上，沙沙作响，像在为勇敢的孩子鼓掌。",
+            "清晨的第一缕阳光穿过窗帘，他微笑着说：新的一天开始啦。",
+        ]
+
+        def _sanitize_storage_name(value: str, default: str = "unknown_user") -> str:
+            s = re.sub(r"[^\w\-]+", "_", str(value or "").strip(), flags=re.UNICODE).strip("._")
+            return s or default
+
+        def _resolve_user_dataset_dir(user_id: str, model_version: str = "v2Pro") -> str:
+            """统一 user_datasets 路径：已注册用户按昵称目录，未注册统一到 unlogged；兼容旧路径优先。"""
+            uid = str(user_id or "").strip()
+            mv = str(model_version or "v2Pro").strip() or "v2Pro"
+            legacy_dir = os.path.join(DATASET_DIR, uid, mv)
+            if os.path.exists(legacy_dir):
+                return legacy_dir
+
+            display = ""
+            is_registered = False
+            try:
+                try:
+                    from modules.user_mgmt_backend import db as user_mgmt_db
+                except Exception:
+                    from user_mgmt_backend import db as user_mgmt_db
+                user_row = user_mgmt_db.get_user_by_id(uid) or {}
+                if isinstance(user_row, dict) and user_row:
+                    is_registered = True
+                    for k in ("nickname", "parent_name", "baby_name"):
+                        v = str(user_row.get(k) or "").strip()
+                        if v:
+                            display = v
+                            break
+            except Exception:
+                is_registered = False
+
+            if is_registered:
+                folder = _sanitize_storage_name(display or uid, default=_sanitize_storage_name(uid, "unknown_user"))
+                return os.path.join(DATASET_DIR, folder, mv)
+            return os.path.join(DATASET_DIR, "unlogged", _sanitize_storage_name(uid, "unknown_user"), mv)
+
+        def _resolve_user_model_output_dir(user_id: str, task_id: str) -> str:
+            """统一 user_models 训练输出路径：未注册用户落到 unlogged；兼容旧路径优先。"""
+            uid = str(user_id or "").strip()
+            tid = str(task_id or "").strip()
+            legacy_out = os.path.join(TRAIN_OUTPUT_DIR, uid, tid)
+            if os.path.exists(legacy_out):
+                return legacy_out
+
+            display = ""
+            is_registered = False
+            try:
+                try:
+                    from modules.user_mgmt_backend import db as user_mgmt_db
+                except Exception:
+                    from user_mgmt_backend import db as user_mgmt_db
+                user_row = user_mgmt_db.get_user_by_id(uid) or {}
+                if isinstance(user_row, dict) and user_row:
+                    is_registered = True
+                    for k in ("nickname", "parent_name", "baby_name"):
+                        v = str(user_row.get(k) or "").strip()
+                        if v:
+                            display = v
+                            break
+            except Exception:
+                is_registered = False
+
+            if is_registered:
+                folder = _sanitize_storage_name(display or uid, default=_sanitize_storage_name(uid, "unknown_user"))
+                return os.path.join(TRAIN_OUTPUT_DIR, folder, tid)
+            return os.path.join(TRAIN_OUTPUT_DIR, "unlogged", _sanitize_storage_name(uid, "unknown_user"), tid)
+
+        def _resolve_sentence_text_for_upload(user_dataset_dir: str, sentence_idx: int, incoming_text: str) -> str:
+            txt = sanitize_text(str(incoming_text or "").strip())
+            if txt:
+                return txt
+            existing_text_path = os.path.join(user_dataset_dir, f"sentence_{sentence_idx}.txt")
+            if os.path.exists(existing_text_path):
+                try:
+                    with open(existing_text_path, "r", encoding="utf-8") as rf:
+                        t = sanitize_text(rf.read().strip())
+                    if t:
+                        return t
+                except Exception:
+                    pass
+            if 0 <= int(sentence_idx) < len(FIXED_TRAIN_SENTENCES):
+                return FIXED_TRAIN_SENTENCES[int(sentence_idx)]
+            return ""
+
+        def _upload_prestep1_dir(user_dataset_dir: str) -> str:
+            return os.path.join(user_dataset_dir, ".upload_prestep1")
+
+        def _run_upload_step1_prepare(user_id: str, model_version: str = "v2Pro"):
+            user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
+            if not os.path.exists(user_dataset_dir):
+                return
+            prep_dir = _upload_prestep1_dir(user_dataset_dir)
+            os.makedirs(prep_dir, exist_ok=True)
+            try:
+                dataset_list_path = train_api_module._create_dataset_list(user_dataset_dir, prep_dir, "中文")
+            except Exception as e:
+                logger.warning(f"[upload-prep] create_dataset_list failed: user={user_id}, err={e}")
+                return
+
+            env = os.environ.copy()
+            env.update({
+                "inp_text": str(dataset_list_path),
+                "inp_wav_dir": "",
+                "exp_name": f"upload_prestep1_{user_id}",
+                "opt_dir": str(prep_dir),
+                "i_part": "0",
+                "all_parts": "1",
+                "is_half": str(getattr(global_config, "is_half", True) if global_config else True),
+                "version": str(model_version),
+                "bert_pretrained_dir": str(resolve_path(getattr(global_config, "bert_path", "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large") if global_config else "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large")),
+            })
+            step1_gpu = str(os.environ.get("TRAIN_PREP_STEP1_CUDA_VISIBLE_DEVICES", "") or os.environ.get("TRAIN_PREP_CUDA_VISIBLE_DEVICES", "")).strip()
+            if "," in step1_gpu:
+                step1_gpu = step1_gpu.split(",")[0].strip()
+            if step1_gpu:
+                env["CUDA_VISIBLE_DEVICES"] = step1_gpu
+                env["_CUDA_VISIBLE_DEVICES"] = step1_gpu
+
+            py_exec = str(getattr(global_config, "python_exec", sys.executable or "python"))
+            base_dir_path = Path(BASE_DIR)
+            cmd = [py_exec, "-s", str(base_dir_path / "GPT_SoVITS" / "prepare_datasets" / "1-get-text.py")]
+            try:
+                p = subprocess.run(cmd, cwd=str(base_dir_path), env=env, capture_output=True, text=True, timeout=600)
+                if p.returncode != 0:
+                    logger.warning(f"[upload-prep] step1 failed: user={user_id}, rc={p.returncode}")
+                    return
+                try:
+                    merge_fn = getattr(train_api_module, "_merge_prepare_shards", None)
+                    if callable(merge_fn):
+                        merge_fn(Path(prep_dir), "step1")
+                except Exception:
+                    pass
+                out_main = os.path.join(prep_dir, "2-name2text.txt")
+                out_shard = os.path.join(prep_dir, "2-name2text-0.txt")
+                if not (os.path.exists(out_main) or os.path.exists(out_shard)):
+                    logger.warning(f"[upload-prep] step1 output missing: user={user_id}")
+                    return
+                logger.info(f"[upload-prep] step1 ready: user={user_id}, dir={prep_dir}")
+            except Exception as e:
+                logger.warning(f"[upload-prep] step1 exception: user={user_id}, err={e}")
+
+        def _schedule_upload_step1_prepare(user_id: str, model_version: str = "v2Pro"):
+            if str(os.environ.get("WX_UPLOAD_AUTO_STEP1_PREP", "1")).strip().lower() not in ("1", "true", "yes", "on"):
+                return
+            debounce_sec = float(os.environ.get("WX_UPLOAD_STEP1_PREP_DEBOUNCE_SEC", "4.0") or "4.0")
+            key = f"{user_id}:{model_version}"
+
+            def _job():
+                with UPLOAD_PREP_LOCK:
+                    UPLOAD_PREP_TIMERS.pop(key, None)
+                    if key in UPLOAD_PREP_RUNNING:
+                        return
+                    UPLOAD_PREP_RUNNING.add(key)
+                try:
+                    _run_upload_step1_prepare(user_id=user_id, model_version=model_version)
+                finally:
+                    with UPLOAD_PREP_LOCK:
+                        UPLOAD_PREP_RUNNING.discard(key)
+
+            with UPLOAD_PREP_LOCK:
+                old = UPLOAD_PREP_TIMERS.get(key)
+                if old is not None:
+                    try:
+                        old.cancel()
+                    except Exception:
+                        pass
+                t = threading.Timer(max(0.5, debounce_sec), _job)
+                t.daemon = True
+                UPLOAD_PREP_TIMERS[key] = t
+                t.start()
+
+        def _inject_upload_step1_outputs(user_dataset_dir: str, output_path: str, log_path: str):
+            prep_dir = _upload_prestep1_dir(user_dataset_dir)
+            if not os.path.exists(prep_dir):
+                return
+            exp_dir = os.path.join(output_path, "processed")
+            os.makedirs(exp_dir, exist_ok=True)
+            copied = 0
+            for name in ("2-name2text.txt", "2-name2text-0.txt"):
+                src = os.path.join(prep_dir, name)
+                if os.path.exists(src):
+                    shutil.copy2(src, os.path.join(exp_dir, name))
+                    copied += 1
+            bert_dir = os.path.join(prep_dir, "3-bert")
+            if os.path.isdir(bert_dir):
+                dst_bert = os.path.join(exp_dir, "3-bert")
+                if os.path.exists(dst_bert):
+                    shutil.rmtree(dst_bert, ignore_errors=True)
+                shutil.copytree(bert_dir, dst_bert)
+                copied += 1
+            if copied > 0:
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(f"[上传期预处理] 已注入 step1 产物，copied_items={copied}, source={prep_dir}\\n")
+                except Exception:
+                    pass
 
         @app.post("/upload_dataset")
         async def upload_dataset(
@@ -8859,7 +12297,7 @@ try:
                 return {"code": 400, "message": "只支持 v2Pro 版本"}
             
             # 创建用户数据集目录
-            user_dataset_dir = os.path.join(DATASET_DIR, user_id, model_version)
+            user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
             os.makedirs(user_dataset_dir, exist_ok=True)
 
             # 保存上传的文件
@@ -8907,7 +12345,7 @@ try:
                 
                 # 创建用户数据集目录
                 model_version = "v2Pro"
-                user_dataset_dir = os.path.join(DATASET_DIR, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 os.makedirs(user_dataset_dir, exist_ok=True)
                 
                 # 生成文件名（使用任务ID避免冲突）
@@ -8958,9 +12396,10 @@ try:
         async def upload_sentence(
             user_id: str = Form(...),
             sentence_index: str = Form(...),
-            sentence_text: str = Form(...),
+            sentence_text: str = Form(""),
             language: str = Form("中文"),
-            audio: UploadFile = File(...)
+            audio: UploadFile = File(...),
+            background_tasks: BackgroundTasks = BackgroundTasks(),
         ):
             """接收逐句的音频和文本，保存到用户数据集目录"""
             try:
@@ -8973,7 +12412,7 @@ try:
                 
                 # 创建用户数据集目录
                 model_version = "v2Pro"
-                user_dataset_dir = os.path.join(DATASET_DIR, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 os.makedirs(user_dataset_dir, exist_ok=True)
                 
                 # 生成文件名（格式：sentence_0.wav, sentence_0.txt）
@@ -9009,92 +12448,168 @@ try:
                 if os.path.exists(raw_audio_path):
                     os.remove(raw_audio_path)
                 
-                # ========== 自动音频预处理：HP5_only_main_vocal 提取主人声 ==========
+                # 仅保留转码后的 WAV，上传阶段不再做 HP5 主人声提取
                 final_audio_path = os.path.join(user_dataset_dir, audio_filename)
-                
-                if AUDIO_PREPROCESS_AVAILABLE:
-                    # 统一使用绝对路径，避免工作目录变化导致 exists 检测失败
-                    temp_wav_path = os.path.abspath(temp_wav_path)
-                    final_audio_path = os.path.abspath(final_audio_path)
-                    logger.info(f"[upload_sentence] 开始对音频进行预处理（HP5_only_main_vocal 提取主人声）: {temp_wav_path} -> {final_audio_path}")
-                    print(f"[upload_sentence] 开始对音频进行预处理（HP5_only_main_vocal 提取主人声）: {temp_wav_path} -> {final_audio_path}")
-                    
+                temp_wav_path = os.path.abspath(temp_wav_path)
+                final_audio_path = os.path.abspath(final_audio_path)
+                if os.path.exists(temp_wav_path):
                     try:
-                        if not os.path.exists(temp_wav_path):
-                            logger.warning(f"[upload_sentence] 预处理前发现 temp_wav_path 不存在: {temp_wav_path}")
-                        # 直接使用 HP5_only_main_vocal 预处理，输出主人声 wav
-                        preprocessed_path = preprocess_audio(
-                            temp_wav_path,
-                            final_audio_path,
-                            device="cuda",  # 可按需改为 "cpu"
-                            is_half=True,
-                        )
-                        
-                        if preprocessed_path and os.path.exists(preprocessed_path):
-                            # 验证预处理后的文件是否有效（检查文件大小和格式）
-                            file_size = os.path.getsize(preprocessed_path)
-                            if file_size > 0:
-                                logger.info(f"[upload_sentence] 音频预处理成功: {temp_wav_path} -> {final_audio_path} (大小: {file_size} bytes)")
-                                print(f"[upload_sentence] ✅ 音频预处理成功: {final_audio_path} (大小: {file_size} bytes)")
-                                
-                                # 确保最终文件存在且有效
-                                if os.path.exists(final_audio_path) and os.path.getsize(final_audio_path) > 0:
-                                    # 清理临时WAV文件
-                                    if os.path.exists(temp_wav_path) and temp_wav_path != final_audio_path:
-                                        try:
-                                            os.remove(temp_wav_path)
-                                        except:
-                                            pass
-                                else:
-                                    logger.error(f"[upload_sentence] 预处理后的文件无效: {final_audio_path}")
-                                    print(f"[upload_sentence] ❌ 预处理后的文件无效: {final_audio_path}")
-                                    # 如果预处理后的文件无效，尝试使用转码后的原始WAV文件
-                                    if os.path.exists(temp_wav_path) and os.path.getsize(temp_wav_path) > 0:
-                                        logger.warning(f"[upload_sentence] 使用转码后的原始WAV文件作为备选")
-                                        shutil.copy(temp_wav_path, final_audio_path)
-                                        os.remove(temp_wav_path)
-                                    else:
-                                        logger.error(f"[upload_sentence] 转码后的WAV文件也不存在或无效: {temp_wav_path}")
-                            else:
-                                logger.warning(f"[upload_sentence] 预处理后的文件大小为0: {preprocessed_path}")
-                                print(f"[upload_sentence] ⚠️ 预处理后的文件大小为0: {preprocessed_path}")
-                                # 预处理后的文件无效，使用转码后的WAV文件
-                                if os.path.exists(temp_wav_path) and os.path.getsize(temp_wav_path) > 0:
-                                    logger.warning(f"[upload_sentence] 使用转码后的原始WAV文件")
-                                    shutil.copy(temp_wav_path, final_audio_path)
-                                    os.remove(temp_wav_path)
-                                else:
-                                    logger.error(f"[upload_sentence] 转码后的WAV文件也不存在或无效: {temp_wav_path}")
-                        else:
-                            logger.warning(f"[upload_sentence] 音频预处理失败，使用转码后的原始WAV文件")
-                            print(f"[upload_sentence] ⚠️ 音频预处理失败，使用转码后的原始WAV文件")
-                            # 预处理失败，使用转码后的WAV文件
-                            if os.path.exists(temp_wav_path) and os.path.getsize(temp_wav_path) > 0:
-                                shutil.copy(temp_wav_path, final_audio_path)
-                                os.remove(temp_wav_path)
-                            else:
-                                logger.error(f"[upload_sentence] 转码后的WAV文件也不存在或无效: {temp_wav_path}")
+                        os.replace(temp_wav_path, final_audio_path)
+                        file_size = os.path.getsize(final_audio_path) if os.path.exists(final_audio_path) else 0
+                        logger.info(f"[upload_sentence] 音频转码成功并已入库: {final_audio_path} (大小: {file_size} bytes)")
+                        print(f"[upload_sentence] ✅ 音频转码成功并已入库: {final_audio_path} (大小: {file_size} bytes)")
                     except Exception as e:
-                        logger.error(f"[upload_sentence] 音频预处理异常: {str(e)}")
+                        logger.error(f"[upload_sentence] 音频入库失败: {str(e)}")
                         import traceback
                         logger.error(traceback.format_exc())
-                        print(f"[upload_sentence] ❌ 音频预处理异常: {str(e)}")
-                        # 预处理异常，使用转码后的WAV文件
-                        if os.path.exists(temp_wav_path):
-                            shutil.copy(temp_wav_path, final_audio_path)
-                            os.remove(temp_wav_path)
-                else:
-                    # 如果没有预处理模块，直接使用转码后的WAV文件
-                    logger.info(f"[upload_sentence] 音频预处理模块不可用，使用转码后的原始WAV文件")
-                    print(f"[upload_sentence] ⚠️ 音频预处理模块不可用，使用转码后的原始WAV文件")
-                    if os.path.exists(temp_wav_path):
-                        shutil.copy(temp_wav_path, final_audio_path)
-                        os.remove(temp_wav_path)
+                        return JSONResponse({
+                            "code": 400,
+                            "message": "音频转码后入库失败，请重试"
+                        }, status_code=400)
                 
                 # 保存文本文件
+                if not os.path.exists(final_audio_path):
+                    return JSONResponse({
+                        "code": 400,
+                        "message": "\u5f55\u97f3\u6587\u4ef6\u4e0d\u5b58\u5728\uff0c\u8bf7\u91cd\u65b0\u5f55\u5236"
+                    }, status_code=400)
+
+                with open(final_audio_path, "rb") as rf:
+                    final_audio_bytes = rf.read()
+
+                wav_info = _try_get_wav_info(final_audio_bytes)
+                duration_sec = float((wav_info or {}).get("duration_sec") or 0.0)
+                rms_val = float(_estimate_wav_rms(final_audio_bytes) or 0.0)
+                sentence_text = _resolve_sentence_text_for_upload(user_dataset_dir, sentence_idx, sentence_text)
+                if not sentence_text:
+                    return JSONResponse({
+                        "code": 400,
+                        "message": "句子文本为空且未命中固定句库，请补充 sentence_text"
+                    }, status_code=400)
+
+                sentence_units = _count_text_units(sanitize_text(sentence_text))
+                if sentence_units >= 30:
+                    min_duration_sec = 4.5
+                elif sentence_units >= 20:
+                    min_duration_sec = 3.8
+                elif sentence_units >= 12:
+                    min_duration_sec = 3.2
+                else:
+                    min_duration_sec = 2.8
+                min_duration_sec = max(min_duration_sec, float(MIN_TRAIN_AUDIO_SECONDS))
+                min_rms = 40.0 if sentence_units >= 18 else 32.0
+
+                too_short = duration_sec < min_duration_sec
+                too_quiet = rms_val < min_rms
+                if too_short or too_quiet:
+                    try:
+                        os.remove(final_audio_path)
+                    except Exception:
+                        pass
+                    reason = "\u5f55\u97f3\u65f6\u957f\u8fc7\u77ed" if too_short else "\u5f55\u97f3\u97f3\u91cf\u8fc7\u4f4e"
+                    logger.warning(
+                        f"[upload_sentence] \u97f3\u9891\u6821\u9a8c\u4e0d\u901a\u8fc7: user={user_id}, idx={sentence_idx}, "
+                        f"duration={duration_sec:.2f}s(min={min_duration_sec:.2f}), rms={rms_val:.1f}(min={min_rms:.1f}), units={sentence_units}"
+                    )
+                    return JSONResponse({
+                        "code": 400,
+                        "message": f"{reason}\uff0c\u8bf7\u91cd\u65b0\u5f55\u5236\uff08duration={duration_sec:.2f}s, min={min_duration_sec:.2f}s, rms={rms_val:.1f}\uff09"
+                    }, status_code=400)
+
                 text_path = os.path.join(user_dataset_dir, text_filename)
-                with open(text_path, "w", encoding="utf-8") as f:
-                    f.write(sentence_text)
+                old_text = ""
+                if os.path.exists(text_path):
+                    try:
+                        with open(text_path, "r", encoding="utf-8") as rf:
+                            old_text = rf.read()
+                    except Exception:
+                        old_text = ""
+                if old_text != sentence_text:
+                    with open(text_path, "w", encoding="utf-8") as f:
+                        f.write(sentence_text)
+
+                # 上传后异步音频提纯：尽量让用户无感（接口先返回，后台提纯）
+                # 标记文件：.purified_sentence_{idx}.ok / .purify_pending_sentence_{idx}.flag / .purify_failed_sentence_{idx}.txt
+                try:
+                    idx_tag = int(sentence_idx)
+                except Exception:
+                    idx_tag = -1
+
+                pending_flag = os.path.join(user_dataset_dir, f".purify_pending_sentence_{idx_tag}.flag")
+                ok_flag = os.path.join(user_dataset_dir, f".purified_sentence_{idx_tag}.ok")
+                fail_flag = os.path.join(user_dataset_dir, f".purify_failed_sentence_{idx_tag}.txt")
+
+                def _purify_inplace_job():
+                    try:
+                        if idx_tag < 0:
+                            return
+                        if (not _AUDIO_PURIFY_AVAILABLE) or (_purify_audio_file is None):
+                            return
+                        if not os.path.exists(final_audio_path):
+                            return
+                        # 写 pending
+                        try:
+                            with open(pending_flag, "w", encoding="utf-8") as pf:
+                                pf.write("1\n")
+                        except Exception:
+                            pass
+
+                        strategy = os.environ.get("TRAIN_AUDIO_PURIFY_STRATEGY", "deepfilternet2_wpe").strip()
+                        tmp_out = final_audio_path + ".purify_tmp.wav"
+                        # 只做去噪+去混响（net2/wpe），不做主人声分离
+                        _purify_audio_file(
+                            final_audio_path,
+                            tmp_out,
+                            enable_vocal_separation=False,
+                            vocal_model="HP5",
+                            enable_denoise=True,
+                            enable_dereverb=True,
+                            enable_deecho=False,
+                            verbose=False,
+                        )
+                        if os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0:
+                            os.replace(tmp_out, final_audio_path)
+                        else:
+                            try:
+                                if os.path.exists(tmp_out):
+                                    os.remove(tmp_out)
+                            except Exception:
+                                pass
+                            raise RuntimeError("purified tmp wav not generated")
+
+                        # 写 ok
+                        with open(ok_flag, "w", encoding="utf-8") as of:
+                            of.write(f"1\\nstrategy={strategy}\\n")
+                        # 清 pending/failed
+                        try:
+                            if os.path.exists(pending_flag):
+                                os.remove(pending_flag)
+                        except Exception:
+                            pass
+                        try:
+                            if os.path.exists(fail_flag):
+                                os.remove(fail_flag)
+                        except Exception:
+                            pass
+                        logger.info(f"[upload_sentence] 上传后提纯完成: idx={idx_tag} path={final_audio_path}")
+                    except Exception as e:
+                        try:
+                            with open(fail_flag, "w", encoding="utf-8") as ff:
+                                ff.write(str(e) + "\\n")
+                        except Exception:
+                            pass
+                        try:
+                            if os.path.exists(pending_flag):
+                                os.remove(pending_flag)
+                        except Exception:
+                            pass
+                        logger.warning(f"[upload_sentence] 上传后提纯失败(不中断): idx={idx_tag} err={e}")
+
+                # 仅在启用提纯时入队（默认启用），否则不额外耗时
+                upload_purify_enabled = _AUDIO_PURIFY_AVAILABLE and str(os.environ.get("WX_UPLOAD_AUTO_PURIFY", "1")).strip().lower() in ("1", "true", "yes", "on")
+                if upload_purify_enabled and idx_tag >= 0:
+                    background_tasks.add_task(_purify_inplace_job)
+                _schedule_upload_step1_prepare(user_id=user_id, model_version=model_version)
                 
                 logger.info(f"[upload_sentence] 用户 {user_id} 上传句子 {sentence_idx}: {audio_filename}, {text_filename}")
                 print(f"[upload_sentence] ✅ 用户 {user_id} 上传句子 {sentence_idx} 完成: {audio_filename}, {text_filename}")
@@ -9104,7 +12619,9 @@ try:
                     "message": f"句子 {sentence_idx + 1} 上传成功",
                     "sentence_index": sentence_idx,
                     "audio_path": final_audio_path,
-                    "text_path": text_path
+                    "text_path": text_path,
+                    "purify_enqueued": bool(upload_purify_enabled and idx_tag >= 0),
+                    "purify_available": bool(_AUDIO_PURIFY_AVAILABLE),
                 }, status_code=200)
                 
             except ValueError:
@@ -9129,13 +12646,7 @@ try:
             """查询用户已上传的句子索引列表"""
             try:
                 model_version = "v2Pro"
-                # 确保使用绝对路径（DATASET_DIR 可能是相对路径）
-                if os.path.isabs(DATASET_DIR):
-                    dataset_base = DATASET_DIR
-                else:
-                    # 获取项目根目录（以进程工作目录为准）
-                    dataset_base = os.path.join(now_dir, DATASET_DIR)
-                user_dataset_dir = os.path.join(dataset_base, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 
                 # 检查目录是否存在
                 if not os.path.exists(user_dataset_dir):
@@ -9174,6 +12685,11 @@ try:
                 
                 valid_pairs, weak_pairs = _collect_valid_dataset_pairs(user_dataset_dir, sentence_only=True)
                 valid_sentence_count = len(valid_pairs)
+                total_valid_audio_seconds = _sum_valid_audio_seconds(valid_pairs)
+                can_start_training = (
+                    valid_sentence_count >= MIN_TRAIN_SENTENCE_COUNT
+                    and (total_valid_audio_seconds + 1e-6) >= MIN_TRAIN_TOTAL_AUDIO_SECONDS
+                )
 
                 return JSONResponse({
                     "code": 200,
@@ -9181,7 +12697,9 @@ try:
                     "valid_sentence_count": valid_sentence_count,
                     "weak_sentence_count": weak_pairs,
                     "min_required_sentences": MIN_TRAIN_SENTENCE_COUNT,
-                    "can_start_training": valid_sentence_count >= MIN_TRAIN_SENTENCE_COUNT,
+                    "valid_audio_seconds": round(total_valid_audio_seconds, 2),
+                    "min_required_audio_seconds": MIN_TRAIN_TOTAL_AUDIO_SECONDS,
+                    "can_start_training": can_start_training,
                     "message": f"已查询到 {len(uploaded_indices)} 句已上传"
                 }, status_code=200)
                 
@@ -9203,13 +12721,7 @@ try:
         ):
             """列出用户数据集目录中的所有文本和音频文件，返回文件列表和文本内容"""
             try:
-                # 确保使用绝对路径（DATASET_DIR 可能是相对路径）
-                if os.path.isabs(DATASET_DIR):
-                    dataset_base = DATASET_DIR
-                else:
-                    # 获取项目根目录（以进程工作目录为准）
-                    dataset_base = os.path.join(now_dir, DATASET_DIR)
-                user_dataset_dir = os.path.join(dataset_base, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 
                 if not os.path.exists(user_dataset_dir):
                     return JSONResponse({
@@ -9280,14 +12792,7 @@ try:
         ):
             """获取已上传的音频文件，用于前端试听"""
             try:
-                # 确保使用绝对路径（DATASET_DIR 可能是相对路径）
-                if os.path.isabs(DATASET_DIR):
-                    dataset_base = DATASET_DIR
-                else:
-                    # 获取项目根目录（以进程工作目录为准）
-                    dataset_base = os.path.join(now_dir, DATASET_DIR)
-                
-                user_dataset_dir = os.path.join(dataset_base, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 audio_path = os.path.join(user_dataset_dir, f"sentence_{sentence_index}.wav")
                 
                 logger.info(f"[get_uploaded_audio] 请求参数: user_id={user_id}, sentence_index={sentence_index}, model_version={model_version}")
@@ -9423,19 +12928,20 @@ try:
             """从已上传的逐句数据开始训练"""
             try:
                 json_data = await request.json()
-                # 用户编号即模型名：模型名与 user_id 绑定
                 user_id = (json_data.get("user_id") or json_data.get("model_name") or "wx_clone_user").strip()
-                model_name = (json_data.get("model_name") or "").strip()
-                # 如果前端未单独提供 model_name，则使用 user_id 作为模型名
-                if not model_name:
-                    model_name = user_id
-                # 强制约定：模型名等于用户编号，避免前后不一致
-                model_name = user_id
+                requested_model_name = (json_data.get("model_name") or "").strip()
+                role_key = str(json_data.get("role_key") or "").strip()
+                custom_role_name = str(json_data.get("custom_role_name") or "").strip()
+                model_name, normalized_role_key = _normalize_train_model_name(
+                    user_id=user_id,
+                    requested_model_name=requested_model_name,
+                    role_key=role_key,
+                    custom_role_name=custom_role_name,
+                )
                 language = json_data.get("language", "中文")
                 scene = json_data.get("scene", "绘本故事")
                 emotion = json_data.get("emotion", "中性")
-                fast_mode = bool(json_data.get("fast_mode", True))
-                req_epochs = int(json_data.get("epochs", 5 if fast_mode else 30))
+                fast_mode = _coerce_bool_param(json_data.get("fast_mode"), False)
 
                 raw_session_uploaded_sentences = json_data.get("session_uploaded_sentences", None)
                 session_uploaded_sentences = None
@@ -9496,7 +13002,7 @@ try:
                 
                 # 检查用户数据集目录
                 model_version = "v2Pro"
-                user_dataset_dir = os.path.join(DATASET_DIR, user_id, model_version)
+                user_dataset_dir = _resolve_user_dataset_dir(user_id, model_version)
                 
                 if not os.path.exists(user_dataset_dir):
                     return {
@@ -9512,6 +13018,13 @@ try:
                     return {
                         "code": 400,
                         "message": _build_train_min_sentence_message(valid_sentence_count, weak_pairs)
+                    }
+
+                total_valid_audio_seconds = _sum_valid_audio_seconds(valid_pairs)
+                if (total_valid_audio_seconds + 1e-6) < MIN_TRAIN_TOTAL_AUDIO_SECONDS:
+                    return {
+                        "code": 400,
+                        "message": _build_train_min_total_audio_message(total_valid_audio_seconds)
                     }
 
                 # 若前端提供了“本轮上传索引”，则额外校验本轮有效句数，避免历史残留数据误触发训练
@@ -9555,17 +13068,22 @@ try:
                     language=language,
                     scene=scene,
                     emotion=emotion,
-                    fast_mode=fast_mode,
-                    epochs=req_epochs,
+                    fast_mode=bool(fast_mode),
+                    epochs=30,
                     batch_size=4,
                     model_version=model_version
                 )
                 
                 # 准备路径
-                output_path = os.path.join(TRAIN_OUTPUT_DIR, user_id, task_id)
+                output_path = _resolve_user_model_output_dir(user_id, task_id)
                 log_path = os.path.join(TRAIN_LOG_DIR, f"{task_id}.log")
                 os.makedirs(output_path, exist_ok=True)
                 os.makedirs(TRAIN_LOG_DIR, exist_ok=True)
+                _inject_upload_step1_outputs(
+                    user_dataset_dir=user_dataset_dir,
+                    output_path=output_path,
+                    log_path=log_path,
+                )
                 
                 # 初始化训练任务状态
                 train_tasks[task_id] = {
@@ -9578,10 +13096,14 @@ try:
                     "language": language,
                     "scene": scene,
                     "emotion": emotion,
+                    "fast_mode": bool(fast_mode),
                     "user_id": user_id,
+                    "role_key": normalized_role_key,
+                    "custom_role_name": custom_role_name,
                     "version": model_version,
                     "dataset_type": "sentences",  # 标记为逐句数据集
                     "sentence_count": valid_sentence_count,
+                    "valid_audio_seconds": round(total_valid_audio_seconds, 2),
                     "log_path": log_path,
                     "model_path": ""
                 }
@@ -9666,15 +13188,21 @@ try:
                 )
                 
                 # 准备路径
-                dataset_path = os.path.join(DATASET_DIR, params.user_id, params.model_version)
+                dataset_path = _resolve_user_dataset_dir(params.user_id, params.model_version)
                 valid_pairs, weak_pairs = _collect_valid_dataset_pairs(dataset_path, sentence_only=False)
                 if len(valid_pairs) < MIN_TRAIN_SENTENCE_COUNT:
                     return {
                         "code": 400,
                         "message": _build_train_min_sentence_message(len(valid_pairs), weak_pairs)
                     }
+                total_valid_audio_seconds = _sum_valid_audio_seconds(valid_pairs)
+                if (total_valid_audio_seconds + 1e-6) < MIN_TRAIN_TOTAL_AUDIO_SECONDS:
+                    return {
+                        "code": 400,
+                        "message": _build_train_min_total_audio_message(total_valid_audio_seconds)
+                    }
 
-                output_path = os.path.join(TRAIN_OUTPUT_DIR, params.user_id, task_id)
+                output_path = _resolve_user_model_output_dir(params.user_id, task_id)
                 log_path = os.path.join(TRAIN_LOG_DIR, f"{task_id}.log")
                 os.makedirs(output_path, exist_ok=True)
                 
@@ -9770,7 +13298,7 @@ try:
                 return {"code": 400, "message": f"模型版本无效，支持版本：{model_versions}"}
             
             # 检查数据集是否存在
-            dataset_path = os.path.join(DATASET_DIR, params.user_id, params.model_version)
+            dataset_path = _resolve_user_dataset_dir(params.user_id, params.model_version)
             if not os.path.exists(dataset_path):
                 return {"code": 400, "message": f"用户数据集目录不存在: {dataset_path}"}
 
@@ -9779,6 +13307,12 @@ try:
                 return {
                     "code": 400,
                     "message": _build_train_min_sentence_message(len(valid_pairs), weak_pairs)
+                }
+            total_valid_audio_seconds = _sum_valid_audio_seconds(valid_pairs)
+            if (total_valid_audio_seconds + 1e-6) < MIN_TRAIN_TOTAL_AUDIO_SECONDS:
+                return {
+                    "code": 400,
+                    "message": _build_train_min_total_audio_message(total_valid_audio_seconds)
                 }
 
             # 创建任务ID和输出目录
